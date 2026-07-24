@@ -1,989 +1,1699 @@
 import AppKit
 import QuartzCore
 
-// MARK: — Геройный показатель шапки «Железа» (крупная цифра + тонкая полоска-уровень)
+// MARK: - Shared helpers
 
-/// V4 (владелец: «круги с цифрами не очень красиво»): вместо дуги-кольца — плиточная грамматика
-/// Control Center: КРУПНАЯ цифра, подпись под ней, тонкая 2pt полоска-андерлайн (цвет = уровень,
-/// длина = доля шкалы). Два стиля: .hero (CPU/GPU, display-размер) и .chip (компакт: ГОРЯЧЕЕ/Вт/Турбо).
-/// API set(...) сохранён 1-в-1 — applyGauges не меняется.
+private extension NSColor {
+    func hardwareAdjusted(isDark: Bool) -> NSColor {
+        guard !isDark else { return self }
+        return blended(withFraction: 0.18, of: .black) ?? self
+    }
+}
+
+private final class HardwareCGImageBox: NSObject {
+    let image: CGImage
+    init(_ image: CGImage) { self.image = image }
+}
+
+/// Небольшой общий кэш SF Symbols для строк таблицы. В исходной версии каждый экземпляр строки
+/// растеризовал символ самостоятельно; при прокрутке и смене темы это давало лишнюю работу на main.
+private enum HardwareSymbolCache {
+    private static let cache = NSCache<NSString, HardwareCGImageBox>()
+
+    static func image(_ name: String, color: NSColor, pointSize: CGFloat, scale: CGFloat) -> CGImage? {
+        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        let key = String(
+            format: "%@|%.1f|%.2f|%.3f|%.3f|%.3f|%.3f",
+            name,
+            pointSize,
+            scale,
+            rgb.redComponent,
+            rgb.greenComponent,
+            rgb.blueComponent,
+            rgb.alphaComponent
+        ) as NSString
+        if let cached = cache.object(forKey: key) { return cached.image }
+
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+            .applying(.init(paletteColors: [color]))
+        let image = base.withSymbolConfiguration(config) ?? base
+        var proposed = CGRect(origin: .zero, size: image.size)
+        guard let cg = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return nil }
+        cache.setObject(HardwareCGImageBox(cg), forKey: key)
+        return cg
+    }
+}
+
+// MARK: - Header metric
+
+/// Компактный приборный показатель шапки.
+///
+/// `.hero` используется для CPU/GPU: подпись, крупное значение и тонкая шкала.
+/// `.chip` используется для вторичных метрик: значение и название в одну строку.
+/// Публичный API `set(...)` сохранён, поэтому вызывающий код менять не требуется.
 final class HeroGauge: NSView {
-    enum Kind { case temp, watt, turbo, turboWarn }   // turbo = доля номинала (турбо/троттл), Warn = троттлинг под нагрузкой
+    enum Kind { case temp, watt, turbo, turboWarn }
     enum Style { case hero, chip }
+
     private let style: Style
-    private let track = CALayer()          // подложка полоски
-    private let fill = CALayer()           // заливка-доля (цвет = уровень)
+    private let surface = CALayer()
+    private let track = CALayer()
+    private let fill = CALayer()
     private let valueText = NSTextField(labelWithString: "—")
     private let capText = NSTextField(labelWithString: "")
-    private var frac: CGFloat = 0
-    private var kind: Kind = .temp
+
+    private var fraction: CGFloat = 0
     private var accent: NSColor = .systemTeal
     private var axValue = "—"
 
-    init(style: Style) { self.style = style; super.init(frame: .zero); commonInit() }
-    override init(frame: NSRect) { self.style = .hero; super.init(frame: frame); commonInit() }
-    required init?(coder: NSCoder) { self.style = .hero; super.init(coder: coder); commonInit() }
-    override var isFlipped: Bool { false }
+    init(style: Style) {
+        self.style = style
+        super.init(frame: .zero)
+        commonInit()
+    }
+
+    override init(frame frameRect: NSRect) {
+        style = .hero
+        super.init(frame: frameRect)
+        commonInit()
+    }
+
+    required init?(coder: NSCoder) {
+        style = .hero
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    private var isDark: Bool {
+        effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
 
     private func commonInit() {
         wantsLayer = true
         layer?.masksToBounds = false
-        track.cornerRadius = 1; fill.cornerRadius = 1
+
+        surface.cornerCurve = .continuous
+        surface.cornerRadius = style == .hero ? 8 : 6
+        layer?.addSublayer(surface)
+
+        track.cornerRadius = 1
+        fill.cornerRadius = 1
+        fill.anchorPoint = CGPoint(x: 0, y: 0.5)
         layer?.addSublayer(track)
         layer?.addSublayer(fill)
 
-        // Герой — display-цифра (20pt mono semibold), чип — тихая 12pt. Цифре больше не тесно в кольце.
-        valueText.font = style == .hero ? Design.Font.mono(20, .semibold) : Design.Font.numericBody
-        valueText.alignment = .left
+        valueText.font = style == .hero ? Design.Font.mono(19, .semibold) : Design.Font.numericBody
+        valueText.textColor = .labelColor
         valueText.maximumNumberOfLines = 1
         valueText.lineBreakMode = .byClipping
         valueText.cell?.usesSingleLineMode = true
         valueText.translatesAutoresizingMaskIntoConstraints = false
         addSubview(valueText)
-        capText.font = Design.Font.sys(style == .hero ? 11 : 9, .regular)
-        capText.textColor = .tertiaryLabelColor
-        capText.alignment = .left
+
+        capText.font = Design.Font.sys(style == .hero ? 10 : 9, style == .hero ? .medium : .regular)
+        capText.textColor = .secondaryLabelColor
         capText.maximumNumberOfLines = 1
         capText.lineBreakMode = .byTruncatingTail
+        capText.cell?.usesSingleLineMode = true
         capText.translatesAutoresizingMaskIntoConstraints = false
         addSubview(capText)
-        if style == .hero {
+
+        switch style {
+        case .hero:
+            capText.alignment = .left
+            valueText.alignment = .left
             NSLayoutConstraint.activate([
-                valueText.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-                valueText.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-                valueText.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),
-                capText.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-                capText.topAnchor.constraint(equalTo: valueText.bottomAnchor, constant: 1),
-                capText.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),
+                capText.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+                capText.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+                capText.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
+
+                valueText.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+                valueText.topAnchor.constraint(equalTo: capText.bottomAnchor, constant: -1),
+                valueText.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
             ])
-        } else {
-            // чип: значение и подпись в одну строку (значение слева, подпись за ним «шёпотом»)
+        case .chip:
+            valueText.alignment = .left
+            capText.alignment = .right
             NSLayoutConstraint.activate([
-                valueText.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+                valueText.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
                 valueText.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -1),
-                capText.leadingAnchor.constraint(equalTo: valueText.trailingAnchor, constant: 5),
-                capText.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),
+                valueText.widthAnchor.constraint(greaterThanOrEqualToConstant: 27),
+
+                capText.leadingAnchor.constraint(greaterThanOrEqualTo: valueText.trailingAnchor, constant: 5),
+                capText.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
                 capText.firstBaselineAnchor.constraint(equalTo: valueText.firstBaselineAnchor),
             ])
         }
+
+        updateAppearance()
     }
 
     override func layout() {
         super.layout()
-        // полоска-уровень у нижней кромки: подложка во всю ширину, заливка = доля
-        let barH: CGFloat = 2
-        let w = bounds.width - 4
-        track.frame = CGRect(x: 2, y: 1, width: w, height: barH)
-        fill.frame = CGRect(x: 2, y: 1, width: w * frac, height: barH)
-        updateColors()
+        let barHeight: CGFloat = 2
+        let inset: CGFloat = style == .hero ? 8 : 7
+        let width = max(0, bounds.width - inset * 2)
+
+        surface.frame = bounds
+        track.frame = CGRect(x: inset, y: 3, width: width, height: barHeight)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fill.position = CGPoint(x: inset, y: 3 + barHeight / 2)
+        fill.bounds = CGRect(x: 0, y: 0, width: width * fraction, height: barHeight)
+        CATransaction.commit()
+
+        updateAppearance()
     }
 
-    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateColors() }
-    private func updateColors() {
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        surface.backgroundColor = (isDark
+            ? NSColor.white.withAlphaComponent(style == .hero ? 0.055 : 0.035)
+            : NSColor.black.withAlphaComponent(style == .hero ? 0.035 : 0.025)).cgColor
+        surface.borderWidth = 0.5
+        surface.borderColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.07)
+            : NSColor.black.withAlphaComponent(0.06)).cgColor
         track.backgroundColor = Design.Color.trackFill(isDark).cgColor
         fill.backgroundColor = accent.cgColor
     }
 
-    /// Подать значение в гейдж. value — число (°C или Вт), text — готовая подпись цифры в центре,
-    /// cap — подпись снизу. Цвет/доля дуги вычисляются по kind.
-    /// level — ЧЕСТНЫЙ per-sensor уровень (Design.sensorLevel по id датчика); передаёт вызывающий,
-    /// т.к. только он знает id. Без него (nil) для .temp падаем на общий Design.tempLevel.
+    /// Обновляет значение и уровень. Порог температуры может быть передан вызывающим через `level`,
+    /// поскольку только он знает идентификатор конкретного сенсора.
     func set(value: Double?, text: String, cap: String, kind: Kind, level: Design.Level? = nil) {
-        self.kind = kind
         capText.stringValue = cap
         axValue = text
-        guard let v = value, v.isFinite else {
+
+        guard let value, value.isFinite else {
             valueText.stringValue = "—"
-            frac = 0
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            fill.frame.size.width = 0; CATransaction.commit()
+            valueText.textColor = .tertiaryLabelColor
+            setFraction(0, animated: false)
             return
         }
+
         valueText.stringValue = text
+        valueText.textColor = .labelColor
+
         switch kind {
         case .temp:
-            frac = CGFloat(max(0, min(1, (v - 35) / 60)))     // 35°→0, 95°→1 (как чипы)
+            fraction = CGFloat(max(0, min(1, (value - 35) / 60)))
             let raw: NSColor
-            switch level ?? Design.tempLevel(v) {             // честный порог датчика: CPU крит ≥100°, не ≥85°
-            case .ok:   raw = Design.Color.levelOK
+            switch level ?? Design.tempLevel(value) {
+            case .ok: raw = Design.Color.levelOK
             case .warn: raw = Design.Color.levelWarn
             case .crit: raw = Design.Color.levelCrit
             }
-            accent = isDark ? raw : (raw.blended(withFraction: 0.18, of: .black) ?? raw)
+            accent = raw.hardwareAdjusted(isDark: isDark)
+
         case .watt:
-            frac = CGFloat(max(0, min(1, v / 60)))            // 0..60 Вт шкала системы
+            fraction = CGFloat(max(0, min(1, value / 60)))
             accent = Design.Color.accent(isDark)
+
         case .turbo:
-            frac = CGFloat(max(0, min(1, v)))                 // доля номинала: 100%+ = полная дуга
+            fraction = CGFloat(max(0, min(1, value)))
             accent = Design.Color.accent(isDark)
-        case .turboWarn:                                      // троттлинг: та же дуга, но оранжевая
-            frac = CGFloat(max(0, min(1, v)))
-            let o = Design.Color.levelWarn
-            accent = isDark ? o : (o.blended(withFraction: 0.18, of: .black) ?? o)
+
+        case .turboWarn:
+            fraction = CGFloat(max(0, min(1, value)))
+            accent = Design.Color.levelWarn.hardwareAdjusted(isDark: isDark)
         }
-        valueText.textColor = .labelColor
+
         fill.backgroundColor = accent.cgColor
-        // смена значения — плавная анимация ширины полоски (durValue), под reduced — мгновенно
+        setFraction(fraction, animated: true)
+    }
+
+    private func setFraction(_ value: CGFloat, animated: Bool) {
+        fraction = max(0, min(1, value))
+        let available = max(0, bounds.width - (style == .hero ? 16 : 14))
+        let target = available * fraction
+        let current = fill.presentation()?.bounds.width ?? fill.bounds.width
+
         CATransaction.begin()
-        CATransaction.setAnimationDuration(Motion.reduced ? 0 : Design.Motion.durValue)
-        fill.frame.size.width = max(0, (bounds.width - 4)) * frac
+        CATransaction.setDisableActions(true)
+        var bounds = fill.bounds
+        bounds.size.width = target
+        fill.bounds = bounds
         CATransaction.commit()
+
+        guard animated, !Motion.reduced, abs(current - target) > 0.5 else { return }
+        let animation = CABasicAnimation(keyPath: "bounds.size.width")
+        animation.fromValue = current
+        animation.toValue = target
+        animation.duration = Design.Motion.durValue
+        animation.timingFunction = Design.Motion.easeStandard
+        fill.add(animation, forKey: "value")
     }
 
-    /// Свип полоски с нуля при открытии вкладки (аналог прежнего дугового sweep).
     func animateIn() {
-        let target = max(0, (bounds.width - 4)) * frac
-        guard !Motion.reduced else { fill.frame.size.width = target; return }
-        fill.frame.size.width = target
-        let a = CABasicAnimation(keyPath: "bounds.size.width")
-        a.fromValue = 0; a.toValue = target
-        a.duration = Design.Motion.durSweep
-        a.timingFunction = Design.Motion.easeStandard
-        fill.add(a, forKey: "sweep")
+        let available = max(0, bounds.width - (style == .hero ? 16 : 14))
+        let target = available * fraction
+        guard !Motion.reduced, target > 0 else {
+            setFraction(fraction, animated: false)
+            return
+        }
+        fill.removeAnimation(forKey: "sweep")
+        let animation = CABasicAnimation(keyPath: "bounds.size.width")
+        animation.fromValue = 0
+        animation.toValue = target
+        animation.duration = Design.Motion.durSweep
+        animation.timingFunction = Design.Motion.easeStandard
+        fill.add(animation, forKey: "sweep")
     }
 
-    // VoiceOver: индикатор уровня (роль/подпись/значение, как ChargeRing)
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .levelIndicator }
     override func accessibilityLabel() -> String? { capText.stringValue }
     override func accessibilityValue() -> Any? { axValue }
 }
 
-// MARK: — Строка каталога (класс-глиф + имя/FourCC + спарклайн + значение справа)
+// MARK: - Sparkline
 
-/// Одна строка скролл-ленты. Кликабельна (тап-пин), даёт VoiceOver и hover→разбор.
-/// Геометрия трассы-спарклайна клонирует renderTrace из SensorsView (встыковые сегменты + кромка).
-final class CatalogRowView: NSView {
-    let id: String
-    private let cls: SensorClass
-    private let isRaw: Bool
-    private let glyph = CALayer()
-    private let nameLayer = CATextLayer()
-    private let valueLayer = CATextLayer()
-    private let trace = CALayer()
-    private let line = CAShapeLayer()
-    private let pinDot = CATextLayer()
-    private let scale: CGFloat = 2
+/// Один fill-path + один stroke-path вместо отдельного CALayer на каждый сэмпл.
+/// Даже длинная история теперь всегда стоит двух слоёв и не раздувает layer tree при скролле.
+private final class SensorSparklineView: NSView {
+    private let fillLayer = CAShapeLayer()
+    private let lineLayer = CAShapeLayer()
+    private var history: [Double] = []
+    private var tint: NSColor = .secondaryLabelColor
+    private var decodable = true
 
-    var onHover: ((String?) -> Void)?
-    var onClick: ((String) -> Void)?
-    var axLabel = ""
-    private(set) var pinned = false
-
-    init(id: String, cls: SensorClass, isRaw: Bool) {
-        self.id = id; self.cls = cls; self.isRaw = isRaw
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = Design.Radius.hwTile; layer?.cornerCurve = .continuous   // B3: было 6
-        layer?.masksToBounds = false
-
-        glyph.contentsGravity = .resizeAspect; glyph.contentsScale = scale
-        layer?.addSublayer(glyph)
-        nameLayer.contentsScale = scale; nameLayer.truncationMode = .end; nameLayer.isWrapped = false
-        layer?.addSublayer(nameLayer)
-        valueLayer.contentsScale = scale; valueLayer.alignmentMode = .right
-        valueLayer.truncationMode = .end; valueLayer.isWrapped = false
-        layer?.addSublayer(valueLayer)
-        trace.masksToBounds = false
-        layer?.addSublayer(trace)
-        line.fillColor = nil; line.lineWidth = 0.75; line.lineJoin = .round; line.lineCap = .round
-        line.contentsScale = scale; line.isHidden = true
-        trace.addSublayer(line)
-        pinDot.contentsScale = scale; pinDot.alignmentMode = .right; pinDot.isHidden = true
-        layer?.addSublayer(pinDot)
-        focusRingType = .default
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
     }
-    required init?(coder: NSCoder) { fatalError() }
-    override var isFlipped: Bool { true }
-    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
+        wantsLayer = true
+        layer?.masksToBounds = true
+        lineLayer.fillColor = nil
+        lineLayer.lineWidth = 1
+        lineLayer.lineCap = .round
+        lineLayer.lineJoin = .round
+        layer?.addSublayer(fillLayer)
+        layer?.addSublayer(lineLayer)
+    }
+
+    func apply(history: [Double], tint: NSColor, decodable: Bool) {
+        self.history = history
+        self.tint = tint
+        self.decodable = decodable
+        needsLayout = true
+    }
 
     override func layout() {
         super.layout()
-        let h = bounds.height, w = bounds.width
-        let isz: CGFloat = 12
-        glyph.frame = CGRect(x: 4, y: (h - isz) / 2, width: isz, height: isz)
-        // значение справа (моноширинно), спарклайн слева от него
-        let valW: CGFloat = 70
-        // высота слоёв 16 (было 13) — 12-13pt шрифт с нижними выносными («р»/«у»/«ф») больше не клиппится снизу
-        valueLayer.frame = CGRect(x: w - valW - 2, y: (h - 16) / 2, width: valW, height: 16)
-        let traceW: CGFloat = 34, traceH: CGFloat = 12
-        trace.frame = CGRect(x: w - valW - traceW - 8, y: (h - traceH) / 2, width: traceW, height: traceH)
-        let nameX = 4 + isz + 6
-        nameLayer.frame = CGRect(x: nameX, y: (h - 16) / 2, width: trace.frame.minX - nameX - 6, height: 16)
-        pinDot.frame = CGRect(x: w - valW - 2, y: 1, width: valW, height: 8)
+        redraw()
     }
 
-    private func capsTint() -> NSColor {
-        switch cls {
-        case .temp:  return isDark ? .systemOrange : (NSColor.systemOrange.blended(withFraction: 0.2, of: .black) ?? .systemOrange)
-        case .volt:  return isDark ? .systemYellow : (NSColor.systemYellow.blended(withFraction: 0.2, of: .black) ?? .systemYellow)
-        case .curr:  return isDark ? .systemTeal : (NSColor.systemTeal.blended(withFraction: 0.2, of: .black) ?? .systemTeal)
-        case .power: return isDark ? .systemOrange : (NSColor.systemOrange.blended(withFraction: 0.2, of: .black) ?? .systemOrange)
-        case .fan:   return isDark ? .systemTeal : (NSColor.systemTeal.blended(withFraction: 0.2, of: .black) ?? .systemTeal)
-        case .batt:  return isDark ? .systemGreen : (NSColor.systemGreen.blended(withFraction: 0.2, of: .black) ?? .systemGreen)
-        case .other: return .secondaryLabelColor
-        }
-    }
-    private func glyphSymbol() -> String {
-        switch cls {
-        case .temp:  return "thermometer.medium"
-        case .volt:  return "bolt.fill"
-        case .curr:  return "bolt.horizontal.fill"
-        case .power: return "powerplug.fill"
-        case .fan:   return "fanblades.fill"
-        case .batt:  return "battery.50"
-        case .other: return "number"
-        }
-    }
-
-    private var glyphSet = false                 // глиф растеризуется один раз (не каждый тик)
-    private var lastAppliedText = ""             // скип-кэш: неизменившаяся строка не перерисовывается
-    private var lastHistLast: Double?
-    private var lastHistFirst: Double?           // первый+count в ключе: окно истории сдвигается и при стабильном значении
-    private var lastHistCount = -1
-
-    func apply(_ row: CatalogRow, pinned: Bool, animate: Bool) {
-        // СКИП неизменившихся: у большинства видимых строк значение стабильно между тиками —
-        // без раннего выхода каждая перерисовывала attrString+трассу ежесекундно (вклад во фризы).
-        // В ключе и КРАЯ истории (first/count): иначе трасса замирала бы, пока старый пик уезжает из окна.
-        if glyphSet, lastAppliedText == row.text, lastHistLast == row.history.last,
-           lastHistFirst == row.history.first, lastHistCount == row.history.count, self.pinned == pinned { return }
-        self.pinned = pinned
-        lastAppliedText = row.text
-        lastHistLast = row.history.last
-        lastHistFirst = row.history.first
-        lastHistCount = row.history.count
-        let tint = capsTint()
-        let nameStr = row.key.displayName
-        let nameFont: NSFont = isRaw ? Design.Font.numericBody : Design.Font.body
-        let nameColor: NSColor = row.key.decodable ? .labelColor : .tertiaryLabelColor
-        nameLayer.font = nameFont; nameLayer.fontSize = nameFont.pointSize
-        nameLayer.string = nameStr
-        nameLayer.foregroundColor = nameColor.cgColor
-        valueLayer.font = Design.Font.numericBody; valueLayer.fontSize = Design.Font.numericBody.pointSize
-        valueLayer.string = valueAttr(row)
-        if !glyphSet { glyph.contents = symbolCG(glyphSymbol(), tint, 12); glyphSet = true }
-        pinDot.string = pinned ? NSAttributedString(string: "•",
-            attributes: [.font: Design.Font.numericMicro, .foregroundColor: tint]) : nil
-        pinDot.isHidden = !pinned
-        axLabel = axText(row)
+    private func redraw() {
         CATransaction.begin()
-        CATransaction.setAnimationDuration((animate && !Motion.reduced) ? Design.Motion.durValue : 0)
-        renderTrace(row.history, tint, decodable: row.key.decodable)
-        CATransaction.commit()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        guard decodable, history.count >= 2, bounds.width > 2, bounds.height > 2 else {
+            fillLayer.path = nil
+            lineLayer.path = nil
+            return
+        }
+
+        let finite = history.filter(\.isFinite)
+        guard finite.count >= 2, let low = finite.min(), let high = finite.max() else {
+            fillLayer.path = nil
+            lineLayer.path = nil
+            return
+        }
+
+        let span = max(high - low, 0.0001)
+        let width = bounds.width
+        let height = bounds.height
+        let topInset: CGFloat = 1
+        let bottomInset: CGFloat = 1
+        let drawableHeight = max(1, height - topInset - bottomInset)
+        let step = width / CGFloat(max(history.count - 1, 1))
+
+        func point(index: Int, value: Double) -> CGPoint {
+            let normalized = CGFloat(max(0, min(1, (value - low) / span)))
+            return CGPoint(
+                x: CGFloat(index) * step,
+                y: height - bottomInset - normalized * drawableHeight
+            )
+        }
+
+        let line = CGMutablePath()
+        var firstPoint: CGPoint?
+        var lastPoint: CGPoint?
+        for (index, value) in history.enumerated() where value.isFinite {
+            let p = point(index: index, value: value)
+            if firstPoint == nil {
+                firstPoint = p
+                line.move(to: p)
+            } else {
+                line.addLine(to: p)
+            }
+            lastPoint = p
+        }
+
+        guard let firstPoint, let lastPoint else {
+            fillLayer.path = nil
+            lineLayer.path = nil
+            return
+        }
+
+        let fill = CGMutablePath()
+        fill.move(to: CGPoint(x: firstPoint.x, y: height))
+        fill.addLine(to: firstPoint)
+        fill.addPath(line)
+        fill.addLine(to: CGPoint(x: lastPoint.x, y: height))
+        fill.closeSubpath()
+
+        fillLayer.frame = bounds
+        lineLayer.frame = bounds
+        fillLayer.path = fill
+        fillLayer.fillColor = tint.withAlphaComponent(0.12).cgColor
+        lineLayer.path = line
+        lineLayer.strokeColor = tint.withAlphaComponent(0.85).cgColor
+    }
+}
+
+// MARK: - Sensor row
+
+/// Переиспользуемая строка NSTableView. Один клик выбирает сенсор для разбора;
+/// отдельная кнопка pin делает действие очевидным и больше не превращает всю строку в скрытый переключатель.
+final class CatalogRowView: NSView {
+    private let glyph = CALayer()
+    private let nameLayer = CATextLayer()
+    private let rawLayer = CATextLayer()
+    private let valueLayer = CATextLayer()
+    private let sparkline = SensorSparklineView()
+    private let pinButton = NSButton()
+
+    private(set) var id = ""
+    private var sensorClass: SensorClass = .other
+    private var isRaw = false
+    private var row: CatalogRow?
+    private var hoverOn = false
+    private var selectedOn = false
+    private(set) var pinned = false
+    private var tracking: NSTrackingArea?
+    private var lastSignature = ""
+    private var lastHistoryFirst: Double?
+    private var lastHistoryLast: Double?
+    private var lastHistoryCount = -1
+
+    var onHover: ((String?) -> Void)?
+    var onActivate: ((String) -> Void)?
+    var onPin: ((String) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
+    }
+
+    convenience init(id: String, cls: SensorClass, isRaw: Bool) {
+        self.init(frame: .zero)
+        configure(id: id, cls: cls, isRaw: isRaw)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    override var isFlipped: Bool { true }
+
+    private var isDark: Bool {
+        effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    private var backingScale: CGFloat {
+        window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    private func commonInit() {
+        wantsLayer = true
+        layer?.cornerRadius = Design.Radius.hwTile
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = false
+        focusRingType = .default
+
+        glyph.contentsGravity = .resizeAspect
+        layer?.addSublayer(glyph)
+
+        for textLayer in [nameLayer, rawLayer, valueLayer] {
+            textLayer.truncationMode = .end
+            textLayer.isWrapped = false
+            layer?.addSublayer(textLayer)
+        }
+        valueLayer.alignmentMode = .right
+
+        sparkline.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(sparkline)
+
+        pinButton.isBordered = false
+        pinButton.bezelStyle = .inline
+        pinButton.imagePosition = .imageOnly
+        pinButton.contentTintColor = .tertiaryLabelColor
+        pinButton.target = self
+        pinButton.action = #selector(pinPressed)
+        pinButton.toolTip = L("Закрепить сенсор")
+        pinButton.setAccessibilityLabel(L("Закрепить сенсор"))
+        addSubview(pinButton)
+
+        updateLayerScale()
+        updateVisualState(animated: false)
+    }
+
+    func configure(id: String, cls: SensorClass, isRaw: Bool) {
+        let identityChanged = self.id != id || sensorClass != cls || self.isRaw != isRaw
+        self.id = id
+        sensorClass = cls
+        self.isRaw = isRaw
+        if identityChanged {
+            lastSignature = ""
+            lastHistoryFirst = nil
+            lastHistoryLast = nil
+            lastHistoryCount = -1
+            row = nil
+            updateGlyph()
+        }
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        onHover = nil
+        onActivate = nil
+        onPin = nil
+        hoverOn = false
+        selectedOn = false
+        row = nil
+        id = ""
+        lastSignature = ""
+        lastHistoryFirst = nil
+        lastHistoryLast = nil
+        lastHistoryCount = -1
+        updateVisualState(animated: false)
+    }
+
+    override func layout() {
+        super.layout()
+        let height = bounds.height
+        let width = bounds.width
+        let glyphSize: CGFloat = 13
+        let pinWidth: CGFloat = 20
+        let valueWidth: CGFloat = 68
+        let sparkWidth: CGFloat = 42
+        let textHeight: CGFloat = 16
+
+        glyph.frame = CGRect(x: 6, y: (height - glyphSize) / 2, width: glyphSize, height: glyphSize)
+        pinButton.frame = CGRect(x: width - valueWidth - pinWidth - 2, y: (height - 18) / 2, width: 18, height: 18)
+        valueLayer.frame = CGRect(x: width - valueWidth - 3, y: (height - textHeight) / 2, width: valueWidth, height: textHeight)
+        sparkline.frame = CGRect(
+            x: pinButton.frame.minX - sparkWidth - 5,
+            y: (height - 14) / 2,
+            width: sparkWidth,
+            height: 14
+        )
+
+        let nameX: CGFloat = 25
+        let availableName = max(20, sparkline.frame.minX - nameX - 6)
+        if isRaw {
+            let rawWidth = min(42, availableName * 0.38)
+            rawLayer.frame = CGRect(x: nameX, y: (height - textHeight) / 2, width: rawWidth, height: textHeight)
+            nameLayer.frame = CGRect(
+                x: rawLayer.frame.maxX + 5,
+                y: (height - textHeight) / 2,
+                width: max(8, availableName - rawWidth - 5),
+                height: textHeight
+            )
+        } else {
+            rawLayer.frame = .zero
+            nameLayer.frame = CGRect(x: nameX, y: (height - textHeight) / 2, width: availableName, height: textHeight)
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let newArea = NSTrackingArea(
+            rect: .zero,
+            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(newArea)
+        tracking = newArea
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        glyphSet = false; lastAppliedText = ""    // тинт тема-зависим — глиф и строка перерастеризуются
+        updateGlyph()
+        lastSignature = ""
+        if let row { apply(row, pinned: pinned, selected: selectedOn, animate: false) }
+        updateVisualState(animated: false)
     }
 
-    /// Значение right-aligned: число метрикой, единица «шёпотом» (tertiary). Недекодируемое — приглушённо целиком.
-    private func valueAttr(_ row: CatalogRow) -> NSAttributedString {
-        let p = NSMutableParagraphStyle(); p.alignment = .right; p.lineBreakMode = .byTruncatingTail
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateLayerScale()
+        updateGlyph()
+    }
+
+    private func updateLayerScale() {
+        let scale = backingScale
+        glyph.contentsScale = scale
+        nameLayer.contentsScale = scale
+        rawLayer.contentsScale = scale
+        valueLayer.contentsScale = scale
+        sparkline.layer?.contentsScale = scale
+    }
+
+    private func tint() -> NSColor {
+        let color: NSColor
+        switch sensorClass {
+        case .temp: color = .systemOrange
+        case .volt: color = .systemYellow
+        case .curr: color = .systemTeal
+        case .power: color = .systemOrange
+        case .fan: color = .systemTeal
+        case .batt: color = .systemGreen
+        case .other: color = .secondaryLabelColor
+        }
+        return color.hardwareAdjusted(isDark: isDark)
+    }
+
+    private func glyphName() -> String {
+        switch sensorClass {
+        case .temp: return "thermometer.medium"
+        case .volt: return "bolt.fill"
+        case .curr: return "waveform.path.ecg"
+        case .power: return "powerplug.fill"
+        case .fan: return "fanblades.fill"
+        case .batt: return "battery.50"
+        case .other: return "number"
+        }
+    }
+
+    private func updateGlyph() {
+        glyph.contents = HardwareSymbolCache.image(
+            glyphName(),
+            color: tint(),
+            pointSize: 12,
+            scale: backingScale
+        )
+    }
+
+    func apply(_ row: CatalogRow, pinned: Bool, selected: Bool, animate: Bool) {
+        self.row = row
+        self.pinned = pinned
+        selectedOn = selected
+
+        let signature = row.text + "|" + row.key.displayName + "|" + row.key.fourCC + "|" + String(row.key.decodable)
+        let historyChanged = lastHistoryFirst != row.history.first
+            || lastHistoryLast != row.history.last
+            || lastHistoryCount != row.history.count
+
+        if signature != lastSignature {
+            lastSignature = signature
+            renderText(row)
+        }
+        if historyChanged {
+            lastHistoryFirst = row.history.first
+            lastHistoryLast = row.history.last
+            lastHistoryCount = row.history.count
+            sparkline.apply(history: row.history, tint: tint(), decodable: row.key.decodable)
+        }
+
+        updatePin()
+        updateVisualState(animated: animate)
+        setAccessibilityLabel(accessibilityText(row))
+    }
+
+    private func renderText(_ row: CatalogRow) {
+        let nameFont = isRaw ? Design.Font.caption : Design.Font.body
+        nameLayer.font = nameFont
+        nameLayer.fontSize = nameFont.pointSize
+        nameLayer.foregroundColor = (row.key.decodable ? NSColor.labelColor : NSColor.tertiaryLabelColor).cgColor
+        nameLayer.string = row.key.displayName
+
+        rawLayer.font = Design.Font.numericMicro
+        rawLayer.fontSize = Design.Font.numericMicro.pointSize
+        rawLayer.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+        rawLayer.string = isRaw ? row.key.fourCC : nil
+        rawLayer.isHidden = !isRaw
+
+        valueLayer.font = Design.Font.numericBody
+        valueLayer.fontSize = Design.Font.numericBody.pointSize
+        valueLayer.string = valueAttributedString(row)
+    }
+
+    private func valueAttributedString(_ row: CatalogRow) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .right
+        paragraph.lineBreakMode = .byTruncatingTail
+
         guard row.key.decodable, row.value != nil else {
-            // Недекодируемое: длинная фраза «значение не декодируется» рвалась в 70pt-колонке →
-            // показываем «—», полное объяснение остаётся в hover-разборе (rowDetail/axText).
             return NSAttributedString(string: "—", attributes: [
-                .font: Design.Font.numericBody, .foregroundColor: NSColor.tertiaryLabelColor, .paragraphStyle: p])
+                .font: Design.Font.numericBody,
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .paragraphStyle: paragraph,
+            ])
         }
-        // отделяем единицу (последнее слово после пробела) — печатаем её шёпотом
-        let t = row.text
-        let a = NSMutableAttributedString()
-        if let sp = t.lastIndex(of: " ") {
-            let num = String(t[..<sp]); let unit = String(t[t.index(after: sp)...])
-            a.append(NSAttributedString(string: num + " ", attributes: [
-                .font: Design.Font.numericBody, .foregroundColor: NSColor.labelColor, .paragraphStyle: p]))
-            a.append(NSAttributedString(string: unit, attributes: [
-                .font: Design.Font.numericMicro, .foregroundColor: NSColor.tertiaryLabelColor, .paragraphStyle: p]))
+
+        let attributed = NSMutableAttributedString()
+        let text = row.text
+        if let split = text.lastIndex(of: " ") {
+            let number = String(text[..<split])
+            let unit = String(text[text.index(after: split)...])
+            attributed.append(NSAttributedString(string: number + " ", attributes: [
+                .font: Design.Font.numericBody,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph,
+            ]))
+            attributed.append(NSAttributedString(string: unit, attributes: [
+                .font: Design.Font.numericMicro,
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .paragraphStyle: paragraph,
+            ]))
         } else {
-            a.append(NSAttributedString(string: t, attributes: [
-                .font: Design.Font.numericBody, .foregroundColor: NSColor.labelColor, .paragraphStyle: p]))
+            attributed.append(NSAttributedString(string: text, attributes: [
+                .font: Design.Font.numericBody,
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph,
+            ]))
         }
-        return a
+        return attributed
     }
 
-    private func axText(_ row: CatalogRow) -> String {
-        if !row.key.decodable {
-            return "\(row.key.fourCC) · " + L("сырой ключ · значение не декодируется")
-        }
-        let prefix = row.key.isRaw ? row.key.fourCC + " · " : row.key.displayName + " · "
-        return prefix + row.text
+    private func updatePin() {
+        let symbol = pinned ? "pin.fill" : "pin"
+        pinButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        pinButton.contentTintColor = pinned ? tint() : .tertiaryLabelColor
+        pinButton.alphaValue = pinned || hoverOn || selectedOn ? 1 : 0
+        let label = pinned ? L("Открепить сенсор") : L("Закрепить сенсор")
+        pinButton.toolTip = label
+        pinButton.setAccessibilityLabel(label)
     }
 
-    /// Мини-спарклайн сессии (встыковые сегменты + кромка) — клон грамматики renderTrace из SensorsView.
-    private func renderTrace(_ hist: [Double], _ base: NSColor, decodable: Bool) {
-        let band = trace.bounds
-        let W = band.width, H = band.height
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
-        var segs = trace.sublayers?.filter { $0 !== line } ?? []
-        guard W > 1, decodable, hist.count >= 2 else {
-            segs.forEach { $0.isHidden = true }
-            line.isHidden = true
-            return
-        }
-        let lo = hist.min() ?? 0, hi = hist.max() ?? 1
-        let span = max(hi - lo, 0.0001)
-        func norm(_ v: Double) -> CGFloat { CGFloat(max(0, min(1, (v - lo) / span))) }
-        let count = hist.count
-        let segW = W / CGFloat(count)
-        let segWidth = segW + 0.5
-        let minBar: CGFloat = 1
-        while segs.count < count { let l = CALayer(); trace.insertSublayer(l, below: line); segs.append(l) }
-        for i in count..<segs.count { segs[i].isHidden = true }
-        let edge = CGMutablePath()
-        for (i, v) in hist.enumerated() {
-            let seg = segs[i]; seg.isHidden = false; seg.removeAllAnimations()
-            let hgt = max(minBar, norm(v) * H)
-            let x = CGFloat(i) * segW
-            let wd = (i == count - 1) ? max(W - x, segWidth) : segWidth
-            seg.frame = CGRect(x: x, y: H - hgt, width: wd, height: hgt)
-            seg.backgroundColor = base.withAlphaComponent(0.55).cgColor
-            if i == 0 { edge.move(to: CGPoint(x: x, y: H - hgt)) } else { edge.addLine(to: CGPoint(x: x, y: H - hgt)) }
-            edge.addLine(to: CGPoint(x: x + segW, y: H - hgt))
-        }
-        line.path = edge; line.strokeColor = base.cgColor; line.isHidden = false
+    func setSelected(_ selected: Bool, animated: Bool) {
+        guard selected != selectedOn else { return }
+        selectedOn = selected
+        updateVisualState(animated: animated)
     }
 
-    // hover + click + VoiceOver
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect], owner: self))
+    func clearHover() {
+        guard hoverOn else { return }
+        hoverOn = false
+        updateVisualState(animated: false)
     }
-    override func mouseEntered(with event: NSEvent) { setHover(true); onHover?(id) }
-    override func mouseExited(with event: NSEvent) { setHover(false); onHover?(nil) }
-    override func mouseDown(with event: NSEvent) { onClick?(id) }
-    private var hoverOn = false
-    /// Снять подсветку извне (скролл увозит строку из-под неподвижного курсора — mouseExited НЕ приходит,
-    /// строка «залипала» цветной). Идемпотентно: no-op, если подсветки нет.
-    func clearHover() { setHover(false) }
-    private func setHover(_ on: Bool) {
-        guard on != hoverOn else { return }                 // идемпотентность: O(строк) только на первом кадре скролла
-        hoverOn = on
-        CATransaction.begin(); CATransaction.setAnimationDuration(Motion.reduced ? 0 : Design.Motion.durFast)
-        layer?.backgroundColor = on ? capsTint().withAlphaComponent(isDark ? 0.10 : 0.12).cgColor : NSColor.clear.cgColor
+
+    private func updateVisualState(animated: Bool) {
+        let background: NSColor
+        if selectedOn {
+            background = Design.Color.accent(isDark).withAlphaComponent(isDark ? 0.14 : 0.10)
+        } else if hoverOn {
+            background = tint().withAlphaComponent(isDark ? 0.09 : 0.075)
+        } else {
+            background = .clear
+        }
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(animated && !Motion.reduced ? Design.Motion.durFast : 0)
+        layer?.backgroundColor = background.cgColor
         CATransaction.commit()
+        updatePin()
+    }
+
+    private func accessibilityText(_ row: CatalogRow) -> String {
+        let name = row.key.isRaw ? row.key.fourCC + ", " + row.key.displayName : row.key.displayName
+        let value = row.key.decodable ? row.text : L("значение не декодируется")
+        let pinState = pinned ? L("закреплён") : L("не закреплён")
+        return "\(name), \(value), \(pinState)"
+    }
+
+    @objc private func pinPressed() {
+        guard !id.isEmpty else { return }
+        onPin?(id)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hoverOn = true
+        updateVisualState(animated: true)
+        if !id.isEmpty { onHover?(id) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverOn = false
+        updateVisualState(animated: true)
+        onHover?(nil)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        guard !id.isEmpty else { return }
+        onActivate?(id)
     }
 
     override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { onHover?(id); return true }
-    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: Design.Radius.hwTile, yRadius: Design.Radius.hwTile).fill() }   // B3: было 6
+    override var canBecomeKeyView: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36: // Return
+            if !id.isEmpty { onActivate?(id) }
+        case 49: // Space
+            if !id.isEmpty { onPin?(id) }
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
     override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 1, dy: 1),
+            xRadius: Design.Radius.hwTile,
+            yRadius: Design.Radius.hwTile
+        ).fill()
+    }
+
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { axLabel + (pinned ? " · " + L("открепить") : " · " + L("закрепить")) }
-
-    private func symbolCG(_ name: String, _ color: NSColor, _ pt: CGFloat) -> CGImage? {
-        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        let cfg = NSImage.SymbolConfiguration(pointSize: pt, weight: .semibold).applying(.init(paletteColors: [color]))
-        let img = base.withSymbolConfiguration(cfg) ?? base
-        var r = CGRect(origin: .zero, size: img.size)
-        return img.cgImage(forProposedRect: &r, context: nil, hints: nil)
+    override func accessibilityPerformPress() -> Bool {
+        guard !id.isEmpty else { return false }
+        onActivate?(id)
+        return true
     }
 }
 
-// MARK: — Заголовок секции / строка диагностики (лёгкие плоские вью документа)
+// MARK: - Section and diagnostics rows
 
 private final class SectionHeaderView: NSView {
-    private let label = CATextLayer()
-    private let chevron = CATextLayer()
-    let key: String
-    var collapsible = false
-    var onToggle: (() -> Void)?
-    private let scale: CGFloat = 2
-    init(key: String, title: String) {
-        self.key = key
-        super.init(frame: .zero); wantsLayer = true
-        // V3: секц-заголовки обычным регистром (как sectionLabel поповера) — без CAPS/kern «самодельного дашборда».
-        let hFont = Design.Font.sys(11, .medium)
-        label.contentsScale = scale; label.truncationMode = .end
-        label.font = hFont; label.fontSize = hFont.pointSize
-        label.foregroundColor = NSColor.secondaryLabelColor.cgColor
-        label.string = NSAttributedString(string: title,
-            attributes: [.font: hFont, .foregroundColor: NSColor.secondaryLabelColor])
-        layer?.addSublayer(label)
-        chevron.contentsScale = scale; chevron.foregroundColor = NSColor.tertiaryLabelColor.cgColor
-        chevron.font = Design.Font.micro; chevron.fontSize = Design.Font.micro.pointSize
-        chevron.isHidden = true
-        layer?.addSublayer(chevron)
+    private let titleField = NSTextField(labelWithString: "")
+    private let countField = NSTextField(labelWithString: "")
+    private let disclosure = NSButton()
+
+    private(set) var key = ""
+    private var collapsible = false
+    private var expanded = true
+    var onToggle: ((String) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
     }
-    required init?(coder: NSCoder) { fatalError() }
+
+    convenience init(key: String, title: String) {
+        self.init(frame: .zero)
+        configure(key: key, title: title, count: 0, collapsible: false, expanded: true)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
     override var isFlipped: Bool { true }
-    func setExpanded(_ e: Bool) {
-        chevron.isHidden = !collapsible
-        chevron.string = NSAttributedString(string: e ? "▾" : "▸",
-            attributes: [.font: Design.Font.micro, .foregroundColor: NSColor.tertiaryLabelColor])
+
+    private func commonInit() {
+        titleField.font = Design.Font.sys(11, .medium)
+        titleField.textColor = .secondaryLabelColor
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
+        addSubview(titleField)
+
+        countField.font = Design.Font.numericMicro
+        countField.textColor = .tertiaryLabelColor
+        countField.alignment = .right
+        addSubview(countField)
+
+        disclosure.isBordered = false
+        disclosure.bezelStyle = .inline
+        disclosure.imagePosition = .imageOnly
+        disclosure.contentTintColor = .tertiaryLabelColor
+        disclosure.target = self
+        disclosure.action = #selector(toggle)
+        addSubview(disclosure)
     }
+
+    func configure(key: String, title: String, count: Int, collapsible: Bool, expanded: Bool) {
+        self.key = key
+        self.collapsible = collapsible
+        self.expanded = expanded
+        titleField.stringValue = title
+        countField.stringValue = count > 0 ? "\(count)" : ""
+        disclosure.isHidden = !collapsible
+        disclosure.image = NSImage(
+            systemSymbolName: expanded ? "chevron.down" : "chevron.right",
+            accessibilityDescription: nil
+        )
+        let action = expanded ? L("Свернуть раздел") : L("Развернуть раздел")
+        disclosure.toolTip = action
+        disclosure.setAccessibilityLabel(action)
+        setAccessibilityLabel("\(title), \(count)")
+    }
+
     override func layout() {
         super.layout()
-        label.frame = CGRect(x: 2, y: bounds.height - 14, width: bounds.width - 16, height: 12)
-        chevron.frame = CGRect(x: bounds.width - 12, y: bounds.height - 14, width: 12, height: 12)
+        disclosure.frame = CGRect(x: 2, y: (bounds.height - 14) / 2, width: 14, height: 14)
+        let leading: CGFloat = collapsible ? 19 : 5
+        countField.frame = CGRect(x: bounds.width - 37, y: (bounds.height - 14) / 2, width: 32, height: 14)
+        titleField.frame = CGRect(
+            x: leading,
+            y: (bounds.height - 15) / 2,
+            width: max(20, countField.frame.minX - leading - 5),
+            height: 15
+        )
     }
-    override func mouseDown(with event: NSEvent) { if collapsible { onToggle?() } }
+
+    override func mouseDown(with event: NSEvent) {
+        guard collapsible else { return }
+        toggle()
+    }
+
+    @objc private func toggle() {
+        guard collapsible, !key.isEmpty else { return }
+        onToggle?(key)
+    }
+
     override func isAccessibilityElement() -> Bool { collapsible }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { (label.string as? NSAttributedString)?.string }
+    override func accessibilityRole() -> NSAccessibility.Role? { collapsible ? .button : .staticText }
+    override func accessibilityPerformPress() -> Bool {
+        guard collapsible else { return false }
+        toggle()
+        return true
+    }
 }
 
 private final class EngineRowView: NSView {
-    private let labelLayer = CATextLayer()
-    private let valueLayer = CATextLayer()
-    private let scale: CGFloat = 2
-    init(_ row: EngineRow) {
-        super.init(frame: .zero); wantsLayer = true
-        labelLayer.contentsScale = scale; labelLayer.truncationMode = .end
-        labelLayer.font = Design.Font.caption; labelLayer.fontSize = Design.Font.caption.pointSize
-        labelLayer.foregroundColor = NSColor.secondaryLabelColor.cgColor
-        labelLayer.string = row.label
-        layer?.addSublayer(labelLayer)
-        valueLayer.contentsScale = scale; valueLayer.alignmentMode = .right
-        valueLayer.truncationMode = .end; valueLayer.font = Design.Font.numericMicro
-        valueLayer.fontSize = Design.Font.numericMicro.pointSize
-        valueLayer.foregroundColor = NSColor.tertiaryLabelColor.cgColor
-        valueLayer.string = row.value
-        layer?.addSublayer(valueLayer)
+    private let labelField = NSTextField(labelWithString: "")
+    private let valueField = NSTextField(labelWithString: "")
+    private var lastLabel = ""
+    private var lastValue = ""
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
     }
-    required init?(coder: NSCoder) { fatalError() }
+
+    convenience init(_ row: EngineRow) {
+        self.init(frame: .zero)
+        update(row)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
     override var isFlipped: Bool { true }
-    /// Обновление значения на месте (без пересоздания вью каждый тик).
-    func update(_ row: EngineRow) {
-        labelLayer.string = row.label
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        valueLayer.string = row.value
-        CATransaction.commit()
+
+    private func commonInit() {
+        labelField.font = Design.Font.caption
+        labelField.textColor = .secondaryLabelColor
+        labelField.lineBreakMode = .byTruncatingTail
+        addSubview(labelField)
+
+        valueField.font = Design.Font.numericMicro
+        valueField.textColor = .tertiaryLabelColor
+        valueField.alignment = .right
+        valueField.lineBreakMode = .byTruncatingHead
+        addSubview(valueField)
     }
+
+    func update(_ row: EngineRow) {
+        if row.label != lastLabel {
+            lastLabel = row.label
+            labelField.stringValue = row.label
+        }
+        if row.value != lastValue {
+            lastValue = row.value
+            valueField.stringValue = row.value
+        }
+        setAccessibilityLabel("\(row.label), \(row.value)")
+    }
+
     override func layout() {
         super.layout()
-        labelLayer.frame = CGRect(x: 4, y: (bounds.height - 12) / 2, width: bounds.width * 0.5, height: 12)
-        valueLayer.frame = CGRect(x: bounds.width * 0.42, y: (bounds.height - 12) / 2, width: bounds.width * 0.58 - 4, height: 12)
+        let height: CGFloat = 14
+        labelField.frame = CGRect(x: 6, y: (bounds.height - height) / 2, width: bounds.width * 0.49, height: height)
+        valueField.frame = CGRect(
+            x: bounds.width * 0.43,
+            y: (bounds.height - height) / 2,
+            width: bounds.width * 0.57 - 6,
+            height: height
+        )
     }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
 }
 
-// MARK: — Документ скролла (flipped, растёт)
+// MARK: - Hardware view
 
-private final class FlippedDoc: NSView {
-    override var isFlipped: Bool { true }
-}
-
-// MARK: — Главный гибридный вид «Железо»
-
-final class HardwareView: NSView {
-    // фикс-высоты областей (контракт B0): корневой intrinsic фиксирован → maxH вкладки стабилен.
-    // panelH — ПОТОЛОК (по умолчанию); фактическую высоту панели задаёт хост через setPanelHeight,
-    // чтобы вкладка «Железо» вместе с GPU-хромом не делала поповер выше остальных вкладок (Д3).
+/// Профессиональная V5 вкладки «Железо».
+///
+/// Основное отличие от прежней реализации — нативная переиспользуемая таблица вместо растущего
+/// documentView с сотнями постоянных строк. Это уменьшает layer tree, tracking areas и стоимость
+/// скролла, при этом внешний API HardwareView сохранён.
+final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     static let panelH: CGFloat = 340
-    private let minPanelH: CGFloat = 160     // не схлопываем ленту в полоску, даже если потолок низкий
-    private var panelHeight: CGFloat = panelH
-    private var panelHeightConstraint: NSLayoutConstraint?
-    private let IW: CGFloat = 272
-    private let headerH: CGFloat = 78        // ряд из 5 гейджей (CPU/GPU/ГОРЯЧЕЕ/Вт/ТУРБО)
-    private let searchH: CGFloat = 26
 
-    /// Разбор под панелью (как и у SensorsView) — наведение строки/гейджа → детали.
+    private enum Layout {
+        static let intrinsicWidth: CGFloat = 272
+        static let minimumPanelHeight: CGFloat = 176
+        static let headerHeight: CGFloat = 72
+        static let searchHeight: CGFloat = 24
+        static let searchGap: CGFloat = 7
+        static let tableGap: CGFloat = 6
+        static let sensorRowHeight: CGFloat = 26
+        static let sectionRowHeight: CGFloat = 22
+        static let engineRowHeight: CGFloat = 18
+        static let emptyRowHeight: CGFloat = 42
+    }
+
+    private struct SectionDefinition {
+        let key: String
+        let title: String
+        let sensorClass: SensorClass?
+        let rawOnly: Bool
+        let defaultExpanded: Bool
+    }
+
+    private enum ListItem {
+        case section(key: String, title: String, count: Int, expanded: Bool, collapsible: Bool)
+        case sensor(id: String)
+        case engine(index: Int)
+        case empty(String)
+    }
+
+    private static let sectionDefinitions: [SectionDefinition] = [
+        .init(key: "temp", title: L("Температуры"), sensorClass: .temp, rawOnly: false, defaultExpanded: true),
+        .init(key: "volt", title: L("Вольтажи"), sensorClass: .volt, rawOnly: false, defaultExpanded: true),
+        .init(key: "curr", title: L("Токи"), sensorClass: .curr, rawOnly: false, defaultExpanded: true),
+        .init(key: "power", title: L("Питание"), sensorClass: .power, rawOnly: false, defaultExpanded: true),
+        .init(key: "fan", title: L("Вентиляторы"), sensorClass: .fan, rawOnly: false, defaultExpanded: true),
+        .init(key: "batt", title: L("Нагрузка"), sensorClass: .batt, rawOnly: false, defaultExpanded: true),
+        .init(key: "raw", title: L("Сырые ключи"), sensorClass: nil, rawOnly: true, defaultExpanded: false),
+    ]
+
+    /// Наведение и выбранная строка отправляют сюда точный инженерный разбор.
     var detailSink: ((String) -> Void)?
 
-    // V4: [CPU-герой, GPU-герой, чип-ГОРЯЧЕЕ, чип-Вт, чип-Турбо] — индексы те же, applyGauges не меняется
-    private let gauges: [HeroGauge] = [HeroGauge(style: .hero), HeroGauge(style: .hero),
-                                       HeroGauge(style: .chip), HeroGauge(style: .chip), HeroGauge(style: .chip)]
+    private let gauges: [HeroGauge] = [
+        HeroGauge(style: .hero),
+        HeroGauge(style: .hero),
+        HeroGauge(style: .chip),
+        HeroGauge(style: .chip),
+        HeroGauge(style: .chip),
+    ]
+
     private let search = NSSearchField()
     private let countLabel = NSTextField(labelWithString: "")
     private let scroll = NSScrollView()
-    private let doc = FlippedDoc()
+    private let table = NSTableView()
 
-    private var rowViews: [String: CatalogRowView] = [:]
-    private var headerViews: [SectionHeaderView] = []
-    private var engineViews: [EngineRowView] = []
-    private var placeholder: NSTextField?
+    private var panelHeight: CGFloat = panelH
+    private var panelHeightConstraint: NSLayoutConstraint?
+    private var scrollObserver: NSObjectProtocol?
+    private var pendingSearch: DispatchWorkItem?
+
+    private let catalog: [CatalogKey]
+    private let catalogByID: [String: CatalogKey]
+    private let searchIndex: [String: String]
+
+    private var items: [ListItem] = []
+    private var engineRows: [EngineRow] = []
+    private var expandedSections: Set<String>
+    private var pinned: [String]
+    private var query = ""
+    private var hoveredID: String?
+    private var selectedID: String?
 
     private var lastSnapshot = SensorsSnapshot()
     private var lastComponents = ComponentPower()
     private var lastEnergy = EnergySnapshot()
+    private var lastRows: [String: CatalogRow] = [:]
 
-    // секции в фикс-порядке (контракт); .other = РАСШИРЕННЫЕ (аккордеон, свёрнут)
-    private var expandedRaw = false
-    private var pinned: [String] = (UserDefaults.standard.array(forKey: "hardware.pinned") as? [String]) ?? []
-    private var query = ""
-    private var hovered: String?
+    override init(frame frameRect: NSRect) {
+        let catalog = SensorCatalog.catalog()
+        self.catalog = catalog
+        catalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
+        searchIndex = Dictionary(uniqueKeysWithValues: catalog.map { key in
+            let blob = [key.fourCC, key.displayName, SensorClass.titleFor(key.cls)]
+                .joined(separator: " ")
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .lowercased()
+            return (key.id, blob)
+        })
 
-    private let rowH: CGFloat = 24     // было 22 — +2 воздуха, чтобы текст датчиков не подрезался снизу
-    private let headH: CGFloat = 20
-    private let engRowH: CGFloat = 16
+        let storedExpanded = UserDefaults.standard.array(forKey: "hardware.expandedSections") as? [String]
+        if let storedExpanded {
+            expandedSections = Set(storedExpanded)
+        } else {
+            expandedSections = Set(Self.sectionDefinitions.filter(\.defaultExpanded).map(\.key))
+        }
+        pinned = UserDefaults.standard.array(forKey: "hardware.pinned") as? [String] ?? []
 
-    override init(frame: NSRect) { super.init(frame: frame); commonInit() }
-    required init?(coder: NSCoder) { super.init(coder: coder); commonInit() }
-    override var isFlipped: Bool { false }
-    override var intrinsicContentSize: NSSize { NSSize(width: IW, height: panelHeight) }
+        super.init(frame: frameRect)
+        commonInit()
+    }
 
-    /// Хост задаёт фактическую высоту панели (скролл-viewport = высота − шапка-гейджи − поиск).
-    /// Гейджи/поиск приколоты к верху, скролл прижат низом → уменьшение высоты ужимает именно ленту,
-    /// а лента продолжает скроллить в фикс-высоте. Не ниже minPanelH.
-    func setPanelHeight(_ h: CGFloat) {
-        let clamped = max(minPanelH, h)
+    required init?(coder: NSCoder) {
+        let catalog = SensorCatalog.catalog()
+        self.catalog = catalog
+        catalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
+        searchIndex = Dictionary(uniqueKeysWithValues: catalog.map { key in
+            let blob = [key.fourCC, key.displayName, SensorClass.titleFor(key.cls)]
+                .joined(separator: " ")
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .lowercased()
+            return (key.id, blob)
+        })
+
+        let storedExpanded = UserDefaults.standard.array(forKey: "hardware.expandedSections") as? [String]
+        if let storedExpanded {
+            expandedSections = Set(storedExpanded)
+        } else {
+            expandedSections = Set(Self.sectionDefinitions.filter(\.defaultExpanded).map(\.key))
+        }
+        pinned = UserDefaults.standard.array(forKey: "hardware.pinned") as? [String] ?? []
+
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    deinit {
+        pendingSearch?.cancel()
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: Layout.intrinsicWidth, height: panelHeight)
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { L("Сенсоры") }
+
+    func setPanelHeight(_ height: CGFloat) {
+        let clamped = max(Layout.minimumPanelHeight, height)
         guard abs(clamped - panelHeight) > 0.5 else { return }
         panelHeight = clamped
         panelHeightConstraint?.constant = clamped
         invalidateIntrinsicContentSize()
     }
-    /// Текущая ФАКТИЧЕСКАЯ высота панели. Хост (buildModules) обязан считать «хром» вкладки от неё,
-    /// а НЕ от статической panelH: panelHeight персистентна и дрейфует между ребилдами, поэтому расчёт
-    /// от константы 340 заставлял поповер осциллировать (чётный тумбл — норма, нечётный — раздув +100pt).
+
     var currentPanelHeight: CGFloat { panelHeight }
-    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
-    override func accessibilityRole() -> NSAccessibility.Role? { .group }
-    override func accessibilityLabel() -> String? { L("Сенсоры") }
 
     private func commonInit() {
-        wantsLayer = true; layer?.masksToBounds = false
+        wantsLayer = true
+        layer?.masksToBounds = false
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: IW).isActive = true
-        let hc = heightAnchor.constraint(equalToConstant: panelHeight)
-        hc.isActive = true
-        panelHeightConstraint = hc
 
-        // — шапка V4: 2 героя (CPU/GPU, крупная цифра) слева + столбик 3 тихих чипов (ГОРЯЧЕЕ/Вт/Турбо) справа —
-        let heroPair = NSStackView(views: [gauges[0], gauges[1]])
-        heroPair.distribution = .fillEqually; heroPair.spacing = 8
-        heroPair.translatesAutoresizingMaskIntoConstraints = false
-        heroPair.widthAnchor.constraint(equalToConstant: 168).isActive = true
-        let chipCol = NSStackView(views: [gauges[2], gauges[3], gauges[4]])
-        chipCol.orientation = .vertical; chipCol.spacing = 2; chipCol.alignment = .leading
-        chipCol.distribution = .fillEqually
-        chipCol.translatesAutoresizingMaskIntoConstraints = false
-        for c in [gauges[2], gauges[3], gauges[4]] { c.widthAnchor.constraint(equalToConstant: 96).isActive = true }
-        let gaugeRow = NSStackView(views: [heroPair, chipCol])
-        gaugeRow.spacing = 8
-        gaugeRow.alignment = .centerY
-        gaugeRow.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(gaugeRow)
+        widthAnchor.constraint(equalToConstant: Layout.intrinsicWidth).isActive = true
+        let heightConstraint = heightAnchor.constraint(equalToConstant: panelHeight)
+        heightConstraint.isActive = true
+        panelHeightConstraint = heightConstraint
 
-        // — строка поиска + счётчик —
+        prunePinnedSensors()
+        buildHeader()
+        buildSearch()
+        buildTable()
+        rebuildItems(preserveSelection: false)
+    }
+
+    private func buildHeader() {
+        let heroRow = NSStackView(views: [gauges[0], gauges[1]])
+        heroRow.orientation = .horizontal
+        heroRow.distribution = .fillEqually
+        heroRow.spacing = 6
+
+        let chipRow = NSStackView(views: [gauges[2], gauges[3], gauges[4]])
+        chipRow.orientation = .horizontal
+        chipRow.distribution = .fillEqually
+        chipRow.spacing = 5
+
+        let header = NSStackView(views: [heroRow, chipRow])
+        header.orientation = .vertical
+        header.distribution = .fill
+        header.spacing = 5
+        header.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(header)
+
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: topAnchor),
+            header.leadingAnchor.constraint(equalTo: leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: trailingAnchor),
+            header.heightAnchor.constraint(equalToConstant: Layout.headerHeight),
+            heroRow.heightAnchor.constraint(equalToConstant: 43),
+            chipRow.heightAnchor.constraint(equalToConstant: 24),
+        ])
+    }
+
+    private func buildSearch() {
         search.placeholderString = L("Поиск по сенсорам")
-        search.translatesAutoresizingMaskIntoConstraints = false
         search.controlSize = .small
         search.font = Design.Font.caption
-        search.target = self; search.action = #selector(searchChanged)
+        search.sendsWholeSearchString = false
+        search.sendsSearchStringImmediately = true
+        search.delegate = self
+        search.translatesAutoresizingMaskIntoConstraints = false
         addSubview(search)
-        countLabel.font = Design.Font.microStat; countLabel.textColor = .tertiaryLabelColor
-        countLabel.alignment = .right; countLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        countLabel.font = Design.Font.microStat
+        countLabel.textColor = .tertiaryLabelColor
+        countLabel.alignment = .right
+        countLabel.lineBreakMode = .byClipping
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(countLabel)
 
-        // — скролл —
+        NSLayoutConstraint.activate([
+            search.topAnchor.constraint(equalTo: topAnchor, constant: Layout.headerHeight + Layout.searchGap),
+            search.leadingAnchor.constraint(equalTo: leadingAnchor),
+            search.heightAnchor.constraint(equalToConstant: Layout.searchHeight),
+
+            countLabel.centerYAnchor.constraint(equalTo: search.centerYAnchor),
+            countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            countLabel.widthAnchor.constraint(equalToConstant: 58),
+            countLabel.leadingAnchor.constraint(equalTo: search.trailingAnchor, constant: 6),
+        ])
+    }
+
+    private func buildTable() {
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("hardware.main"))
+        column.resizingMask = .autoresizingMask
+        table.addTableColumn(column)
+        table.headerView = nil
+        table.backgroundColor = .clear
+        table.gridStyleMask = []
+        table.intercellSpacing = NSSize(width: 0, height: 0)
+        table.selectionHighlightStyle = .none
+        table.allowsMultipleSelection = false
+        table.allowsEmptySelection = true
+        table.focusRingType = .none
+        table.delegate = self
+        table.dataSource = self
+        table.rowSizeStyle = .custom
+        table.usesAlternatingRowBackgroundColors = false
+
+        scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
         scroll.verticalScrollElasticity = .allowed
-        scroll.autohidesScrollers = true
+        scroll.horizontalScrollElasticity = .none
+        scroll.hasHorizontalScroller = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        doc.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = doc
         addSubview(scroll)
-        // Сброс hover при СКРОЛЛЕ: mouseExited не приходит, когда строка уезжает из-под неподвижного
-        // курсора → подсветка «залипала» (жалоба владельца). Идемпотентный clearHover делает это O(1)
-        // после первого кадра. Стандартное поведение macOS-списков: hover гаснет до движения мыши.
+
         scroll.contentView.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
-                                               object: scroll.contentView, queue: .main) { [weak self] _ in
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scroll.contentView,
+            queue: .main
+        ) { [weak self] _ in
             guard let self else { return }
-            self.rowViews.values.forEach { $0.clearHover() }
-            self.setHover(nil)                              // и строку разбора внизу — к сводке
+            self.clearVisibleHover()
+            self.hoveredID = nil
+            self.emitDetail()
         }
 
         NSLayoutConstraint.activate([
-            gaugeRow.topAnchor.constraint(equalTo: topAnchor),
-            gaugeRow.leadingAnchor.constraint(equalTo: leadingAnchor),
-            gaugeRow.trailingAnchor.constraint(equalTo: trailingAnchor),
-            gaugeRow.heightAnchor.constraint(equalToConstant: headerH),
-
-            search.topAnchor.constraint(equalTo: gaugeRow.bottomAnchor, constant: 4),
-            search.leadingAnchor.constraint(equalTo: leadingAnchor),
-            search.heightAnchor.constraint(equalToConstant: searchH),
-            countLabel.centerYAnchor.constraint(equalTo: search.centerYAnchor),
-            countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
-            countLabel.leadingAnchor.constraint(equalTo: search.trailingAnchor, constant: 6),
-            countLabel.widthAnchor.constraint(equalToConstant: 64),
-
-            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 6),
+            scroll.topAnchor.constraint(
+                equalTo: search.bottomAnchor,
+                constant: Layout.tableGap
+            ),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
-    @objc private func searchChanged() {
-        query = search.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
-        relayout(animate: !Motion.reduced)
+    // MARK: Search
+
+    func controlTextDidChange(_ obj: Notification) {
+        pendingSearch?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.query = self.normalized(self.search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+            self.rebuildItems(preserveSelection: true)
+        }
+        pendingSearch = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
     }
 
-    // MARK: построение строк (один раз/при смене состава) + раскладка
-
-    private struct Section { let key: String; let title: String; let cls: SensorClass?; let collapsible: Bool }
-    private static let sectionDefs: [Section] = [
-        Section(key: "temp",  title: L("Температуры"), cls: .temp,  collapsible: false),
-        Section(key: "volt",  title: L("Вольтажи"),    cls: .volt,  collapsible: false),
-        Section(key: "curr",  title: L("Токи"),        cls: .curr,  collapsible: false),
-        Section(key: "power", title: L("Питание"),     cls: .power, collapsible: false),
-        Section(key: "fan",   title: L("Вентиляторы"), cls: .fan,   collapsible: false),
-        Section(key: "batt",  title: L("Нагрузка"),    cls: .batt,  collapsible: false),
-        Section(key: "raw",   title: L("Сырые ключи"), cls: nil,    collapsible: true),   // ВСЕ некураторские (любой класс), свёрнуто
-    ]
-
-    /// ЛЕНИВОЕ создание вью строки: раньше ensureRows строил вью на ВСЕ ~600 ключей (сотни CALayer +
-    /// NSTrackingArea) — AppKit пересчитывал сотни tracking-областей на каждый скролл → «курсор залипает».
-    /// Теперь вью материализуется только когда строка реально размещается (именованные + пины + раскрытое сырьё).
-    private func makeRow(_ id: String) -> CatalogRowView? {
-        if let rv = rowViews[id] { return rv }
-        guard let key = SensorCatalog.catalog().first(where: { $0.id == id }) else { return nil }
-        let rv = CatalogRowView(id: key.id, cls: key.cls, isRaw: key.isRaw)
-        rv.translatesAutoresizingMaskIntoConstraints = false
-        rv.onHover = { [weak self] id in self?.setHover(id) }
-        rv.onClick = { [weak self] id in self?.togglePin(id) }
-        doc.addSubview(rv)
-        rowViews[key.id] = rv
-        // Немедленное первичное наполнение (одноразовое чтение при материализации): иначе до первого
-        // тика строка стояла бы ПУСТОЙ (имя/значение ставит только apply) — некрасивый первый кадр.
-        let row = SensorCatalog.row(for: key, record: false)
-        lastRows[key.id] = row
-        rv.apply(row, pinned: pinned.contains(key.id), animate: false)
-        return rv
+    private func normalized(_ string: String) -> String {
+        string.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
     }
 
-    /// Заголовки секций/движка (лёгкие, один раз). Строки каталога создаются ЛЕНИВО в placeRow.
-    private func ensureRows() {
-        guard headerViews.isEmpty else { return }
-        // заголовки секций
-        for def in Self.sectionDefs {
-            let hv = SectionHeaderView(key: def.key, title: def.title)
-            hv.collapsible = def.collapsible
-            hv.setExpanded(def.key == "raw" ? expandedRaw : true)
-            if def.collapsible {
-                hv.onToggle = { [weak self] in
-                    guard let self else { return }
-                    self.expandedRaw.toggle()
-                    hv.setExpanded(self.expandedRaw)
-                    self.relayout(animate: !Motion.reduced)
-                }
-            }
-            doc.addSubview(hv)
-            headerViews.append(hv)
-        }
-        // заголовок ЗАКРЕПЛЁННЫЕ + ДВИЖОК — создаются в общем списке через placeholders в relayout
-        let pinHeader = SectionHeaderView(key: "pinned", title: L("Закреплённые"))
-        doc.addSubview(pinHeader); headerViews.append(pinHeader)
-        let engHeader = SectionHeaderView(key: "engine", title: L("Движок"))
-        doc.addSubview(engHeader); headerViews.append(engHeader)
+    private func matches(_ key: CatalogKey) -> Bool {
+        query.isEmpty || (searchIndex[key.id]?.contains(query) ?? false)
     }
 
-    /// Видимые id строк (для tick: read() ТОЛЬКО их). = строки в documentVisibleRect, не скрытые.
-    func visibleIDs() -> Set<String> {
-        // вкладка не на экране (скрыта/без окна) — скрытая плитка сохраняет frame, поэтому
-        // documentVisibleRect остаётся непустым; без этого гейта каталог читал бы SMC на чужих
-        // вкладках (~15 read()/тик впустую). Пустой Set → snapshot() не зовёт ни одного read().
-        guard window != nil && !isHiddenOrHasHiddenAncestor else { return [] }
-        let vis = scroll.documentVisibleRect
-        var out = Set<String>()
-        for (id, rv) in rowViews where !rv.isHidden {
-            if rv.frame.intersects(vis) { out.insert(id) }
-        }
-        return out
+    // MARK: List model
+
+    private func prunePinnedSensors() {
+        let valid = pinned.filter { catalogByID[$0] != nil }
+        guard valid != pinned else { return }
+        pinned = valid
+        UserDefaults.standard.set(pinned, forKey: "hardware.pinned")
     }
 
-    private func header(_ key: String) -> SectionHeaderView? { headerViews.first { $0.key == key } }
-
-    /// Раскладка документа сверху-вниз по фикс-порядку секций; фильтр по query; аккордеон сырых.
-    private func relayout(animate: Bool) {
-        ensureRows()
-        // все строки/заголовки сначала прячем — покажем только размещённые
-        rowViews.values.forEach { $0.isHidden = true }
-        headerViews.forEach { $0.isHidden = true }
-        engineViews.forEach { $0.isHidden = true }
-
-        let cat = SensorCatalog.catalog()
-        func matches(_ k: CatalogKey) -> Bool {
-            guard !query.isEmpty else { return true }
-            return k.fourCC.lowercased().contains(query)
-                || k.displayName.lowercased().contains(query)
-                || SensorClass.titleFor(k.cls).lowercased().contains(query)
-        }
-
-        var y: CGFloat = 0
-        let W = doc.bounds.width > 1 ? doc.bounds.width : (scroll.bounds.width > 1 ? scroll.bounds.width : IW)
-
-        func placeHeader(_ key: String) {
-            guard let hv = header(key) else { return }
-            hv.isHidden = false
-            hv.frame = CGRect(x: 0, y: y, width: W, height: headH)
-            hv.needsLayout = true
-            y += headH
-        }
-        func placeRow(_ id: String) {
-            guard let rv = makeRow(id) else { return }   // ленивое создание: вью есть только у размещаемых строк
-            rv.isHidden = false
-            rv.frame = CGRect(x: 0, y: y, width: W, height: rowH)
-            rv.needsLayout = true
-            y += rowH
-        }
-
-        // Подчистка «мёртвых» пинов: id, которого больше нет в каталоге (датчик пропал), был бы
-        // невидим и неубираем через UI — выкидываем его из закреплённых (query-независимо).
-        let stalePruned = pinned.filter { id in cat.contains { $0.id == id } }
-        if stalePruned.count != pinned.count {
-            pinned = stalePruned
-            UserDefaults.standard.set(pinned, forKey: "hardware.pinned")
-        }
-
-        // 1) ЗАКРЕПЛЁННЫЕ (если есть и проходят фильтр поиска)
-        let pinnedShown = pinned.filter { id in cat.contains { $0.id == id && matches($0) } }
-        if !pinnedShown.isEmpty {
-            placeHeader("pinned")
-            for id in pinnedShown { placeRow(id) }
-        }
-
-        // 2) секции: основные показывают ТОЛЬКО именованные датчики (без сырья/дублей → чисто «в тему»),
-        //    «Сырые ключи» — ВСЕ некураторские FourCC (любой класс), свёрнуто (мусор не мозолит глаз).
-        // Закреплённые исключаем из обычных секций — иначе одна и та же вью строки размещалась бы
-        // дважды (в «Закреплённые» и в своей секции), второе размещение перетирало первое → под
-        // «Закреплённые» пусто (жалоба владельца: «закреплённые невидимы и не убираются»).
+    private func rebuildItems(preserveSelection: Bool) {
+        let oldSelection = preserveSelection ? selectedID : nil
+        var result: [ListItem] = []
         let pinnedSet = Set(pinned)
-        for def in Self.sectionDefs {
-            let keys: [CatalogKey]
-            if let cls = def.cls {
-                keys = cat.filter { $0.cls == cls && !$0.isRaw && matches($0) && !pinnedSet.contains($0.id) }
-            } else {
-                keys = cat.filter { $0.isRaw && matches($0) && !pinnedSet.contains($0.id) }
+
+        let visiblePinned = pinned.compactMap { catalogByID[$0] }.filter(matches)
+        if !visiblePinned.isEmpty {
+            result.append(.section(
+                key: "pinned",
+                title: L("Закреплённые"),
+                count: visiblePinned.count,
+                expanded: true,
+                collapsible: false
+            ))
+            result.append(contentsOf: visiblePinned.map { .sensor(id: $0.id) })
+        }
+
+        for definition in Self.sectionDefinitions {
+            let keys = catalog.filter { key in
+                guard !pinnedSet.contains(key.id), matches(key) else { return false }
+                if definition.rawOnly { return key.isRaw }
+                return !key.isRaw && key.cls == definition.sensorClass
             }
             guard !keys.isEmpty else { continue }
-            let hv = header(def.key)
-            hv?.isHidden = false
-            hv?.frame = CGRect(x: 0, y: y, width: W, height: headH)
-            hv?.needsLayout = true
-            y += headH
-            if def.key == "raw" && !expandedRaw && query.isEmpty {
-                continue   // сырые свёрнуты по умолчанию (но при активном поиске — показываем)
-            }
-            for k in keys { placeRow(k.id) }
+
+            let expanded = query.isEmpty ? expandedSections.contains(definition.key) : true
+            result.append(.section(
+                key: definition.key,
+                title: definition.title,
+                count: keys.count,
+                expanded: expanded,
+                collapsible: true
+            ))
+            if expanded { result.append(contentsOf: keys.map { .sensor(id: $0.id) }) }
         }
 
-        // 3) ДВИЖОК (диагностика) — только без активного поиска
         if query.isEmpty {
-            placeHeader("engine")
-            ensureEngineViews()
-            for ev in engineViews {
-                ev.isHidden = false
-                ev.frame = CGRect(x: 0, y: y, width: W, height: engRowH)
-                y += engRowH
+            engineRows = SensorCatalog.engineDiagnostics(components: lastComponents, energy: lastEnergy)
+            let expanded = expandedSections.contains("engine")
+            result.append(.section(
+                key: "engine",
+                title: L("Диагностика движка"),
+                count: engineRows.count,
+                expanded: expanded,
+                collapsible: true
+            ))
+            if expanded {
+                result.append(contentsOf: engineRows.indices.map { .engine(index: $0) })
             }
         }
 
-        // 4) плейсхолдер «ничего не найдено»
-        let anyShown = rowViews.values.contains { !$0.isHidden }
-        if !anyShown && !query.isEmpty {
-            let ph = ensurePlaceholder()
-            ph.isHidden = false
-            ph.frame = NSRect(x: 8, y: y, width: W - 16, height: 18)
-            y += 18 + 6
-        } else { placeholder?.isHidden = true }
-
-        let docH = max(y + 8, scroll.contentSize.height)
-        if animate {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = Design.Motion.durBase
-                doc.animator().frame = NSRect(x: 0, y: 0, width: W, height: docH)
-            }
-        } else {
-            doc.frame = NSRect(x: 0, y: 0, width: W, height: docH)
+        let hasSensor = result.contains {
+            if case .sensor = $0 { return true }
+            return false
         }
-        updateCount(cat)
+        if !hasSensor, !query.isEmpty {
+            result.append(.empty(L("Ничего не найдено")))
+        }
+
+        items = result
+        table.reloadData()
+        updateCount()
+
+        selectedID = oldSelection.flatMap { id in
+            items.contains {
+                if case .sensor(let itemID) = $0 { return itemID == id }
+                return false
+            } ? id : nil
+        }
+        refreshVisibleSelection(animated: false)
+        emitDetail()
     }
 
-    private func updateCount(_ cat: [CatalogKey]) {
+    private func toggleSection(_ key: String) {
+        if expandedSections.contains(key) {
+            expandedSections.remove(key)
+        } else {
+            expandedSections.insert(key)
+        }
+        UserDefaults.standard.set(Array(expandedSections).sorted(), forKey: "hardware.expandedSections")
+        rebuildItems(preserveSelection: true)
+    }
+
+    private func updateCount() {
         if query.isEmpty {
-            // по умолчанию считаем ИМЕНОВАННЫЕ датчики (не 660 сырых ключей — это и есть «мусор» на виду)
-            let n = cat.filter { !$0.isRaw }.count
-            countLabel.stringValue = "\(n) " + SettingsStore.plural(n, L("датчик"), L("датчика"), L("датчиков"))
+            let count = catalog.filter { !$0.isRaw }.count
+            countLabel.stringValue = "\(count) " + SettingsStore.plural(
+                count,
+                L("датчик"),
+                L("датчика"),
+                L("датчиков")
+            )
         } else {
-            // при поиске — совпадение ТЕМИ ЖЕ тремя ветками, что и relayout.matches (иначе счётчик врал «0»)
-            let n = cat.filter { k in
-                k.fourCC.lowercased().contains(query)
-                    || k.displayName.lowercased().contains(query)
-                    || SensorClass.titleFor(k.cls).lowercased().contains(query)
-            }.count
-            countLabel.stringValue = "\(n) " + SettingsStore.plural(n, L("ключ"), L("ключа"), L("ключей"))
+            let count = catalog.filter(matches).count
+            countLabel.stringValue = "\(count) " + SettingsStore.plural(
+                count,
+                L("ключ"),
+                L("ключа"),
+                L("ключей")
+            )
         }
     }
 
-    private func ensurePlaceholder() -> NSTextField {
-        if let p = placeholder { return p }
-        let l = NSTextField(labelWithString: L("ничего не найдено"))
-        l.font = Design.Font.caption; l.textColor = .tertiaryLabelColor
-        l.isBezeled = false; l.drawsBackground = false; l.isEditable = false
-        doc.addSubview(l); placeholder = l
-        return l
-    }
+    // MARK: Table data source / delegate
 
-    /// Диагностические строки движка: создаём один раз, дальше обновляем значения на месте (без пересоздания/мерцания).
-    private func ensureEngineViews() {
-        let rows = SensorCatalog.engineDiagnostics(components: lastComponents, energy: lastEnergy)
-        if engineViews.count != rows.count {
-            engineViews.forEach { $0.removeFromSuperview() }
-            engineViews = rows.map { let ev = EngineRowView($0); doc.addSubview(ev); return ev }
-        } else {
-            for (ev, r) in zip(engineViews, rows) { ev.update(r) }
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard items.indices.contains(row) else { return Layout.sensorRowHeight }
+        switch items[row] {
+        case .section: return Layout.sectionRowHeight
+        case .sensor: return Layout.sensorRowHeight
+        case .engine: return Layout.engineRowHeight
+        case .empty: return Layout.emptyRowHeight
         }
     }
 
-    // MARK: вход данных
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        guard items.indices.contains(row) else { return false }
+        if case .sensor = items[row] { return true }
+        return false
+    }
 
-    /// Геройные гейджи питаются из кураторского снимка (как раньше SensorsView.update).
-    func update(_ s: SensorsSnapshot) {
-        lastSnapshot = s
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row index: Int) -> NSView? {
+        guard items.indices.contains(index) else { return nil }
+
+        switch items[index] {
+        case let .section(key, title, count, expanded, collapsible):
+            let identifier = NSUserInterfaceItemIdentifier("hardware.section")
+            let view = tableView.makeView(withIdentifier: identifier, owner: self) as? SectionHeaderView
+                ?? SectionHeaderView(frame: .zero)
+            view.identifier = identifier
+            view.configure(
+                key: key,
+                title: title,
+                count: count,
+                collapsible: collapsible,
+                expanded: expanded
+            )
+            view.onToggle = { [weak self] key in self?.toggleSection(key) }
+            return view
+
+        case .sensor(let id):
+            guard let key = catalogByID[id] else { return nil }
+            let identifier = NSUserInterfaceItemIdentifier("hardware.sensor")
+            let view = tableView.makeView(withIdentifier: identifier, owner: self) as? CatalogRowView
+                ?? CatalogRowView(frame: .zero)
+            view.identifier = identifier
+            view.configure(id: key.id, cls: key.cls, isRaw: key.isRaw)
+            view.onHover = { [weak self] id in self?.setHover(id) }
+            view.onActivate = { [weak self] id in self?.selectSensor(id) }
+            view.onPin = { [weak self] id in self?.togglePin(id) }
+
+            let row = lastRows[id] ?? SensorCatalog.row(for: key, record: false)
+            lastRows[id] = row
+            view.apply(
+                row,
+                pinned: pinned.contains(id),
+                selected: selectedID == id,
+                animate: false
+            )
+            return view
+
+        case .engine(let rowIndex):
+            guard engineRows.indices.contains(rowIndex) else { return nil }
+            let identifier = NSUserInterfaceItemIdentifier("hardware.engine")
+            let view = tableView.makeView(withIdentifier: identifier, owner: self) as? EngineRowView
+                ?? EngineRowView(frame: .zero)
+            view.identifier = identifier
+            view.update(engineRows[rowIndex])
+            return view
+
+        case .empty(let text):
+            let identifier = NSUserInterfaceItemIdentifier("hardware.empty")
+            let field = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField
+                ?? NSTextField(labelWithString: "")
+            field.identifier = identifier
+            field.stringValue = text
+            field.font = Design.Font.caption
+            field.textColor = .tertiaryLabelColor
+            field.alignment = .center
+            field.maximumNumberOfLines = 1
+            return field
+        }
+    }
+
+    // MARK: Visible sampling
+
+    /// Возвращает только реально видимые sensor-id. NSTableView уже виртуализирует строки, поэтому
+    /// раскрытие сотен raw-ключей не создаёт сотни tracking areas и не заставляет читать их все.
+    func visibleIDs() -> Set<String> {
+        guard window != nil, !isHiddenOrHasHiddenAncestor else { return [] }
+        let range = table.rows(in: table.visibleRect)
+        guard range.location != NSNotFound, range.length > 0 else { return [] }
+
+        var result = Set<String>()
+        let upperBound = min(items.count, range.location + range.length)
+        for index in range.location..<upperBound {
+            if case .sensor(let id) = items[index] { result.insert(id) }
+        }
+        return result
+    }
+
+    // MARK: Data input
+
+    func update(_ snapshot: SensorsSnapshot) {
+        lastSnapshot = snapshot
         applyGauges()
         emitDetail()
     }
 
-    /// Последний снимок каждой строки (для hover-разбора БЕЗ синхронного SMC-syscall на main:
-    /// раньше каждый mouseEntered читал SMC — серия чтений при проводке мыши = «залипание» курсора).
-    private var lastRows: [String: CatalogRow] = [:]
-
-    /// Каталог-строки + диагностика. Зовётся из тика. read() уже выполнен слоем данных ТОЛЬКО для видимых id.
     func updateCatalog(rows: [CatalogRow], components: ComponentPower, energy: EnergySnapshot) {
-        lastComponents = components; lastEnergy = energy
-        ensureRows()
-        // первая раскладка — после того, как скролл получил ширину (иначе документ нулевой)
-        if doc.frame.height < 1 { relayout(animate: false) }
-        let pinnedSet = Set(pinned)
-        for row in rows {                                  // значения видимых строк (read() уже сделан слоем данных)
-            lastRows[row.key.id] = row                     // кэш для hover-разбора (без новых SMC-чтений)
-            rowViews[row.key.id]?.apply(row, pinned: pinnedSet.contains(row.key.id), animate: true)
+        lastComponents = components
+        lastEnergy = energy
+
+        for row in rows { lastRows[row.key.id] = row }
+        refreshVisibleRows(with: rows)
+
+        if query.isEmpty, expandedSections.contains("engine") {
+            let newRows = SensorCatalog.engineDiagnostics(components: components, energy: energy)
+            let countChanged = newRows.count != engineRows.count
+            engineRows = newRows
+            if countChanged {
+                rebuildItems(preserveSelection: true)
+            } else {
+                refreshVisibleEngineRows()
+            }
         }
-        // диагностика движка — обновляем значения НА МЕСТЕ (без полного релэйаута/мерцания каждый тик)
-        if !engineViews.isEmpty { ensureEngineViews() }
+
+        applyGauges()
+        emitDetail()
+    }
+
+    private func refreshVisibleRows(with rows: [CatalogRow]) {
+        let byID = Dictionary(uniqueKeysWithValues: rows.map { ($0.key.id, $0) })
+        table.enumerateAvailableRowViews { [weak self] rowView, rowIndex in
+            guard let self,
+                  self.items.indices.contains(rowIndex),
+                  case .sensor(let id) = self.items[rowIndex],
+                  let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView
+                    ?? rowView as? CatalogRowView,
+                  let row = byID[id] ?? self.lastRows[id]
+            else { return }
+
+            view.apply(
+                row,
+                pinned: self.pinned.contains(id),
+                selected: self.selectedID == id,
+                animate: true
+            )
+        }
+    }
+
+    private func refreshVisibleEngineRows() {
+        table.enumerateAvailableRowViews { [weak self] rowView, rowIndex in
+            guard let self,
+                  self.items.indices.contains(rowIndex),
+                  case .engine(let engineIndex) = self.items[rowIndex],
+                  self.engineRows.indices.contains(engineIndex),
+                  let view = rowView.subviews.first(where: { $0 is EngineRowView }) as? EngineRowView
+                    ?? rowView as? EngineRowView
+            else { return }
+            view.update(self.engineRows[engineIndex])
+        }
     }
 
     private func applyGauges() {
-        let temps = lastSnapshot.temps
-        let cpu = temps.first { $0.id == "cpu" }
-        let gpu = temps.first { $0.id == "gpu" }
-        // «ГОРЯЧЕЕ» раньше = max по ВСЕМ → почти всегда сам CPU (дубль гейджа CPU). Честный дедуп:
-        // самый горячий датчик СРЕДИ ОСТАЛЬНЫХ (не CPU/GPU, они уже слева) + подпись его именем —
-        // так гейдж несёт НОВУЮ инфу (напр. «ПАМЯТЬ 55°»), а не повторяет CPU.
-        let shownIDs: Set<String> = ["cpu", "cpupkg", "gpu"]
-        let hot = temps.filter { !shownIDs.contains($0.id) }.max { $0.value < $1.value }
-        // системный ватт (PSTR) или честный fallback CPU+GPU (без DRAM/прочего) —
-        // при fallback подпись честно помечает источник, не выдавая частичное за полный ватт
-        let partial = !(lastEnergy.systemWatts > 0.1)
-        let watts = partial ? ((lastComponents.cpu ?? 0) + (lastComponents.gpu ?? 0))
-                            : lastEnergy.systemWatts
+        let temperatures = lastSnapshot.temps
+        let cpu = temperatures.first { $0.id == "cpu" }
+        let gpu = temperatures.first { $0.id == "gpu" }
 
-        gauges[0].set(value: cpu?.value, text: cpu?.text ?? "—", cap: "CPU", kind: .temp,
-                      level: cpu.map { Design.sensorLevel(id: "cpu", $0.value) })
-        gauges[1].set(value: gpu?.value, text: gpu?.text ?? "—", cap: "GPU", kind: .temp,
-                      level: gpu.map { Design.sensorLevel(id: "gpu", $0.value) })
-        gauges[2].set(value: hot?.value, text: hot.map { String(format: "%.0f°", $0.value) } ?? "—",
-                      cap: hot.map { $0.name } ?? L("Прочее"), kind: .temp,
-                      level: hot.map { Design.sensorLevel(id: $0.id, $0.value) })
-        gauges[3].set(value: watts > 0 ? watts : nil,
-                      text: watts > 0 ? String(format: "%.0f", watts) : "—",
-                      cap: (partial && watts > 0) ? L("CPU+GPU Вт") : L("Вт"), kind: .watt)
-        // ТУРБО: частота как доля номинала (powermetrics System Average). Троттлинг честно — только когда
-        // низкая частота ПРИ ВЫСОКОЙ нагрузке (иначе низкая частота = простой/энергосбережение, не троттл).
-        // Гейт на свежесть сэмпла: устаревший power.txt → «—», не показываем протухший турбо/троттл.
-        let ff = lastComponents.fresh ? lastComponents.freqFraction : nil
-        let load = SystemUsage.shared.cpu()               // 0..1, кэш-за-тик
-        let throttling = (ff ?? 1) < 0.90 && load > 0.75
-        gauges[4].set(value: ff, text: ff.map { String(format: "%.0f%%", $0 * 100) } ?? "—",
-                      cap: throttling ? L("Троттл") : L("Частота"),   // «Турбо 117%» было непонятно; тултип объясняет >100%
-                      kind: throttling ? .turboWarn : .turbo)
-        // Честное пояснение >100% (иначе «ТУРБО 134%» читается как ошибка): это доля базовой частоты.
+        let representedIDs: Set<String> = ["cpu", "cpupkg", "gpu"]
+        let hottestOther = temperatures
+            .filter { !representedIDs.contains($0.id) }
+            .max { $0.value < $1.value }
+
+        let partialPower = !(lastEnergy.systemWatts > 0.1)
+        let watts = partialPower
+            ? (lastComponents.cpu ?? 0) + (lastComponents.gpu ?? 0)
+            : lastEnergy.systemWatts
+
+        gauges[0].set(
+            value: cpu?.value,
+            text: cpu?.text ?? "—",
+            cap: "CPU",
+            kind: .temp,
+            level: cpu.map { Design.sensorLevel(id: "cpu", $0.value) }
+        )
+        gauges[1].set(
+            value: gpu?.value,
+            text: gpu?.text ?? "—",
+            cap: "GPU",
+            kind: .temp,
+            level: gpu.map { Design.sensorLevel(id: "gpu", $0.value) }
+        )
+        gauges[2].set(
+            value: hottestOther?.value,
+            text: hottestOther.map { String(format: "%.0f°", $0.value) } ?? "—",
+            cap: hottestOther?.name ?? L("Прочее"),
+            kind: .temp,
+            level: hottestOther.map { Design.sensorLevel(id: $0.id, $0.value) }
+        )
+        gauges[3].set(
+            value: watts > 0 ? watts : nil,
+            text: watts > 0 ? String(format: "%.0f", watts) : "—",
+            cap: partialPower && watts > 0 ? L("CPU+GPU Вт") : L("Система, Вт"),
+            kind: .watt
+        )
+
+        let frequencyFraction = lastComponents.fresh ? lastComponents.freqFraction : nil
+        let load = SystemUsage.shared.cpu()
+        let throttling = (frequencyFraction ?? 1) < 0.90 && load > 0.75
+        gauges[4].set(
+            value: frequencyFraction,
+            text: frequencyFraction.map { String(format: "%.0f%%", $0 * 100) } ?? "—",
+            cap: throttling ? L("Троттлинг") : L("Частота"),
+            kind: throttling ? .turboWarn : .turbo
+        )
         gauges[4].toolTip = throttling
-            ? L("Частота ниже базовой при высокой нагрузке — троттлинг.")
-            : L("Частота как доля базовой; выше 100% — турбо-буст (это норма).")
+            ? L("Частота ниже базовой при высокой нагрузке — вероятен троттлинг.")
+            : L("Частота относительно базовой; значение выше 100% означает турбо-буст.")
     }
 
-    /// Свип гейджей при показе вкладки.
-    func animateIn() { gauges.forEach { $0.animateIn() } }
+    func animateIn() {
+        gauges.forEach { $0.animateIn() }
+    }
 
-    // MARK: пины
+    // MARK: Pinning and selection
 
     private func togglePin(_ id: String) {
-        if let i = pinned.firstIndex(of: id) {
-            pinned.remove(at: i)
+        guard catalogByID[id] != nil else { return }
+        if let index = pinned.firstIndex(of: id) {
+            pinned.remove(at: index)
         } else {
             pinned.append(id)
-            flyToPin(id)
         }
         UserDefaults.standard.set(pinned, forKey: "hardware.pinned")
-        relayout(animate: !Motion.reduced)
+        rebuildItems(preserveSelection: true)
     }
 
-    /// fly-to-pin: дубль-слой строки летит к секции ЗАКРЕПЛЁННЫЕ (вверх). Под reduced — мгновенно.
-    private func flyToPin(_ id: String) {
-        guard !Motion.reduced, let rv = rowViews[id], let host = doc.layer else { return }
-        let ghost = CALayer()
-        ghost.frame = rv.frame                          // rv — прямой сабвью doc, frame уже в координатах doc
-        ghost.backgroundColor = Design.Color.accent(isDark).withAlphaComponent(0.18).cgColor
-        ghost.cornerRadius = Design.Radius.hwTile   // B3: было 6 (совпадает со скруглением плитки-источника)
-        host.addSublayer(ghost)
-        let from = ghost.position
-        let to = CGPoint(x: ghost.position.x, y: 12)
-        let a = CABasicAnimation(keyPath: "position")
-        a.fromValue = from; a.toValue = to
-        a.duration = Design.Motion.durBase
-        a.timingFunction = Design.Motion.overshoot
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { ghost.removeFromSuperlayer() }
-        ghost.opacity = 0; ghost.position = to
-        ghost.add(a, forKey: "fly")
-        let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 1; fade.toValue = 0
-        fade.duration = Design.Motion.durBase
-        ghost.add(fade, forKey: "fade")
-        CATransaction.commit()
-    }
-
-    // MARK: hover → разбор
-
-    private func setHover(_ id: String?) {
-        guard id != hovered else { return }
-        hovered = id
+    private func selectSensor(_ id: String) {
+        selectedID = selectedID == id ? nil : id
+        refreshVisibleSelection(animated: true)
         emitDetail()
     }
+
+    private func refreshVisibleSelection(animated: Bool) {
+        table.enumerateAvailableRowViews { [weak self] rowView, rowIndex in
+            guard let self,
+                  self.items.indices.contains(rowIndex),
+                  case .sensor(let id) = self.items[rowIndex],
+                  let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView
+                    ?? rowView as? CatalogRowView
+            else { return }
+            view.setSelected(self.selectedID == id, animated: animated)
+        }
+    }
+
+    // MARK: Hover and detail
+
+    private func setHover(_ id: String?) {
+        guard hoveredID != id else { return }
+        hoveredID = id
+        emitDetail()
+    }
+
+    private func clearVisibleHover() {
+        table.enumerateAvailableRowViews { rowView, _ in
+            if let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView
+                ?? rowView as? CatalogRowView {
+                view.clearHover()
+            }
+        }
+    }
+
     private func emitDetail() {
-        if let id = hovered {
-            // Из КЭША последнего тика — ноль SMC-syscall'ов в hover (свежее значение доедет следующим тиком).
-            // Строка вне кэша (сырьё, ещё не тикнувшее) — единственный случай прямого чтения.
-            if let row = lastRows[id] ?? SensorCatalog.row(id, record: false) { detailSink?(rowDetail(row)) }
+        let id = hoveredID ?? selectedID
+        if let id,
+           let row = lastRows[id] ?? catalogByID[id].map({ SensorCatalog.row(for: $0, record: false) }) {
+            lastRows[id] = row
+            detailSink?(rowDetail(row))
         } else {
             detailSink?(summary())
         }
     }
+
     private func rowDetail(_ row: CatalogRow) -> String {
-        let name = row.key.isRaw ? row.key.fourCC : row.key.displayName
-        if !row.key.decodable {
-            return "\(row.key.fourCC) · \(row.key.smcType) · " + L("сырой ключ · значение не декодируется")
+        let key = row.key
+        let name = key.isRaw ? key.fourCC : key.displayName
+        if !key.decodable {
+            return "\(key.fourCC) · \(key.smcType) · " + L("сырой ключ · значение не декодируется")
         }
-        let raw = row.key.isRaw ? " · " + row.key.fourCC : ""
-        return "\(name) · \(row.text)\(raw) · \(row.key.smcType)"
+        let rawSuffix = key.isRaw ? " · \(key.fourCC)" : ""
+        return "\(name) · \(row.text)\(rawSuffix) · \(key.smcType)"
     }
+
     private func summary() -> String {
         var parts: [String] = []
-        if let cpu = lastSnapshot.temps.first(where: { $0.id == "cpu" }) { parts.append("CPU \(cpu.text)") }
-        if let gpu = lastSnapshot.temps.first(where: { $0.id == "gpu" }) { parts.append("GPU \(gpu.text)") }
-        let n = SensorCatalog.catalog().filter { !$0.isRaw }.count   // именованные датчики (не 660 сырых)
-        if n > 0 { parts.append("\(n) " + SettingsStore.plural(n, L("датчик"), L("датчика"), L("датчиков"))) }
-        return parts.isEmpty ? L("наведи на сенсор — покажу разбор") : parts.joined(separator: " · ")
+        if let cpu = lastSnapshot.temps.first(where: { $0.id == "cpu" }) {
+            parts.append("CPU \(cpu.text)")
+        }
+        if let gpu = lastSnapshot.temps.first(where: { $0.id == "gpu" }) {
+            parts.append("GPU \(gpu.text)")
+        }
+
+        if lastEnergy.systemWatts > 0.1 {
+            parts.append(String(format: L("Система %.0f Вт"), lastEnergy.systemWatts))
+        }
+
+        let namedCount = catalog.filter { !$0.isRaw }.count
+        if namedCount > 0 {
+            parts.append("\(namedCount) " + SettingsStore.plural(
+                namedCount,
+                L("датчик"),
+                L("датчика"),
+                L("датчиков")
+            ))
+        }
+        return parts.isEmpty ? L("Наведи на сенсор, чтобы увидеть разбор") : parts.joined(separator: " · ")
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyGauges()
-    }
-    override func layout() {
-        super.layout()
-        if doc.frame.width != scroll.contentSize.width && scroll.contentSize.width > 1 {
-            relayout(animate: false)
-        }
+        table.reloadData()
+        refreshVisibleSelection(animated: false)
     }
 }

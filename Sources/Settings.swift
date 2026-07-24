@@ -692,7 +692,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         win.contentMinSize = NSSize(width: 820, height: 500)
         win.contentMaxSize = NSSize(width: 1180, height: 100000)
         win.title = L("Настройки Kelvin")
-        win.titleVisibility = .visible              // заголовок виден + рабочая строка управления окном
+        win.titleVisibility = .hidden               // заголовок страницы — единственный визуальный title; имя окна остаётся для accessibility
         win.titlebarAppearsTransparent = true       // стекло сайдбара протекает во всю высоту под титул
         win.isReleasedWhenClosed = false
         // запоминаем положение окна между запусками; центрируем только при первом показе
@@ -905,8 +905,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         switch s {
         case .support: return .systemPink
         case .basics, .about: return .systemGray
-        case .power, .input, .netsec, .hub, .license:
+        case .power, .input, .hub, .license:
             return SettingsStore.brandAccent(dark: isDark)
+        case .netsec:
+            return .systemBlue
         }
     }
 
@@ -1012,10 +1014,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         view.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(view)
         stabilizeH(view)
+        let availableWidth = view.widthAnchor.constraint(equalTo: doc.widthAnchor,
+                                                          constant: -(SK.pageSideInset * 2))
+        availableWidth.priority = NSLayoutConstraint.Priority(rawValue: 999)
         NSLayoutConstraint.activate([
             view.topAnchor.constraint(equalTo: doc.topAnchor, constant: 28),
-            view.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 24),
-            view.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -24),
+            view.centerXAnchor.constraint(equalTo: doc.centerXAnchor),
+            view.leadingAnchor.constraint(greaterThanOrEqualTo: doc.leadingAnchor, constant: SK.pageSideInset),
+            view.trailingAnchor.constraint(lessThanOrEqualTo: doc.trailingAnchor, constant: -SK.pageSideInset),
+            view.widthAnchor.constraint(lessThanOrEqualToConstant: SK.pageMaxWidth),
+            availableWidth,
             view.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -28),
         ])
 
@@ -1195,9 +1203,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         let wrap = NSStackView(views: [container])
         wrap.orientation = .vertical
-        wrap.alignment = .width
+        wrap.alignment = .leading
         wrap.spacing = 0
         wrap.translatesAutoresizingMaskIntoConstraints = false
+        container.widthAnchor.constraint(equalTo: wrap.widthAnchor).isActive = true
         return wrap
     }
 
@@ -1458,31 +1467,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: — Автозапуск (login items X-ray) — влит в «Основные» блоком «Программы при входе».
     /// Возвращает карточки списка (без внешнего scaffold) — их встраивает buildBasics.
-    private func startupItems(_ result: LoginItems.ScanResult) -> [NSView] {
+    private func startupItems(_ result: LoginItems.ScanResult, includeSummary: Bool = true) -> [NSView] {
         var items: [NSView] = []
 
-        // — Крупная плашка-вердикт: режим просмотра, официальный тон —
-        let total = result.items.count
-        let verdict = NSTextField(wrappingLabelWithString: L("Только просмотр — Kelvin не изменяет объекты автозапуска"))
-        verdict.font = Design.Font.calloutEmph
-        verdict.textColor = .labelColor
-        verdict.maximumNumberOfLines = 2
-        let verdictIcon = NSImageView()
-        verdictIcon.image = NSImage(systemSymbolName: "eye", accessibilityDescription: nil)
-        verdictIcon.contentTintColor = .systemBlue
-        verdictIcon.symbolConfiguration = .init(pointSize: 22, weight: .semibold)
-        verdictIcon.translatesAutoresizingMaskIntoConstraints = false
-        verdictIcon.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        let sub = NSTextField(labelWithString: total > 0
-            ? String(format: L("Обнаружено объектов автозапуска: %d. Список доступен только для просмотра."), total)
-            : L("Проверка программ, запускающихся при входе в систему."))
-        sub.font = Design.Font.caption; sub.textColor = .secondaryLabelColor
-        sub.lineBreakMode = .byWordWrapping; sub.maximumNumberOfLines = 3
-        let textCol = NSStackView(views: [verdict, sub])
-        textCol.orientation = .vertical; textCol.alignment = .leading; textCol.spacing = 3
-        let heroStack = NSStackView(views: [verdictIcon, textCol])
-        heroStack.orientation = .horizontal; heroStack.alignment = .centerY; heroStack.spacing = 12
-        items.append(SK.card([SK.customRow(heroStack, minHeight: 56)]))
+        if includeSummary {
+            // — Крупная плашка-вердикт: режим просмотра, официальный тон —
+            let total = result.items.count
+            let verdict = NSTextField(wrappingLabelWithString: L("Только просмотр — Kelvin не изменяет объекты автозапуска"))
+            verdict.font = Design.Font.calloutEmph
+            verdict.textColor = .labelColor
+            verdict.maximumNumberOfLines = 2
+            let verdictIcon = NSImageView()
+            verdictIcon.image = NSImage(systemSymbolName: "eye", accessibilityDescription: nil)
+            verdictIcon.contentTintColor = .systemBlue
+            verdictIcon.symbolConfiguration = .init(pointSize: 22, weight: .semibold)
+            verdictIcon.translatesAutoresizingMaskIntoConstraints = false
+            verdictIcon.widthAnchor.constraint(equalToConstant: 30).isActive = true
+            let sub = NSTextField(labelWithString: total > 0
+                ? String(format: L("Обнаружено объектов автозапуска: %d. Список доступен только для просмотра."), total)
+                : L("Проверка программ, запускающихся при входе в систему."))
+            sub.font = Design.Font.caption; sub.textColor = .secondaryLabelColor
+            sub.lineBreakMode = .byWordWrapping; sub.maximumNumberOfLines = 3
+            let textCol = NSStackView(views: [verdict, sub])
+            textCol.orientation = .vertical; textCol.alignment = .leading; textCol.spacing = 3
+            let heroStack = NSStackView(views: [verdictIcon, textCol])
+            heroStack.orientation = .horizontal; heroStack.alignment = .centerY; heroStack.spacing = 12
+            items.append(SK.card([SK.customRow(heroStack, minHeight: 56)]))
+        }
+
 
         if result.items.isEmpty && result.skipped == 0 {
             items.append(SK.card([SK.infoRow(icon: "checkmark.seal",
@@ -2381,33 +2393,36 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     private func buildSupport() -> NSView {
         var items: [NSView] = []
 
-        // — Герой: приложение бесплатно + кнопка благодарности —
         let donate = GlassButton(title: L("Поддержать автора"), symbol: "heart.fill", cornerRadius: Design.Radius.chip)
         donate.onClick = { Donate.open() }
+
+        // Главная карточка сразу отвечает на три вопроса: цена, назначение доната и отсутствие подписки.
         items.append(SK.card([
-            SK.controlRow(icon: "heart.fill", title: L("Kelvin бесплатен — и остаётся таким"),
+            SK.controlRow(icon: "heart.fill",
+                          title: L("Kelvin бесплатен — и остаётся таким"),
                           subtitle: L("Все функции открыты для всех, без подписки."),
                           control: donate),
+            SK.infoRow(icon: "sparkles",
+                       text: L("Поддержка помогает развивать Kelvin в свободное время: новые датчики, языки интерфейса, совместимость со свежими Mac и macOS.")),
+            SK.infoRow(icon: "lock.open",
+                       text: L("Донат полностью добровольный и не открывает скрытых платных функций.")),
         ]))
 
-        // — Честно: зачем это (без обещаний платных функций) —
-        items.append(groupHeader(L("Зачем это")))
-        items.append(SK.card([
-            SK.infoRow(icon: "sparkles", text: L("Поддержка помогает развивать Kelvin в свободное время: новые датчики, языки интерфейса, совместимость со свежими Mac и macOS.")),
-            SK.infoRow(icon: "lock.open", text: L("Никакой подписки и никаких платных функций. Донат — полностью добровольный.")),
-        ]))
-
-        // — Другие способы помочь (бесплатные) —
         let feedback = GlassButton(title: L("Написать автору"), symbol: "envelope", cornerRadius: Design.Radius.chip)
         feedback.onClick = { [weak self] in self?.openFeedbackMail() }
+
         items.append(groupHeader(L("Другие способы помочь")))
         items.append(SK.card([
-            SK.controlRow(icon: "envelope", title: L("Обратная связь"), subtitle: L("Идея, баг или пожелание — автор читает всё."), control: feedback),
-            SK.infoRow(icon: "person.2", text: L("Расскажите друзьям, которым пригодится один прибор вместо десятка утилит в строке меню.")),
+            SK.controlRow(icon: "envelope",
+                          title: L("Обратная связь"),
+                          subtitle: L("Идея, баг или пожелание — автор читает всё."),
+                          control: feedback),
+            SK.infoRow(icon: "person.2",
+                       text: L("Расскажите о Kelvin тем, кому пригодится один системный прибор вместо нескольких утилит в строке меню.")),
         ]))
 
         return SK.scaffold(L("Поддержать Kelvin"),
-                           L("Приложение бесплатное. Эта страница — для тех, кто хочет поблагодарить автора."),
+                           L("Kelvin остаётся бесплатным. Здесь можно поблагодарить автора или помочь обратной связью."),
                            items)
     }
 
@@ -2712,40 +2727,68 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     /// карточка кредитов (кликабельная db-ip ссылка сохранена). Все хендлеры целы.
     private func buildAbout() -> NSView {
         let iconView = NSImageView()
-        if let p = Bundle.main.path(forResource: "AppIcon", ofType: "icns") { iconView.image = NSImage(contentsOfFile: p) }
+        if let p = Bundle.main.path(forResource: "AppIcon", ofType: "icns") {
+            iconView.image = NSImage(contentsOfFile: p)
+        }
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.widthAnchor.constraint(equalToConstant: 60).isActive = true
         iconView.heightAnchor.constraint(equalToConstant: 60).isActive = true
-        let name = NSTextField(labelWithString: "Kelvin"); name.font = Design.Font.display
-        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-        let ver = NSTextField(labelWithString: L("Версия") + " \(v) · " + L("мониторинг и управление системой"))
-        ver.font = Design.Font.caption; ver.textColor = .secondaryLabelColor
-        let nameCol = NSStackView(views: [name, ver]); nameCol.orientation = .vertical; nameCol.alignment = .leading; nameCol.spacing = 2
-        let header = NSStackView(views: [iconView, nameCol]); header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 14
+
+        let name = NSTextField(labelWithString: "Kelvin")
+        name.font = Design.Font.display
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        let versionLabel = NSTextField(labelWithString: L("Версия") + " \(version) · " + L("мониторинг и управление системой"))
+        versionLabel.font = Design.Font.caption
+        versionLabel.textColor = NSColor.labelColor.withAlphaComponent(0.64)
+        let nameColumn = NSStackView(views: [name, versionLabel])
+        nameColumn.orientation = .vertical
+        nameColumn.alignment = .leading
+        nameColumn.spacing = 2
+        let header = NSStackView(views: [iconView, nameColumn])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 14
 
         let welcome = GlassButton(title: L("Показать приветствие"), symbol: "sparkles", cornerRadius: Design.Radius.chip)
-        let upd = GlassButton(title: L("Проверить обновления"), symbol: "arrow.down.circle", cornerRadius: Design.Radius.chip)
+        let update = GlassButton(title: L("Проверить обновления"), symbol: "arrow.down.circle", cornerRadius: Design.Radius.chip)
         let report = GlassButton(title: L("Создать отчёт"), symbol: "doc.text.magnifyingglass", cornerRadius: Design.Radius.chip)
         welcome.onClick = { [weak self] in self?.showWelcome() }
-        upd.onClick = { [weak self] in self?.checkUpdates() }
+        update.onClick = { [weak self] in self?.checkUpdates() }
         report.onClick = { [weak self] in self?.makeDiagnosticReport(NSButton()) }
 
-        let copy = NSTextField(labelWithString: AppConfig.copyright)
-        copy.font = Design.Font.caption; copy.textColor = .tertiaryLabelColor
+        let copyright = NSTextField(labelWithString: AppConfig.copyright)
+        copyright.font = Design.Font.caption
+        copyright.textColor = .tertiaryLabelColor
+        copyright.alignment = .left
+        let footer = NSStackView(views: [creditsRow(), copyright])
+        footer.orientation = .vertical
+        footer.alignment = .leading
+        footer.spacing = 8
 
         return SK.scaffold(L("О программе"), L("Сведения о программе, обновления и диагностика."), [
-            SK.card([SK.customRow(header, minHeight: 76),
-                     SK.infoRow(icon: "bolt.heart", text: L("Локальный мониторинг питания на данных IOKit и SMC, без сбора телеметрии. Энергопотоки, схема токов, температуры и управление системой."))]),
+            SK.card([
+                SK.customRow(header, minHeight: 76, fill: true),
+                SK.infoRow(icon: "bolt.heart",
+                           text: L("Локальный мониторинг питания на данных IOKit и SMC, без сбора телеметрии. Энергопотоки, схема токов, температуры и управление системой.")),
+            ]),
             groupHeader(L("Обновления")),
-            SK.card([SK.toggleRow(icon: "arrow.triangle.2.circlepath", title: L("Проверять обновления автоматически"),
-                                  isOn: Updater.autoCheck) { Updater.autoCheck = $0 },
-                     SK.controlRow(icon: "arrow.down.circle", title: L("Проверить обновления"), control: upd),
-                     SK.controlRow(icon: "sparkles", title: L("Показать приветствие"), control: welcome)]),
+            SK.card([
+                SK.toggleRow(icon: "arrow.triangle.2.circlepath",
+                             title: L("Проверять обновления автоматически"),
+                             isOn: Updater.autoCheck) { Updater.autoCheck = $0 },
+                SK.controlRow(icon: "arrow.down.circle", title: L("Проверить обновления"), control: update),
+                SK.controlRow(icon: "sparkles", title: L("Показать приветствие"), control: welcome),
+            ]),
             groupHeader(L("Диагностика")),
-            SK.card([SK.controlRow(icon: "doc.text.magnifyingglass", title: L("Диагностический отчёт"),
-                                   subtitle: L("Снимок состояния системы для поддержки"), control: report),
-                     SK.infoRow(icon: "lock.doc", text: L("«Диагностический отчёт» формирует снимок состояния системы в формате Markdown (безопасность, батарея, температуры, сеть за сессию). Данные остаются локально и никуда не отправляются."))]),
-            SK.card([SK.customRow(creditsRow()), SK.customRow(copy)]),
+            SK.card([
+                SK.controlRow(icon: "doc.text.magnifyingglass",
+                              title: L("Диагностический отчёт"),
+                              subtitle: L("Снимок состояния системы для поддержки"),
+                              control: report),
+                SK.infoRow(icon: "lock.doc",
+                           text: L("Отчёт формируется локально в формате Markdown и никуда не отправляется автоматически.")),
+            ]),
+            SK.customRow(footer, minHeight: 40, fill: true),
         ])
     }
 
@@ -2937,9 +2980,34 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     private var cachedLoginScan: LoginItems.ScanResult?
     /// Вертикальный стек карточек списка автозапуска (общий для кэш- и async-веток «Основных»).
     private func startupBlockView(_ result: LoginItems.ScanResult) -> NSView {
-        let stack = NSStackView(views: startupItems(result))
-        stack.orientation = .vertical; stack.alignment = .width; stack.spacing = 10
+        let total = result.items.count
+        let summaryText = total > 0
+            ? String(format: L("Обнаружено объектов автозапуска: %d. Kelvin ничего здесь не изменяет."), total)
+            : L("Объекты автозапуска не обнаружены.")
+
+        let summary = SK.card([
+            SK.badgeRow(icon: "eye",
+                        title: L("Только просмотр"),
+                        badgeText: "\(total)",
+                        badgeColor: total > 0 ? .systemBlue : .systemGreen),
+            SK.infoRow(icon: "info.circle", text: summaryText),
+        ])
+
+        let details = SK.card([
+            SK.lazyDisclosure(key: "basics.startup-items",
+                              title: total > 0 ? L("Показать список автозапуска") : L("Подробнее о проверке"),
+                              expanded: false) { [weak self] in
+                self?.startupItems(result, includeSummary: false) ?? []
+            },
+        ])
+
+        let stack = NSStackView(views: [summary, details])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
+        summary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        details.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
     }
 
@@ -3419,14 +3487,17 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
             GFXState(gpus: GPUInfo.all(), active: GPUInfo.active(), switchable: GPUInfo.switchable,
                      mode: GPUInfo.mode(), isAppleSilicon: GPUInfo.isAppleSilicon)
         }) { [weak self] st in
-            let v = NSStackView(views: self?.buildGraphicsViewItems(st) ?? [])
-            v.orientation = .vertical; v.alignment = .width; v.spacing = Design.Space.s4
+            let graphicsViews = self?.buildGraphicsViewItems(st) ?? []
+            let v = NSStackView(views: graphicsViews)
+            v.orientation = .vertical; v.alignment = .leading; v.spacing = Design.Space.s4
             v.translatesAutoresizingMaskIntoConstraints = false
+            for item in graphicsViews { item.widthAnchor.constraint(equalTo: v.widthAnchor).isActive = true }
             return v
         }
         let gfxWrap = NSStackView(views: [gfxAsync])
-        gfxWrap.orientation = .vertical; gfxWrap.alignment = .width; gfxWrap.spacing = 0
+        gfxWrap.orientation = .vertical; gfxWrap.alignment = .leading; gfxWrap.spacing = 0
         gfxWrap.translatesAutoresizingMaskIntoConstraints = false
+        gfxAsync.widthAnchor.constraint(equalTo: gfxWrap.widthAnchor).isActive = true
         items.append(gfxWrap)
 
         return SK.scaffold(L("Питание и охлаждение"),
@@ -3872,9 +3943,10 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
 
             let stack = NSStackView(views: views)
             stack.orientation = .vertical
-            stack.alignment = .width
+            stack.alignment = .leading
             stack.spacing = Design.Space.s4
             stack.translatesAutoresizingMaskIntoConstraints = false
+            for item in views { item.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
             return stack
         })
 
@@ -3884,25 +3956,21 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         // Тяжёлые списки действительно ленивые: до клика нет Firewall.apps(), журнала
         // и редактора /etc/hosts. Состояние раскрытия переживает локальные перестройки.
         items.append(groupHeader(L("Дополнительно")))
+        var additionalRows: [NSView] = []
         if Firewall.available {
-            items.append(SK.card([
-                lazyDisclosure(key: "netsec.rules.disclosure", title: L("Правила по программам")) { [weak self] in
-                    self?.netsecRulesContainer() ?? NSView()
-                },
-            ]))
+            additionalRows.append(SK.lazyDisclosure(key: "netsec.rules.disclosure", title: L("Правила по программам")) { [weak self] in
+                [self?.netsecRulesContainer() ?? NSView()]
+            })
         }
-        items.append(SK.card([
-            lazyDisclosure(key: "netsec.session.disclosure", title: L("Журнал сеанса")) { [weak self] in
-                self?.netsecSessionLogContainer() ?? NSView()
-            },
-        ]))
+        additionalRows.append(SK.lazyDisclosure(key: "netsec.session.disclosure", title: L("Журнал сеанса")) { [weak self] in
+            [self?.netsecSessionLogContainer() ?? NSView()]
+        })
         if Firewall.available {
-            items.append(SK.card([
-                lazyDisclosure(key: "netsec.domains.disclosure", title: L("Блокировка доменов")) { [weak self] in
-                    self?.netsecDomainCard() ?? NSView()
-                },
-            ]))
+            additionalRows.append(SK.lazyDisclosure(key: "netsec.domains.disclosure", title: L("Блокировка доменов")) { [weak self] in
+                [self?.netsecDomainCard() ?? NSView()]
+            })
         }
+        items.append(SK.card(additionalRows))
 
         return SK.scaffold(L("Сеть и защита"),
                            L("Сетевой экран, VPN и активные подключения этого Mac. Изменения применяются сразу."),
