@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Под hardened runtime отправка Apple Events наружу (System Events для тёмной темы,
+         Terminal для Homebrew/команд, Finder для кастомных команд) разрешена ТОЛЬКО при наличии
+         этого entitlement. Без него нотаризованная сборка молча получает ошибку -1743.
+         NSAppleEventsUsageDescription в Info.plist даёт TCC-промпт, но не снимает hardened-блок. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>
