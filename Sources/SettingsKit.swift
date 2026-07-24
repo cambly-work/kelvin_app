@@ -1,117 +1,384 @@
 import AppKit
 
-/// Дизайн-кит окна настроек в стиле приложения (Control Center / стекло, как поповер): стеклянные карточки
-/// ГИБКОЙ ширины (тянутся по окну), живые контролы (свитч/слайдер/сегмент/поп-ап) через замыкания, компактные
-/// строки вместо простыней плоских чекбоксов. Заменяет старые groupBox/boxRow фикс-440. Декуплен от
-/// SettingsWindowController (всё на closures), чтобы жить в своём файле.
+/// Лёгкий набор компонентов для окна настроек Kelvin.
+///
+/// Принципы:
+/// - спокойный нативный вид вместо многослойного glassmorphism;
+/// - минимум промежуточных NSStackView и обязательных constraints;
+/// - адаптивная ширина без фиксированных 420/440 pt;
+/// - замыкания вместо разросшегося target/action-кода;
+/// - disclosure не требует пересборки всей секции;
+/// - слайдеры объединяют слишком частые события, не забивая главный поток.
 
-// MARK: - Замыкание-контролы (NSSwitch/NSSlider/NSPopUpButton без target/action-церемоний)
+// MARK: - Closure controls
 
 final class KSwitch: NSSwitch {
     var onChange: ((Bool) -> Void)?
+
     init(on: Bool) {
         super.init(frame: .zero)
         state = on ? .on : .off
-        target = self; action = #selector(fire)
+        target = self
+        action = #selector(fire)
         translatesAutoresizingMaskIntoConstraints = false
     }
-    required init?(coder: NSCoder) { fatalError() }
-    @objc private func fire() { onChange?(state == .on) }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func fire() {
+        onChange?(state == .on)
+    }
 }
 
+/// Continuous-слайдер с coalescing событий. AppKit может присылать намного больше
+/// событий, чем нужно интерфейсу; ограничение примерно до 30 Гц оставляет движение
+/// плавным, но не запускает запись файлов/SMC/NotificationCenter сотни раз в секунду.
 final class KSlider: NSSlider {
     var onChange: ((Double) -> Void)?
-    @objc private func fire() { onChange?(doubleValue) }
-    static func make(min: Double, max: Double, value: Double, ticks: Int = 0, onChange: @escaping (Double) -> Void) -> KSlider {
-        let s = KSlider()
-        s.minValue = min; s.maxValue = max; s.doubleValue = value
-        if ticks > 0 { s.numberOfTickMarks = ticks; s.allowsTickMarkValuesOnly = true }
-        s.isContinuous = true
-        s.target = s; s.action = #selector(fire)
-        s.onChange = onChange
-        s.translatesAutoresizingMaskIntoConstraints = false
-        return s
+    var minimumCallbackInterval: TimeInterval = 1.0 / 30.0
+
+    private var lastCallbackUptime: TimeInterval = 0
+    private var pendingWork: DispatchWorkItem?
+    private var pendingValue: Double?
+
+    @objc private func fire() {
+        emitOrSchedule(doubleValue)
+    }
+
+    private func emitOrSchedule(_ value: Double) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = now - lastCallbackUptime
+
+        if elapsed >= minimumCallbackInterval {
+            pendingWork?.cancel()
+            pendingWork = nil
+            pendingValue = nil
+            lastCallbackUptime = now
+            onChange?(value)
+            return
+        }
+
+        pendingValue = value
+        pendingWork?.cancel()
+        let delay = max(0, minimumCallbackInterval - elapsed)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let value = self.pendingValue else { return }
+            self.pendingValue = nil
+            self.pendingWork = nil
+            self.lastCallbackUptime = ProcessInfo.processInfo.systemUptime
+            self.onChange?(value)
+        }
+        pendingWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func flushPendingValue() {
+        pendingWork?.cancel()
+        pendingWork = nil
+        guard let value = pendingValue else { return }
+        pendingValue = nil
+        lastCallbackUptime = ProcessInfo.processInfo.systemUptime
+        onChange?(value)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        flushPendingValue()
+    }
+
+    deinit {
+        pendingWork?.cancel()
+    }
+
+    static func make(min: Double,
+                     max: Double,
+                     value: Double,
+                     ticks: Int = 0,
+                     onChange: @escaping (Double) -> Void) -> KSlider {
+        let slider = KSlider()
+        slider.minValue = min
+        slider.maxValue = max
+        slider.doubleValue = Swift.max(min, Swift.min(max, value))
+        slider.numberOfTickMarks = Swift.max(0, ticks)
+        slider.allowsTickMarkValuesOnly = ticks > 0
+        slider.isContinuous = true
+        slider.target = slider
+        slider.action = #selector(fire)
+        slider.onChange = onChange
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        return slider
     }
 }
 
 final class KPopup: NSPopUpButton {
     var onSelect: ((Int) -> Void)?
-    @objc private func fire() { onSelect?(indexOfSelectedItem) }
-    static func make(_ options: [String], selected: Int, onSelect: @escaping (Int) -> Void) -> KPopup {
-        let p = KPopup(frame: .zero, pullsDown: false)
-        p.addItems(withTitles: options)
-        if options.indices.contains(selected) { p.selectItem(at: selected) }
-        p.target = p; p.action = #selector(fire)
-        p.onSelect = onSelect
-        p.translatesAutoresizingMaskIntoConstraints = false
-        return p
+
+    @objc private func fire() {
+        onSelect?(indexOfSelectedItem)
+    }
+
+    static func make(_ options: [String],
+                     selected: Int,
+                     onSelect: @escaping (Int) -> Void) -> KPopup {
+        let popup = KPopup(frame: .zero, pullsDown: false)
+        popup.controlSize = .small
+        popup.addItems(withTitles: options)
+        if !options.isEmpty {
+            popup.selectItem(at: Swift.max(0, Swift.min(options.count - 1, selected)))
+        }
+        popup.target = popup
+        popup.action = #selector(fire)
+        popup.onSelect = onSelect
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        return popup
     }
 }
 
-// MARK: - Стеклянная карточка
+private final class KSegment: NSSegmentedControl {
+    var onSelect: ((Int) -> Void)?
 
-/// Карточка настроек: матовое стекло + световая кромка + мягкая тень (liquid glass depth),
-/// перекрашивается под тему. Ширина — гибкая (тянется).
+    @objc private func fire() {
+        guard selectedSegment >= 0 else { return }
+        onSelect?(selectedSegment)
+    }
+
+    static func make(_ options: [String],
+                     selected: Int,
+                     onSelect: @escaping (Int) -> Void) -> KSegment {
+        let control = KSegment(labels: options,
+                               trackingMode: .selectOne,
+                               target: nil,
+                               action: nil)
+        control.controlSize = .small
+        control.segmentStyle = .automatic
+        control.target = control
+        control.action = #selector(fire)
+        control.onSelect = onSelect
+        control.translatesAutoresizingMaskIntoConstraints = false
+        if !options.isEmpty {
+            control.selectedSegment = Swift.max(0, Swift.min(options.count - 1, selected))
+        }
+        return control
+    }
+}
+
+private final class KActionButton: NSButton {
+    var onClick: (() -> Void)?
+
+    init(title: String = "") {
+        super.init(frame: .zero)
+        self.title = title
+        target = self
+        action = #selector(fire)
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func fire() {
+        onClick?()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: isEnabled ? .pointingHand : .arrow)
+    }
+}
+
+// MARK: - Surfaces
+
+/// Одна спокойная поверхность группы. Без дорогой тени и без ещё одного blur-слоя:
+/// материал уже задаётся окном/сайдбаром, а десятки shadow layers заметно дорожают при скролле.
 final class SettingsCard: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     override var wantsUpdateLayer: Bool { true }
+
     override func updateLayer() {
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         layer?.cornerRadius = Design.Radius.group
         layer?.cornerCurve = .continuous
-        layer?.borderWidth = 1
-        layer?.masksToBounds = false
+        layer?.masksToBounds = true
+        layer?.borderWidth = 0.5
         layer?.backgroundColor = Design.Color.surfaceFill(dark).cgColor
         layer?.borderColor = Design.Color.surfaceRim(dark).cgColor
-        // тень для depth-эффекта «плавающих» карточек на glass-поверхности
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = dark ? 0.12 : 0.08
-        layer?.shadowRadius = 10
-        layer?.shadowOffset = CGSize(width: 0, height: -3)
+        layer?.shadowOpacity = 0
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 
-/// Заголовок группы настроек — маркер-тип, чтобы `SK.scaffold` задал ему «прижатый» к карточке
-/// ритм (больше воздуха сверху, теснее снизу), как в Системных настройках macOS.
+/// Маркер заголовка группы. `SK.scaffold` использует тип для вертикального ритма.
 final class SKGroupHeader: NSTextField {
     init(_ text: String) {
         super.init(frame: .zero)
         stringValue = text
-        isEditable = false; isSelectable = false
-        isBezeled = false; isBordered = false; drawsBackground = false
+        isEditable = false
+        isSelectable = false
+        isBezeled = false
+        isBordered = false
+        drawsBackground = false
         font = Design.Font.calloutEmph
         textColor = .secondaryLabelColor
+        lineBreakMode = .byTruncatingTail
         translatesAutoresizingMaskIntoConstraints = false
     }
-    required init?(coder: NSCoder) { fatalError() }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 }
 
-// MARK: - Фабрика (SK.card / SK.toggleRow / …)
+private final class BadgePillView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        layer?.cornerRadius = Design.Radius.chip
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 0.5
+        layer?.backgroundColor = Design.Color.controlFill(dark).cgColor
+        layer?.borderColor = Design.Color.surfaceRim(dark).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
+// MARK: - Disclosure
+
+private final class SettingsDisclosureView: NSView {
+    private let header: KActionButton
+    private let body = NSStackView()
+    private let builder: () -> [NSView]
+    private let onStateChange: (Bool) -> Void
+    private var didBuild = false
+    private var expanded: Bool
+
+    init(title: String,
+         expanded: Bool,
+         onStateChange: @escaping (Bool) -> Void,
+         builder: @escaping () -> [NSView]) {
+        self.expanded = expanded
+        self.builder = builder
+        self.onStateChange = onStateChange
+        self.header = KActionButton(title: title)
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+
+        header.isBordered = false
+        header.bezelStyle = .inline
+        header.alignment = .left
+        header.font = Design.Font.body
+        header.imagePosition = .imageLeading
+        header.contentTintColor = .secondaryLabelColor
+        header.focusRingType = .default
+        header.setAccessibilityLabel(title)
+        header.onClick = { [weak self] in self?.toggle() }
+
+        body.orientation = .vertical
+        body.alignment = .width
+        body.spacing = 8
+        body.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [header, body])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            header.heightAnchor.constraint(greaterThanOrEqualToConstant: 34),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        applyState(buildIfNeeded: expanded)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func toggle() {
+        expanded.toggle()
+        applyState(buildIfNeeded: expanded)
+        onStateChange(expanded)
+    }
+
+    private func applyState(buildIfNeeded: Bool) {
+        header.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right",
+                               accessibilityDescription: nil)
+        if buildIfNeeded, !didBuild {
+            didBuild = true
+            for view in builder() {
+                body.addArrangedSubview(view)
+            }
+        }
+        body.isHidden = !expanded
+        needsLayout = true
+        superview?.needsLayout = true
+    }
+}
+
+// MARK: - Factory
 
 enum SK {
-    static let rowHeight: CGFloat = 44      // больше воздуха между контролами
+    static let rowHeight: CGFloat = 42
     static let inset: CGFloat = 14
+    private static let verticalInset: CGFloat = 9
 
-    /// Стеклянная карточка со строками, разделёнными волосяной линией. Тянется по ширине родителя.
+    /// Группа строк с одним фоном и простыми separators. Без constraints ширины на каждом
+    /// arrangedSubview: `.alignment = .width` уже делает это и создаёт меньше работы Auto Layout.
     static func card(_ rows: [NSView]) -> SettingsCard {
         let card = SettingsCard()
-        card.wantsLayer = true
         card.translatesAutoresizingMaskIntoConstraints = false
+
         let stack = NSStackView()
-        stack.orientation = .vertical; stack.alignment = .width; stack.spacing = 0
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for (i, r) in rows.enumerated() {
-            if i > 0 {
-                let sep = NSBox(); sep.boxType = .separator
-                sep.translatesAutoresizingMaskIntoConstraints = false
-                stack.addArrangedSubview(sep)
-                sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
-                sep.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16).isActive = true
-                sep.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+
+        for (index, row) in rows.enumerated() {
+            if index > 0 {
+                let separator = NSBox()
+                separator.boxType = .separator
+                separator.translatesAutoresizingMaskIntoConstraints = false
+                stack.addArrangedSubview(separator)
+                separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
             }
-            stack.addArrangedSubview(r)
-            r.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
-            r.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+            stack.addArrangedSubview(row)
         }
+
         card.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: card.topAnchor),
@@ -122,341 +389,483 @@ enum SK {
         return card
     }
 
-    /// Каркас строки: [иконка] заголовок … контрол справа. Тянется по ширине, мин. высота rowHeight.
-    private static func row(icon: String?, leading: NSView, trailing: NSView?, minHeight: CGFloat = rowHeight) -> NSView {
-        let wrap = NSView(); wrap.translatesAutoresizingMaskIntoConstraints = false
-        var items: [NSView] = []
+    /// Базовая адаптивная строка. В отличие от spacer+stack схемы здесь нет лишнего
+    /// промежуточного view, а длинная локализация переносится вместо распирания окна.
+    private static func row(icon: String?,
+                            leading: NSView,
+                            trailing: NSView?,
+                            minHeight: CGFloat = rowHeight) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        leading.translatesAutoresizingMaskIntoConstraints = false
+        leading.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        leading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        container.addSubview(leading)
+
+        var horizontalStart = container.leadingAnchor
+        var horizontalConstant = inset
+
         if let icon {
-            let iv = NSImageView()
-            iv.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-            iv.symbolConfiguration = .init(pointSize: 14, weight: .regular)
-            iv.contentTintColor = .secondaryLabelColor
-            iv.translatesAutoresizingMaskIntoConstraints = false
-            iv.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            items.append(iv)
+            let image = NSImageView()
+            image.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+            image.symbolConfiguration = .init(pointSize: 13, weight: .regular)
+            image.contentTintColor = .secondaryLabelColor
+            image.translatesAutoresizingMaskIntoConstraints = false
+            image.setContentHuggingPriority(.required, for: .horizontal)
+            image.setContentCompressionResistancePriority(.required, for: .horizontal)
+            container.addSubview(image)
+
+            NSLayoutConstraint.activate([
+                image.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
+                image.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                image.widthAnchor.constraint(equalToConstant: 18),
+                image.heightAnchor.constraint(equalToConstant: 18),
+            ])
+            horizontalStart = image.trailingAnchor
+            horizontalConstant = 10
         }
-        items.append(leading)
-        let spacer = NSView(); spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        spacer.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        items.append(spacer)
-        if let trailing { items.append(trailing) }
-        let hs = NSStackView(views: items)
-        hs.orientation = .horizontal; hs.alignment = .centerY; hs.spacing = 10
-        hs.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(hs)
-        NSLayoutConstraint.activate([
-            hs.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: inset),
-            hs.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -inset),
-            hs.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-            wrap.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
-        ])
-        return wrap
+
+        var constraints: [NSLayoutConstraint] = [
+            leading.leadingAnchor.constraint(equalTo: horizontalStart, constant: horizontalConstant),
+            leading.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            leading.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor, constant: verticalInset),
+            leading.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -verticalInset),
+            container.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
+        ]
+
+        if let trailing {
+            trailing.translatesAutoresizingMaskIntoConstraints = false
+            trailing.setContentCompressionResistancePriority(.required, for: .horizontal)
+            container.addSubview(trailing)
+            constraints.append(contentsOf: [
+                trailing.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
+                trailing.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                trailing.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor, constant: verticalInset),
+                trailing.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -verticalInset),
+                leading.trailingAnchor.constraint(lessThanOrEqualTo: trailing.leadingAnchor, constant: -12),
+            ])
+        } else {
+            constraints.append(leading.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset))
+        }
+
+        NSLayoutConstraint.activate(constraints)
+        return container
     }
 
-    /// Заголовок(+подзаголовок) для левой части строки.
     private static func titleBlock(_ title: String, _ subtitle: String?) -> NSView {
-        let t = NSTextField(labelWithString: title)
-        t.font = Design.Font.body; t.lineBreakMode = .byTruncatingTail
-        t.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        guard let subtitle, !subtitle.isEmpty else { return t }
-        let s = NSTextField(labelWithString: subtitle)
-        s.font = Design.Font.caption
-        s.textColor = .secondaryLabelColor
-        s.lineBreakMode = .byWordWrapping
-        s.maximumNumberOfLines = 2
-        s.cell?.wraps = true
-        s.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let v = NSStackView(views: [t, s])
-        v.orientation = .vertical; v.alignment = .leading; v.spacing = 1
-        return v
+        let titleLabel = NSTextField(wrappingLabelWithString: title)
+        titleLabel.font = Design.Font.body
+        titleLabel.lineBreakMode = .byWordWrapping
+        titleLabel.maximumNumberOfLines = 2
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        guard let subtitle, !subtitle.isEmpty else {
+            return titleLabel
+        }
+
+        let subtitleLabel = NSTextField(wrappingLabelWithString: subtitle)
+        subtitleLabel.font = Design.Font.caption
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byWordWrapping
+        subtitleLabel.maximumNumberOfLines = 3
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let stack = NSStackView(views: [titleLabel, subtitleLabel])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 2
+        stack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return stack
     }
 
-    /// Строка-переключатель: иконка+заголовок(+подзаголовок) слева, живой свитч справа.
-    static func toggleRow(icon: String? = nil, title: String, subtitle: String? = nil,
-                          isOn: Bool, enabled: Bool = true, onChange: @escaping (Bool) -> Void) -> NSView {
-        let sw = KSwitch(on: isOn); sw.onChange = onChange; sw.isEnabled = enabled
-        let r = row(icon: icon, leading: titleBlock(title, subtitle), trailing: sw)
-        r.alphaValue = enabled ? 1 : 0.5
-        return r
+    static func toggleRow(icon: String? = nil,
+                          title: String,
+                          subtitle: String? = nil,
+                          isOn: Bool,
+                          enabled: Bool = true,
+                          onChange: @escaping (Bool) -> Void) -> NSView {
+        let control = KSwitch(on: isOn)
+        control.onChange = onChange
+        control.isEnabled = enabled
+        let result = row(icon: icon,
+                         leading: titleBlock(title, subtitle),
+                         trailing: control)
+        result.alphaValue = enabled ? 1 : 0.48
+        return result
     }
 
-    /// Строка-слайдер: заголовок слева, слайдер тянется, значение справа.
-    static func sliderRow(icon: String? = nil, title: String, min: Double, max: Double, value: Double,
-                          ticks: Int = 0, unit: String = "", enabled: Bool = true,
+    static func sliderRow(icon: String? = nil,
+                          title: String,
+                          min: Double,
+                          max: Double,
+                          value: Double,
+                          ticks: Int = 0,
+                          unit: String = "",
+                          enabled: Bool = true,
                           onChange: @escaping (Double, NSTextField) -> Void) -> NSView {
-        let valLabel = NSTextField(labelWithString: String(format: "%.0f%@", value, unit))
-        valLabel.font = Design.Font.numericBody; valLabel.textColor = .secondaryLabelColor
-        valLabel.alignment = .right; valLabel.translatesAutoresizingMaskIntoConstraints = false
-        valLabel.widthAnchor.constraint(equalToConstant: 52).isActive = true
-        let slider = KSlider.make(min: min, max: max, value: value, ticks: ticks) { v in onChange(v, valLabel) }
+        let valueLabel = NSTextField(labelWithString: String(format: "%.0f%@", value, unit))
+        valueLabel.font = Design.Font.numericBody
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
+
+        let slider = KSlider.make(min: min, max: max, value: value, ticks: ticks) { changed in
+            onChange(changed, valueLabel)
+        }
         slider.isEnabled = enabled
-        slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         slider.setContentHuggingPriority(.init(1), for: .horizontal)
-        let t = NSTextField(labelWithString: title); t.font = Design.Font.body
-        t.setContentCompressionResistancePriority(.required, for: .horizontal)
-        t.setContentHuggingPriority(.required, for: .horizontal)
-        let hs = NSStackView(views: [t, slider, valLabel])
-        hs.orientation = .horizontal; hs.alignment = .centerY; hs.spacing = 12
-        let r = row(icon: icon, leading: hs, trailing: nil)
-        r.alphaValue = enabled ? 1 : 0.5
-        return r
+        slider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
+
+        let controls = NSStackView(views: [slider, valueLabel])
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        controls.widthAnchor.constraint(greaterThanOrEqualToConstant: 178).isActive = true
+        let maxWidth = controls.widthAnchor.constraint(lessThanOrEqualToConstant: 360)
+        maxWidth.priority = .defaultHigh
+        maxWidth.isActive = true
+
+        let result = row(icon: icon,
+                         leading: titleBlock(title, nil),
+                         trailing: controls)
+        let preferred = controls.widthAnchor.constraint(equalTo: result.widthAnchor,
+                                                         multiplier: 0.48,
+                                                         constant: -20)
+        preferred.priority = .defaultHigh
+        preferred.isActive = true
+        result.alphaValue = enabled ? 1 : 0.48
+        return result
     }
 
-    /// Строка-сегменты (2-5 вариантов): заголовок слева, пилюли справа (PillTabBar-стиль).
-    static func segmentRow(icon: String? = nil, title: String, options: [String], selected: Int,
+    /// До трёх коротких вариантов показываются нативными сегментами. Длинные или
+    /// многочисленные варианты автоматически становятся popup и не распирают окно.
+    static func segmentRow(icon: String? = nil,
+                           title: String,
+                           options: [String],
+                           selected: Int,
                            onSelect: @escaping (Int) -> Void) -> NSView {
-        let bar = PillTabBar(labels: options, selected: selected)
-        bar.onSelect = onSelect
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        bar.widthAnchor.constraint(greaterThanOrEqualToConstant: CGFloat(options.count) * 62).isActive = true
-        return row(icon: icon, leading: titleBlock(title, nil), trailing: bar)
+        let totalCharacters = options.reduce(0) { $0 + $1.count }
+        let control: NSView
+        if options.count <= 3, totalCharacters <= 30 {
+            control = KSegment.make(options, selected: selected, onSelect: onSelect)
+        } else {
+            control = KPopup.make(options, selected: selected, onSelect: onSelect)
+        }
+        return row(icon: icon,
+                   leading: titleBlock(title, nil),
+                   trailing: control)
     }
 
-    /// Строка-поп-ап (длинный список): заголовок слева, NSPopUpButton справа.
-    static func selectRow(icon: String? = nil, title: String, options: [String], selected: Int,
+    static func selectRow(icon: String? = nil,
+                          title: String,
+                          options: [String],
+                          selected: Int,
                           onSelect: @escaping (Int) -> Void) -> NSView {
-        let p = KPopup.make(options, selected: selected, onSelect: onSelect)
-        return row(icon: icon, leading: titleBlock(title, nil), trailing: p)
+        let popup = KPopup.make(options, selected: selected, onSelect: onSelect)
+        return row(icon: icon,
+                   leading: titleBlock(title, nil),
+                   trailing: popup)
     }
 
-    /// Строка с произвольным контролом справа (кнопка/поле/чип).
-    static func controlRow(icon: String? = nil, title: String, subtitle: String? = nil, control: NSView) -> NSView {
-        control.translatesAutoresizingMaskIntoConstraints = false
-        return row(icon: icon, leading: titleBlock(title, subtitle), trailing: control)
+    static func controlRow(icon: String? = nil,
+                           title: String,
+                           subtitle: String? = nil,
+                           control: NSView) -> NSView {
+        return row(icon: icon,
+                   leading: titleBlock(title, subtitle),
+                   trailing: control)
     }
 
-    /// Обернуть произвольный вид в строку карточки с инсетом (нестандартный контент: хедер, ряд кнопок, кредиты).
-    /// fill: true — контент тянется на всю ширину строки (единая правая кромка со всеми карточками);
-    /// false (по умолч.) — жмётся к содержимому (для одиночных контролов, которым растяжка не нужна).
-    static func customRow(_ view: NSView, minHeight: CGFloat = rowHeight, fill: Bool = false) -> NSView {
+    static func customRow(_ view: NSView,
+                          minHeight: CGFloat = rowHeight,
+                          fill: Bool = false) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
         view.translatesAutoresizingMaskIntoConstraints = false
-        let wrap = NSView(); wrap.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(view)
+        container.addSubview(view)
+
         let trailing = fill
-            ? view.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -inset)
-            : view.trailingAnchor.constraint(lessThanOrEqualTo: wrap.trailingAnchor, constant: -inset)
+            ? view.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset)
+            : view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -inset)
+
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: inset),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
             trailing,
-            view.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 10),
-            view.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -10),
-            wrap.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: verticalInset),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -verticalInset),
+            container.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
         ])
-        return wrap
+        return container
     }
 
-    /// Строка с текстовым полем во всю ширину (плейсхолдер как подпись). Поле тянется по строке.
-    static func textFieldRow(icon: String? = nil, field: NSTextField, placeholder: String? = nil) -> NSView {
-        if let placeholder { field.placeholderString = placeholder }
+    static func textFieldRow(icon: String? = nil,
+                             field: NSTextField,
+                             placeholder: String? = nil) -> NSView {
+        if let placeholder {
+            field.placeholderString = placeholder
+        }
         field.font = Design.Font.body
         field.translatesAutoresizingMaskIntoConstraints = false
-        let wrap = NSView(); wrap.translatesAutoresizingMaskIntoConstraints = false
-        var lead: CGFloat = inset
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(field)
+
+        var leadingAnchor = container.leadingAnchor
+        var leadingConstant = inset
+
         if let icon {
-            let iv = NSImageView()
-            iv.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-            iv.symbolConfiguration = .init(pointSize: 14, weight: .regular)
-            iv.contentTintColor = .secondaryLabelColor
-            iv.translatesAutoresizingMaskIntoConstraints = false
-            wrap.addSubview(iv)
+            let image = NSImageView()
+            image.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+            image.symbolConfiguration = .init(pointSize: 13, weight: .regular)
+            image.contentTintColor = .secondaryLabelColor
+            image.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(image)
             NSLayoutConstraint.activate([
-                iv.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: inset),
-                iv.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-                iv.widthAnchor.constraint(equalToConstant: 20),
+                image.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
+                image.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+                image.widthAnchor.constraint(equalToConstant: 18),
+                image.heightAnchor.constraint(equalToConstant: 18),
             ])
-            lead = inset + 20 + 10
+            leadingAnchor = image.trailingAnchor
+            leadingConstant = 10
         }
-        wrap.addSubview(field)
+
         NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: lead),
-            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -inset),
-            field.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-            wrap.heightAnchor.constraint(greaterThanOrEqualToConstant: rowHeight),
+            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingConstant),
+            field.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
+            field.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            container.heightAnchor.constraint(greaterThanOrEqualToConstant: rowHeight),
         ])
-        return wrap
+        return container
     }
 
-    /// Вид во всю ширину карточки с инсетом и по вертикали (для многострочных редакторов: NSScrollView/NSTextView).
     static func stretchRow(_ view: NSView, height: CGFloat) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
         view.translatesAutoresizingMaskIntoConstraints = false
-        let wrap = NSView(); wrap.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(view)
+        container.addSubview(view)
+
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: inset),
-            view.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -inset),
-            view.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 10),
-            view.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -10),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: verticalInset),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -verticalInset),
             view.heightAnchor.constraint(equalToConstant: height),
         ])
-        return wrap
+        return container
     }
 
-    /// Информационная строка: иконка + текст (может переноситься), тон по смыслу.
-    static func infoRow(icon: String, text: String, tint: NSColor = .secondaryLabelColor) -> NSView {
-        let iv = NSImageView()
-        iv.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-        iv.contentTintColor = tint
-        iv.symbolConfiguration = .init(pointSize: 13, weight: .medium)
-        iv.translatesAutoresizingMaskIntoConstraints = false
-        iv.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        let l = NSTextField(wrappingLabelWithString: text)
-        l.font = Design.Font.caption; l.textColor = tint
-        let hs = NSStackView(views: [iv, l])
-        hs.orientation = .horizontal; hs.alignment = .top; hs.spacing = 8
-        let r = row(icon: nil, leading: hs, trailing: nil, minHeight: 38)
-        return r
+    static func infoRow(icon: String,
+                        text: String,
+                        tint: NSColor = .secondaryLabelColor) -> NSView {
+        let image = NSImageView()
+        image.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        image.contentTintColor = tint
+        image.symbolConfiguration = .init(pointSize: 12, weight: .regular)
+        image.translatesAutoresizingMaskIntoConstraints = false
+        image.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        image.heightAnchor.constraint(equalToConstant: 16).isActive = true
+
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = Design.Font.caption
+        label.textColor = tint
+        label.maximumNumberOfLines = 0
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let content = NSStackView(views: [image, label])
+        content.orientation = .horizontal
+        content.alignment = .top
+        content.spacing = 7
+        return row(icon: nil, leading: content, trailing: nil, minHeight: 36)
     }
 
-    /// Строка с цветным бейджем справа: иконка + заголовок, бейдж (фоновая плашка + текст) прижат вправо.
-    /// Используется для статусов: «Активен», «Отключено», «Pro» и т.д.
-    static func badgeRow(icon: String? = nil, title: String, badgeText: String, badgeColor: NSColor = .secondaryLabelColor) -> NSView {
+    static func badgeRow(icon: String? = nil,
+                         title: String,
+                         badgeText: String,
+                         badgeColor: NSColor = .secondaryLabelColor) -> NSView {
         let badge = NSTextField(labelWithString: badgeText)
-        badge.font = Design.Font.caption; badge.textColor = badgeColor
-        badge.alignment = .center; badge.translatesAutoresizingMaskIntoConstraints = false
-        let badgeWrap = BadgePillView()
-        badgeWrap.translatesAutoresizingMaskIntoConstraints = false
-        badgeWrap.addSubview(badge)
+        badge.font = Design.Font.caption
+        badge.textColor = badgeColor
+        badge.alignment = .center
+        badge.translatesAutoresizingMaskIntoConstraints = false
+
+        let pill = BadgePillView()
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(badge)
         NSLayoutConstraint.activate([
-            badge.leadingAnchor.constraint(equalTo: badgeWrap.leadingAnchor, constant: 8),
-            badge.trailingAnchor.constraint(equalTo: badgeWrap.trailingAnchor, constant: -8),
-            badge.topAnchor.constraint(equalTo: badgeWrap.topAnchor, constant: 4),
-            badge.bottomAnchor.constraint(equalTo: badgeWrap.bottomAnchor, constant: -4),
+            badge.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 8),
+            badge.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -8),
+            badge.topAnchor.constraint(equalTo: pill.topAnchor, constant: 3),
+            badge.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -3),
         ])
-        return row(icon: icon, leading: titleBlock(title, nil), trailing: badgeWrap)
+        return row(icon: icon,
+                   leading: titleBlock(title, nil),
+                   trailing: pill)
     }
 
-    /// Строка-ридаут: иконка + крупное моноширинное значение + подпись. Для зарядов, температур, процентов.
-    static func readoutRow(icon: String, value: String, caption: String? = nil) -> NSView {
-        let iv = NSImageView()
-        iv.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-        iv.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .regular)
-        iv.contentTintColor = .secondaryLabelColor
-        iv.translatesAutoresizingMaskIntoConstraints = false
-        iv.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        let val = NSTextField(labelWithString: value)
-        val.font = Design.Font.numericLarge; val.textColor = .labelColor
-        let cap = NSTextField(labelWithString: caption ?? "")
-        cap.font = Design.Font.caption; cap.textColor = .secondaryLabelColor
-        let valCol = NSStackView(views: [val, cap]); valCol.orientation = .vertical; valCol.alignment = .leading; valCol.spacing = 0
-        let hs = NSStackView(views: [iv, valCol]); hs.orientation = .horizontal; hs.alignment = .centerY; hs.spacing = 10
-        return customRow(hs, minHeight: 52)
+    static func readoutRow(icon: String,
+                           value: String,
+                           caption: String? = nil) -> NSView {
+        let image = NSImageView()
+        image.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        image.symbolConfiguration = .init(pointSize: 19, weight: .regular)
+        image.contentTintColor = .secondaryLabelColor
+        image.translatesAutoresizingMaskIntoConstraints = false
+        image.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        image.heightAnchor.constraint(equalToConstant: 24).isActive = true
+
+        let valueLabel = NSTextField(labelWithString: value)
+        valueLabel.font = Design.Font.numericLarge
+        valueLabel.textColor = .labelColor
+
+        var labels: [NSView] = [valueLabel]
+        if let caption, !caption.isEmpty {
+            let captionLabel = NSTextField(wrappingLabelWithString: caption)
+            captionLabel.font = Design.Font.caption
+            captionLabel.textColor = .secondaryLabelColor
+            captionLabel.maximumNumberOfLines = 2
+            labels.append(captionLabel)
+        }
+
+        let column = NSStackView(views: labels)
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 1
+
+        let content = NSStackView(views: [image, column])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 10
+        return customRow(content, minHeight: 52)
     }
 
-    /// Навигационная строка: иконка + заголовок(+подзаголовок) + чеврон справа. Клик → onClick.
-    static func linkRow(icon: String? = nil, title: String, subtitle: String? = nil,
+    static func linkRow(icon: String? = nil,
+                        title: String,
+                        subtitle: String? = nil,
                         onClick: @escaping () -> Void) -> NSView {
         let chevron = NSImageView()
         chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
         chevron.contentTintColor = .tertiaryLabelColor
-        chevron.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        chevron.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
         chevron.translatesAutoresizingMaskIntoConstraints = false
         chevron.widthAnchor.constraint(equalToConstant: 12).isActive = true
-        let r = row(icon: icon, leading: titleBlock(title, subtitle), trailing: chevron)
-        let catcher = ClickCatcher()
-        catcher.translatesAutoresizingMaskIntoConstraints = false
-        r.addSubview(catcher)
+
+        let result = row(icon: icon,
+                         leading: titleBlock(title, subtitle),
+                         trailing: chevron)
+
+        let action = KActionButton()
+        action.isBordered = false
+        action.focusRingType = .default
+        action.setAccessibilityLabel(title)
+        action.onClick = onClick
+        result.addSubview(action)
         NSLayoutConstraint.activate([
-            catcher.leadingAnchor.constraint(equalTo: r.leadingAnchor),
-            catcher.trailingAnchor.constraint(equalTo: r.trailingAnchor),
-            catcher.topAnchor.constraint(equalTo: r.topAnchor),
-            catcher.bottomAnchor.constraint(equalTo: r.bottomAnchor),
+            action.leadingAnchor.constraint(equalTo: result.leadingAnchor),
+            action.trailingAnchor.constraint(equalTo: result.trailingAnchor),
+            action.topAnchor.constraint(equalTo: result.topAnchor),
+            action.bottomAnchor.constraint(equalTo: result.bottomAnchor),
         ])
-        catcher.onClick = onClick
-        return r
+        return result
     }
 
-    /// Раскрывающаяся группа «Расширенно»: заголовок-кнопка со стрелкой прячет/показывает контент.
-    /// Само-содержится (без пересборки секции) — переключает isHidden контента в стеке.
-    /// Запомненное состояние раскрытий (ключ = заголовок): чтобы пересборка секции от тумблера
-    /// не схлопывала открытый блок обратно. Живёт на время сессии.
+    /// Состояние сохраняется на время сессии. Для новых мест лучше передавать стабильный `key`,
+    /// потому что локализованный title может совпасть в разных разделах.
     static var disclosureState: [String: Bool] = [:]
 
-    static func disclosure(title: String, expanded: Bool = false, rows: [NSView]) -> NSView {
-        let key = title
-        let isOpen = disclosureState[key] ?? expanded
-        let content = NSStackView(views: rows)
-        content.orientation = .vertical; content.alignment = .width; content.spacing = 8
-        content.isHidden = !isOpen
-        let chevron = NSImageView()
-        chevron.image = NSImage(systemSymbolName: isOpen ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
-        chevron.contentTintColor = .secondaryLabelColor
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        chevron.widthAnchor.constraint(equalToConstant: 14).isActive = true
-        let lbl = NSTextField(labelWithString: title); lbl.font = Design.Font.calloutEmph; lbl.textColor = .secondaryLabelColor
-        let head = NSStackView(views: [chevron, lbl])
-        head.orientation = .horizontal; head.alignment = .centerY; head.spacing = 6
-        let btn = ClickCatcher()
-        btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.addSubview(head)
-        head.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            head.leadingAnchor.constraint(equalTo: btn.leadingAnchor),
-            head.centerYAnchor.constraint(equalTo: btn.centerYAnchor),
-            btn.heightAnchor.constraint(equalToConstant: 28),
-        ])
-        btn.onClick = { [weak content, weak chevron] in
-            guard let content, let chevron else { return }
-            let show = content.isHidden
-            content.isHidden = !show
-            chevron.image = NSImage(systemSymbolName: show ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
-            SK.disclosureState[key] = show
-        }
-        let v = NSStackView(views: [btn, content])
-        v.orientation = .vertical; v.alignment = .width; v.spacing = 8
-        return v
+    static func disclosure(key: String? = nil,
+                           title: String,
+                           expanded: Bool = false,
+                           rows: [NSView]) -> NSView {
+        disclosure(key: key,
+                   title: title,
+                   expanded: expanded,
+                   builder: { rows })
     }
 
-    /// Каркас секции: заголовок(+подзаголовок) + карточки, во всю ГИБКУЮ ширину контента.
-    static func scaffold(_ title: String, _ subtitle: String? = nil, _ items: [NSView]) -> NSView {
-        let head = NSTextField(labelWithString: title); head.font = Design.Font.title
-        var views: [NSView] = [head]
+    /// Реально ленивое раскрытие: `builder` вызывается только при первом открытии.
+    static func lazyDisclosure(key: String,
+                               title: String,
+                               expanded: Bool = false,
+                               builder: @escaping () -> [NSView]) -> NSView {
+        disclosure(key: key,
+                   title: title,
+                   expanded: expanded,
+                   builder: builder)
+    }
+
+    private static func disclosure(key: String?,
+                                   title: String,
+                                   expanded: Bool,
+                                   builder: @escaping () -> [NSView]) -> NSView {
+        let stateKey = key ?? title
+        let isExpanded = disclosureState[stateKey] ?? expanded
+        return SettingsDisclosureView(title: title,
+                                      expanded: isExpanded,
+                                      onStateChange: { disclosureState[stateKey] = $0 },
+                                      builder: builder)
+    }
+
+    /// Каркас раздела без ручного приколачивания каждого arrangedSubview к ширине стека.
+    static func scaffold(_ title: String,
+                         _ subtitle: String? = nil,
+                         _ items: [NSView]) -> NSView {
+        let heading = NSTextField(wrappingLabelWithString: title)
+        heading.font = Design.Font.title
+        heading.maximumNumberOfLines = 2
+
+        var views: [NSView] = [heading]
         var subtitleLabel: NSTextField?
+
         if let subtitle, !subtitle.isEmpty {
-            let s = NSTextField(wrappingLabelWithString: subtitle)
-            s.font = Design.Font.caption; s.textColor = .secondaryLabelColor
-            subtitleLabel = s
-            views.append(s)
+            let label = NSTextField(wrappingLabelWithString: subtitle)
+            label.font = Design.Font.caption
+            label.textColor = .secondaryLabelColor
+            label.maximumNumberOfLines = 3
+            subtitleLabel = label
+            views.append(label)
         }
         views.append(contentsOf: items)
+
         let stack = NSStackView(views: views)
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 14
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        // Всё тянется во всю ширину стека, КРОМЕ заголовков групп (SKGroupHeader сидит слева).
-        for v in views where !(v is SKGroupHeader) {
-            v.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
-            v.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
-        }
-        // Ритм как в Системных настройках macOS: подзаголовок прижат к заголовку раздела; заголовок
-        // группы «сидит» на своей карточке — воздух над ним, теснее под ним.
+
         if let subtitleLabel {
-            stack.setCustomSpacing(6, after: head)                     // 6pt: подзаголовок под титулом
-            stack.setCustomSpacing(Design.Space.s5, after: subtitleLabel) // 20pt: воздух перед 1-й группой
+            stack.setCustomSpacing(5, after: heading)
+            stack.setCustomSpacing(Design.Space.s5, after: subtitleLabel)
+        } else {
+            stack.setCustomSpacing(Design.Space.s5, after: heading)
         }
-        for (i, v) in views.enumerated() where i > 0 && v is SKGroupHeader {
-            stack.setCustomSpacing(Design.Space.s5, after: views[i - 1]) // 20pt перед заголовком группы
-            stack.setCustomSpacing(8, after: v)                          // 8pt: прижать карточку к нему
+
+        for (index, view) in views.enumerated() where view is SKGroupHeader {
+            if index > 0 {
+                stack.setCustomSpacing(Design.Space.s5, after: views[index - 1])
+            }
+            stack.setCustomSpacing(7, after: view)
         }
         return stack
     }
 }
 
-/// Стеклянная плашка-бейдж для SK.badgeRow: controlFill + surfaceRim, тема-зависимая.
-private final class BadgePillView: NSView {
-    override var wantsUpdateLayer: Bool { true }
-    override func updateLayer() {
-        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        layer?.cornerRadius = Design.Radius.chip; layer?.cornerCurve = .continuous
-        layer?.borderWidth = 1
-        layer?.backgroundColor = Design.Color.controlFill(dark).cgColor
-        layer?.borderColor = Design.Color.surfaceRim(dark).cgColor
-    }
-}
-
-/// Прозрачная кликабельная область (для disclosure-заголовка).
+/// Сохранён для совместимости с кодом, который мог использовать этот тип напрямую.
+/// Новые `SK.linkRow` и `SK.disclosure` используют клавиатурно-доступные NSButton.
 final class ClickCatcher: NSView {
     var onClick: (() -> Void)?
-    override func mouseDown(with event: NSEvent) { onClick?() }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
 }
