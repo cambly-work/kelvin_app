@@ -16,7 +16,7 @@ final class DiskUsage {
     private func counters() -> (r: UInt64, w: UInt64) {
         var r: UInt64 = 0, w: UInt64 = 0
         var it: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+        guard IOServiceGetMatchingServices(ioPort(),
                                            IOServiceMatching("IOBlockStorageDriver"), &it) == KERN_SUCCESS else { return (0, 0) }
         defer { IOObjectRelease(it) }
         var svc = IOIteratorNext(it)

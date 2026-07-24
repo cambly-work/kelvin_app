@@ -54,7 +54,7 @@ enum BatteryReader {
     }
 
     static func read() -> BatteryInfo? {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault,
+        let service = IOServiceGetMatchingService(ioPort(),
                                                   IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }

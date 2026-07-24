@@ -29,21 +29,45 @@ enum KeyboardLayoutEngine {
     private static let cacheLock = NSLock()
     private static var dataCache: [String: Data] = [:]
     private static var layoutsCache: [TISInputSource]?
+    private struct InputSnapshot {
+        let sourceID: String
+        let targetID: String
+        let sourceLanguage: String
+        let targetLanguage: String
+        let sourceData: Data
+        let targetData: Data
+    }
 
     static func conversion(for keys: [LayoutTypedKey]) -> Conversion? {
-        guard !keys.isEmpty,
-              let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let sourceLanguage = language(of: source),
-              let target = oppositeLayout(to: sourceLanguage),
-              let targetLanguage = language(of: target),
-              let sourceData = layoutData(of: source),
-              let targetData = layoutData(of: target) else { return nil }
+        guard !keys.isEmpty else { return nil }
+
+        // HIToolbox's Text Input Source API is main-thread-affine on recent
+        // macOS releases. Calling it directly from Kelvin's CGEventTap thread
+        // ends in _dispatch_assert_queue_fail (SIGILL). Copy the small immutable
+        // snapshot on main, then keep the actual translation off the UI thread.
+        let snapshot: InputSnapshot? = onMain {
+            guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+                  let sourceLanguage = language(of: source),
+                  let target = oppositeLayout(to: sourceLanguage),
+                  let targetLanguage = language(of: target),
+                  let sourceData = layoutData(of: source),
+                  let targetData = layoutData(of: target) else { return nil }
+            return InputSnapshot(
+                sourceID: id(of: source),
+                targetID: id(of: target),
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                sourceData: sourceData,
+                targetData: targetData
+            )
+        }
+        guard let snapshot else { return nil }
 
         var original = ""
         var converted = ""
         for key in keys {
-            guard let from = translate(key, using: sourceData),
-                  let to = translate(key, using: targetData) else { return nil }
+            guard let from = translate(key, using: snapshot.sourceData),
+                  let to = translate(key, using: snapshot.targetData) else { return nil }
             original.append(from)
             converted.append(to)
         }
@@ -51,16 +75,22 @@ enum KeyboardLayoutEngine {
         return Conversion(
             original: original,
             converted: converted,
-            sourceID: id(of: source),
-            targetID: id(of: target),
-            sourceLanguage: sourceLanguage,
-            targetLanguage: targetLanguage
+            sourceID: snapshot.sourceID,
+            targetID: snapshot.targetID,
+            sourceLanguage: snapshot.sourceLanguage,
+            targetLanguage: snapshot.targetLanguage
         )
     }
 
     static func switchTo(id wantedID: String) {
-        guard let target = installedLayouts().first(where: { id(of: $0) == wantedID }) else { return }
-        TISSelectInputSource(target)
+        onMain {
+            guard let target = installedLayouts().first(where: { id(of: $0) == wantedID }) else { return }
+            TISSelectInputSource(target)
+        }
+    }
+
+    private static func onMain<T>(_ body: () -> T) -> T {
+        Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)
     }
 
     static func splitTrailingPunctuation(_ text: String) -> (coreLength: Int, suffix: String) {

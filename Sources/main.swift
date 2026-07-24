@@ -653,16 +653,16 @@ final class PopoverController: NSViewController {
     /// Нейтральная controlFill-капсула вокруг вердикта (точка + слово) — сенсор-подпись.
     private let verdictPill = CapsuleView()
     private let statSysVal = NSTextField(labelWithString: "—")
-    private let statSysCap = NSTextField(labelWithString: L("Ватт"))
+    private var statSysCap = NSTextField(labelWithString: L("Ватт"))
     private let statBatVal = NSTextField(labelWithString: "—")
     // «АКБ» вместо «В батарею»: значение знаковое (+заряд/−разряд/0), направление несёт знак —
     // подпись «В батарею: −12» была самопротиворечивой. (statTimeVal/statTimeCap «ОСТАЛОСЬ» удалены — мёртвый код.)
-    private let statBatCap = NSTextField(labelWithString: L("АКБ"))
+    private var statBatCap = NSTextField(labelWithString: L("АКБ"))
     // V2 витальные-приборы: 4 ячейки Ватт/Темп/Кулер/АКБ (макет). Темп тинтуется по режиму.
     private let statTempVal = NSTextField(labelWithString: "—")
-    private let statTempCap = NSTextField(labelWithString: L("Темп"))
+    private var statTempCap = NSTextField(labelWithString: L("Темп"))
     private let statFanVal = NSTextField(labelWithString: "—")
-    private let statFanCap = NSTextField(labelWithString: L("Кулер"))
+    private var statFanCap = NSTextField(labelWithString: L("Кулер"))
     private let graph = GraphView()
     private let flowView = FlowView(frame: .zero)
     private let flowInfoBar = FlowInfoBar(frame: .zero)
@@ -696,7 +696,7 @@ final class PopoverController: NSViewController {
 
     private let compStatus = NSTextField(labelWithString: "")
     private var comp: [String: NSTextField] = [:]
-    private let installBtn = GlassButton(title: L("Установить хелпер…"), symbol: "arrow.down.circle")
+    private var installBtn = GlassButton(title: L("Установить хелпер…"), symbol: "arrow.down.circle")
     private let sensorsView = HardwareView(frame: .zero)
     private let sensorDetail = NSTextField(labelWithString: "")
     private let privacyView = PrivacyView(frame: .zero)   // вкладка «Приватность» — радар соединений
@@ -743,7 +743,7 @@ final class PopoverController: NSViewController {
     private var verdictLevelOK = true                  // .ok → клик по капсуле no-op (нет pointingHand)
     private var tempCritStreak = 0                     // устойчивость крит-температуры: мгновенный скачок ≠ «Перегрев»
     private var lastVerdictLevel: Design.Level = .ok   // резолвнутый уровень вердикта → тинт кольца (герой-шапка)
-    private var lastAuraLevel: Design.Level? = nil     // цвет ауры перекрашиваем ТОЛЬКО при смене режима (без гирлянды)
+    private var lastAuraColor: NSColor? = nil          // аура строго следует кольцу; guard не перезапускает fade каждый тик
 
     private static func sectionLabel(_ s: String) -> NSTextField {
         // V3 (совет по типографике): заголовки секций — ОБЫЧНЫЙ регистр, без трекинга, вторичный цвет.
@@ -992,7 +992,25 @@ final class PopoverController: NSViewController {
 
     /// Пересобирает поповер: компактный верх (battery/toggles/stats) стопкой,
     /// тяжёлые секции (flow/hardware/apps) — через сегмент-контрол, по одной за раз.
+    /// Обновить подписи статических элементов при смене языка. Вызывается из buildModules().
+    private func relocalizeStatic() {
+        statSysCap.stringValue = L("Ватт")
+        statBatCap.stringValue = L("АКБ")
+        statTempCap.stringValue = L("Темп")
+        statFanCap.stringValue = L("Кулер")
+        installBtn.title = L("Установить хелпер…")
+        for v in (footer as? NSStackView)?.subviews ?? [] {
+            if let b = v as? FooterIconButton, let sel = b.action {
+                if sel == #selector(refreshApps) { b.toolTip = L("Обновить") }
+                else if sel == #selector(AppDelegate.openToolsFromFooter) { b.toolTip = L("Инструменты") }
+                else if sel == #selector(openSettings) { b.toolTip = L("Настройки") }
+                else if sel == #selector(NSApplication.terminate(_:)) { b.toolTip = L("Выйти") }
+            }
+        }
+    }
+
     func buildModules() {
+        relocalizeStatic()
         cards.removeAll(); ccToggles = []; tabTiles = [:]; btSlots = []; tabContainer = nil
         headerTile = nil; tabAreaView = nil           // якоря спайна пересоздаются при ребилде
         // прогреваем сенсоры данными ДО замера высоты вкладок — иначе пустая панель
@@ -1560,11 +1578,9 @@ final class PopoverController: NSViewController {
             t.setContentCompressionResistancePriority(.required, for: .horizontal)      // заголовок держит ширину
             let v = NSTextField(labelWithString: L("проверка…")); v.font = Design.Font.numericBody; v.alignment = .right
             v.textColor = .tertiaryLabelColor
-            // Значение ПЕРЕНОСИТСЯ на 2-ю строку, а не обрезается: «ослаблена (csrutil)», boot-args verbatim,
-            // «31 · nsattributed…» — суть панели доверия нельзя прятать за «…» (честность). Заголовок держит
-            // ширину (required), значение переносится в своей колонке (~половина IW).
-            v.lineBreakMode = .byWordWrapping; v.maximumNumberOfLines = 2
-            v.preferredMaxLayoutWidth = IW * 0.5
+            // Статус остаётся одной компактной правой колонкой. Полная строка
+            // доступна в tooltip; перенос ломал вертикальный ритм вкладки.
+            v.lineBreakMode = .byTruncatingTail; v.maximumNumberOfLines = 1
             v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)    // при дефиците ширины гнётся ЗНАЧЕНИЕ, не заголовок
             let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
             let r = NSStackView(views: [iv, t, spacer, v])
@@ -1577,6 +1593,7 @@ final class PopoverController: NSViewController {
         func setRow(_ row: Row, _ value: String, _ level: Design.Level?, symbol: String, unknown: Bool = false, neutral: Bool = false) {
             let grey = unknown || neutral
             row.value.stringValue = value
+            row.value.toolTip = value
             row.value.textColor = grey ? .tertiaryLabelColor
                 : (level == nil ? .secondaryLabelColor : (level == .crit ? .systemRed : .systemOrange))
             row.icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
@@ -2067,13 +2084,7 @@ final class PopoverController: NSViewController {
         historyVerdict.isHidden = false
         if ins.enough, let spm = ins.slopePerMonth {
             if spm < -0.15 {
-                var v = String(format: L("АКБ теряет ~%.1f%% в месяц"), abs(spm))
-                if let m = ins.monthsTo80 {
-                    let horizon = m >= 18 ? String(format: L("%.0f г"), (m / 12).rounded())
-                                          : String(format: L("%.0f мес"), max(1, m.rounded()))
-                    v += " · " + String(format: L("до 80%% ~%@"), horizon)
-                }
-                historyVerdict.stringValue = v
+                historyVerdict.stringValue = String(format: L("АКБ теряет ~%.1f%% в месяц"), abs(spm))
             } else {
                 historyVerdict.stringValue = L("АКБ стабильна — деградации не видно")
             }
@@ -2182,8 +2193,12 @@ final class PopoverController: NSViewController {
     }
     private func gpuModeChanged(_ idx: Int) {
         guard !gpuModeBusy else { return }                   // повторный клик, пока висит admin-промпт — игнор
-        gpuModeBusy = true
         let target: GPUMode = idx == 0 ? .integratedOnly : (idx == 1 ? .discreteOnly : .automatic)
+        if GPUInfo.mode() == target {
+            selectGPUSegment(target)
+            return
+        }
+        gpuModeBusy = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let ok = GPUInfo.setMode(target)                // osascript + admin-промпт, блокирует ЭТОТ поток, не main
             let confirmed = GPUInfo.mode()                  // истинное состояние после (Cancel → прежнее)
@@ -2401,7 +2416,21 @@ final class PopoverController: NSViewController {
         graph.needsDisplay = true
         ring.needsLayout = true
         auraView.applyBase(dark: isDark, opacity: CGFloat(SettingsStore.popoverOpacity))
-        auraView.setColor(Design.Color.stateColor(lastAuraLevel ?? lastVerdictLevel, isDark), animated: false)
+        // Цветовые токены различаются между темами — следующий update синхронно
+        // пересчитает и кольцо, и ауру, не сохраняя старотемный CGColor.
+        lastAuraColor = nil
+    }
+
+    /// Один цветовой источник для кольца и фонового свечения. Сравнение в sRGB
+    /// предотвращает повторный запуск длинного cross-fade на каждом секундном тике.
+    private func syncAura(to color: NSColor, animated: Bool) {
+        let resolved = color.usingColorSpace(.sRGB) ?? color
+        if let previous = lastAuraColor?.usingColorSpace(.sRGB),
+           previous.isEqual(resolved) {
+            return
+        }
+        lastAuraColor = resolved
+        auraView.setColor(resolved, animated: animated, intensity: 0.72, duration: 0.72)
     }
     /// Консоль-включение (power-up): СЕКВЕНЦИЯ вместо одновременного всплытия —
     /// (1) шов прорисовывается сверху вниз, (2) ряды-плитки оседают со стаггером 0.045
@@ -2548,6 +2577,7 @@ final class PopoverController: NSViewController {
                 : (b.charge <= 15 ? Design.Color.levelCrit
                    : (b.charge <= 35 ? Design.Color.levelWarn : Design.Color.levelOK))
             ring.set(charge: b.charge, charging: b.charging, flow: e.battFlow, plugged: e.plugged, accent: ringColor)
+            syncAura(to: ringColor, animated: true)
             applyChargeLimit()                         // тик на кольце + дорожка заряда (Pro charge limit)
             // дорожка заряда (строка 2): реальное состояние потолка/режима/парусов + Pro-флаг
             chargeTrack.set(charge: b.charge, charging: b.charging, flow: e.battFlow,
@@ -2600,6 +2630,7 @@ final class PopoverController: NSViewController {
             cellsLabel.stringValue = b.cells.isEmpty ? "—" : String(format: L("Ячейки: %@ В"), b.cells.map { String(format: "%.3f", $0) }.joined(separator: " · "))
         } else {
             ring.setLimit(nil)                          // нет АКБ — ни тика лимита (плитка-шапка скрыта целиком)
+            syncAura(to: Design.Color.stateColor(lastVerdictLevel, isDark), animated: true)
         }
 
         // сенсоры уже сняты выше (единый снимок за тик) — просто отдаём во вкладку «Железо»
@@ -2687,14 +2718,6 @@ final class PopoverController: NSViewController {
             anchor = nil
         }
         lastVerdictLevel = level            // герой-шапка: тинт кольца берёт этот уровень на следующем тике
-        // «Спокойный прибор»: аура НЕ транслирует нагрузку — держит тихую бирюзу и теплеет в красный ТОЛЬКО
-        // при реальном перегреве (crit). Состояние нагрузки несёт лишь кольцо-герой. Кросс-фейд 1.6с, без гирлянды.
-        let auraLevel: Design.Level = (level == .crit) ? .crit : .ok
-        if lastAuraLevel != auraLevel {
-            lastAuraLevel = auraLevel
-            auraView.setColor(Design.Color.stateColor(auraLevel, isDark), animated: true)
-        }
-
         let color: NSColor
         switch level {
         case .ok:   color = Design.Color.levelOK
@@ -4606,9 +4629,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .layout(let toRU):
             if sound { playFeedbackSound("Morse") }
             if hud { FeedbackHUD.shared.show(symbol: "globe", text: toRU ? L("Русский") : "English", tint: .systemTeal) }
-        case .spell:
+        case .spell(let original, let corrected):
             if sound { playFeedbackSound("Pop") }
-            if hud { FeedbackHUD.shared.show(symbol: "checkmark.circle.fill", text: L("Исправлено"), tint: .systemGreen) }
+            if hud { CorrectionChoiceHUD.shared.show(original: original, corrected: corrected) }
+        case .undo:
+            if sound { playFeedbackSound("Tink") }
+            if hud { FeedbackHUD.shared.show(symbol: "arrow.uturn.backward.circle.fill", text: L("Исходное слово возвращено"), tint: .systemOrange) }
         }
         if hud { flashStatusItem() }
     }
@@ -4811,12 +4837,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if NightShift.available {
             let nsMenu = NSMenu()
             buildNightShiftRows(into: nsMenu) { liveRows.append($0) }
-            head("Night Shift", "moon.fill", nsMenu)
+            head(L("Night Shift"), "moon.fill", nsMenu)
         }
         if !FanController.fans().isEmpty { head(fanHeadTitle(), "fanblades.fill", fanQuickSubmenu()) }
         toggleRow(in: m, L("Тёмная тема"), "circle.lefthalf.filled",
                   state: { UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark" },
-                  onToggle: { DarkModeToggle.toggle() })
+                  onToggle: { [weak self] in
+                      DarkModeToggle.toggle()
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                          guard let self else { return }
+                          self.controller.view.appearance = nil
+                          self.controller.view.needsDisplay = true
+                          self.controller.buildModules()
+                          self.refreshMenuBarNow()
+                      }
+                  })
         if WiFiToggle.available {
             toggleRow(in: m, "Wi-Fi", "wifi", state: { WiFiToggle.isOn }, onToggle: { WiFiToggle.toggle() })
         }
@@ -5571,7 +5606,7 @@ if let snapDir = ProcessInfo.processInfo.environment["BM_SNAP"] {
     let snapCtl = PopoverController()
     let shots = snapCtl.renderSnapshots(to: snapDir, light: light)
     // окно Настроек — все секции (офскрин, без показа). Поповер-PNG уже на диске, даже если тут упадёт.
-    let sset = SettingsWindowController.shared.renderSectionsSnapshot(to: snapDir, light: light, prefix: "S")
+    let sset = KelvinSettingsWindowController.shared.renderSectionsSnapshot(to: snapDir, light: light, prefix: "S")
     OnboardingWindowController.shared.renderSnapshot(to: snapDir, light: light)   // стартовое окно разрешений
     // PDF-отчёт «здоровье Mac» — визуальная проверка самого документа (из живой истории).
     let rbatt = BatteryReader.read()

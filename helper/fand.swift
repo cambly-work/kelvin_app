@@ -171,7 +171,7 @@ func loadChargeCfg() -> ChargeCfg {
 // Минимальное чтение % заряда — верный подмножество Sources/BatteryReader.swift (детект AS vs Intel).
 // nil при отсутствии батареи / нечитаемости (десктоп, транзиент) → вызывающий fail-safe.
 func readChargePct() -> Int? {
-    let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+    let svc = IOServiceGetMatchingService(ioPort(), IOServiceMatching("AppleSmartBattery"))
     guard svc != 0 else { return nil }
     defer { IOObjectRelease(svc) }
     var um: Unmanaged<CFMutableDictionary>?

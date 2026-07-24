@@ -599,7 +599,9 @@ enum WindowChrome {
     }
     /// Окно — наше «хром»-окно (Настройки/Онбординг/О программе), а не поповер/служебное?
     private static func isKelvinChrome(_ w: NSWindow) -> Bool {
-        w.windowController is SettingsWindowController || w.windowController is OnboardingWindowController
+        w.windowController is SettingsWindowController
+            || w.windowController is KelvinSettingsWindowController
+            || w.windowController is OnboardingWindowController
     }
 }
 
@@ -716,25 +718,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func open() {
-        // .accessory никогда не владеет строкой меню → показалось бы чужое меню (напр. Notes).
-        // Становимся .regular, чтобы строка показывала app-меню Kelvin; назад в .accessory —
-        // при закрытии последнего окна (windowWillClose). Положение восстанавливается из autosave.
-        WindowChrome.becomeRegular()
-        NSApp.activate(ignoringOtherApps: true)   // accessory-app: без активации окно всплывает ПОЗАДИ/на чужом спейсе → «окно не открывается»
-        // Автосейв старой версии мог сохранить недопустимую ширину — только клампим её, не фиксируем.
-        if let w = window, w.frame.width < w.contentMinSize.width || w.frame.width > w.contentMaxSize.width {
-            var f = w.frame
-            f.size.width = min(max(f.size.width, w.contentMinSize.width), w.contentMaxSize.width)
-            w.setFrame(f, display: false)
-        }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        window?.orderFrontRegardless()            // гарантированно поверх, даже если фокус у другого приложения/fullscreen
+        KelvinSettingsWindowController.shared.open()
     }
 
     /// Пересобрать раздел «Питание и охлаждение», ЕСЛИ окно открыто и показывает именно его — чтобы после
     /// применения быстрого пресета из меню-бара пилюли/герой отразили новое состояние. Иначе no-op.
     func refreshPowerIfOpen() {
+        KelvinSettingsWindowController.shared.refresh()
+        if KelvinSettingsWindowController.shared.window?.isVisible == true { return }
         guard isWindowLoaded, window?.isVisible == true, currentSection == .power else { return }
         select(.power)
     }
@@ -887,8 +878,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         img.lockFocus()
         NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: side, height: side), xRadius: 6, yRadius: 6).addClip()
         color.setFill(); NSRect(x: 0, y: 0, width: side, height: side).fill()
-        let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+        let cfg: NSImage.SymbolConfiguration
+        if #available(macOS 12, *) {
+            cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+        } else {
+            cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        }
         if let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
             let gs = glyph.size
             glyph.draw(in: NSRect(x: (side - gs.width) / 2, y: (side - gs.height) / 2, width: gs.width, height: gs.height))
@@ -935,6 +931,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func selectByName(_ s: String) {
+        KelvinSettingsWindowController.shared.select(s)
+        if KelvinSettingsWindowController.shared.window?.isVisible == true { return }
         if let sec = Section(rawValue: s), Section.visible.contains(sec) {
             select(sec)
         } else {
@@ -1201,13 +1199,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         asyncWorkItems[key] = work
         DispatchQueue.global(qos: .utility).async(execute: work)
 
-        let wrap = NSStackView(views: [container])
-        wrap.orientation = .vertical
-        wrap.alignment = .leading
-        wrap.spacing = 0
-        wrap.translatesAutoresizingMaskIntoConstraints = false
-        container.widthAnchor.constraint(equalTo: wrap.widthAnchor).isActive = true
-        return wrap
+        // Возвращаем сам контейнер. Дополнительный NSStackView с `.leading`
+        // сохранял минимальную intrinsic-ширину строки «Загрузка…». После async-
+        // замены реальные карточки оказывались зажаты в эту узкую колонку по
+        // центру страницы и могли влиять на геометрию остальных cached-разделов.
+        // Внешний scaffold/disclosure уже фиксирует обе горизонтальные кромки.
+        container.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        container.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return container
     }
 
     private func lazyDisclosure(key: String, title: String, builder: @escaping () -> NSView) -> NSView {
@@ -2659,8 +2658,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     }
     /// Открыть раздел Pro и сразу поставить курсор в поле ключа (из апселла «Ввести ключ»).
     func openLicenseEntry() {
-        select(.license)
-        DispatchQueue.main.async { [weak self] in self?.window?.makeFirstResponder(self?.licenseKeyField) }
+        KelvinSettingsWindowController.shared.open(section: "pro")
     }
     @objc private func buyPro() { if let u = URL(string: Licensing.checkoutURL) { NSWorkspace.shared.open(u) } }
     @objc private func activateLicense() {
@@ -3006,8 +3004,12 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         stack.alignment = .leading
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
-        summary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        details.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        NSLayoutConstraint.activate([
+            summary.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            summary.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            details.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            details.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+        ])
         return stack
     }
 
@@ -3122,6 +3124,10 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
                 self?.select(.input)
             },
         ])
+        spellRows.append(SK.infoRow(
+            icon: "arrow.uturn.backward.circle",
+            text: L("Если автоматическое исправление оказалось неверным, сразу нажмите клавишу конвертации ещё раз — Kelvin вернёт исходное слово.")
+        ))
         if SettingsStore.langFeedbackHUD {
             spellRows.append(SK.selectRow(icon: "sparkles", title: L("Стиль индикатора"),
                          options: [L("Анимированный"), L("Компактный")],
@@ -3491,13 +3497,21 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
             let v = NSStackView(views: graphicsViews)
             v.orientation = .vertical; v.alignment = .leading; v.spacing = Design.Space.s4
             v.translatesAutoresizingMaskIntoConstraints = false
-            for item in graphicsViews { item.widthAnchor.constraint(equalTo: v.widthAnchor).isActive = true }
+            for item in graphicsViews {
+                NSLayoutConstraint.activate([
+                    item.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+                    item.trailingAnchor.constraint(equalTo: v.trailingAnchor),
+                ])
+            }
             return v
         }
         let gfxWrap = NSStackView(views: [gfxAsync])
         gfxWrap.orientation = .vertical; gfxWrap.alignment = .leading; gfxWrap.spacing = 0
         gfxWrap.translatesAutoresizingMaskIntoConstraints = false
-        gfxAsync.widthAnchor.constraint(equalTo: gfxWrap.widthAnchor).isActive = true
+        NSLayoutConstraint.activate([
+            gfxAsync.leadingAnchor.constraint(equalTo: gfxWrap.leadingAnchor),
+            gfxAsync.trailingAnchor.constraint(equalTo: gfxWrap.trailingAnchor),
+        ])
         items.append(gfxWrap)
 
         return SK.scaffold(L("Питание и охлаждение"),
@@ -3798,6 +3812,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
                     guard let self else { return }
                     let modes: [GPUMode] = [.automatic, .integratedOnly, .discreteOnly]
                     let m = modes[max(0, min(2, idx))]
+                    guard m != mode else { return }
                     if m != .automatic, !self.requirePro(.gpuSwitch) { self.select(.power); return }
                     let a = NSAlert()
                     a.messageText = String(format: L("Переключить графику: «%@»?"), m.title)
@@ -3943,10 +3958,12 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
 
             let stack = NSStackView(views: views)
             stack.orientation = .vertical
-            stack.alignment = .leading
+            // `.width` заставляет карточки принять ширину async-контейнера.
+            // `.leading` вместе с arrangedSubview intrinsic size был причиной
+            // центральной скомканной колонки после завершения загрузки.
+            stack.alignment = .width
             stack.spacing = Design.Space.s4
             stack.translatesAutoresizingMaskIntoConstraints = false
-            for item in views { item.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
             return stack
         })
 

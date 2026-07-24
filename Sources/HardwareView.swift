@@ -35,8 +35,13 @@ private enum HardwareSymbolCache {
         if let cached = cache.object(forKey: key) { return cached.image }
 
         guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
-            .applying(.init(paletteColors: [color]))
+        let config: NSImage.SymbolConfiguration
+        if #available(macOS 12, *) {
+            config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+                .applying(.init(paletteColors: [color]))
+        } else {
+            config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+        }
         let image = base.withSymbolConfiguration(config) ?? base
         var proposed = CGRect(origin: .zero, size: image.size)
         guard let cg = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return nil }

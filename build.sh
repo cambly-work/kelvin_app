@@ -12,14 +12,27 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # main.swift должен идти последним (в нём top-level код)
 SRCS=$(ls Sources/*.swift | grep -v '/main.swift$')
-xcrun swiftc -O $SRCS Sources/main.swift -o "$APP/Contents/MacOS/$BIN"
+# Universal Binary: swiftc не поддерживает несколько -arch, компилируем отдельно + lipo
+ARCHS="x86_64 arm64"
+TMPDIR_BUILD=$(mktemp -d)
+for arch in $ARCHS; do
+    xcrun swiftc -O -target "$arch-apple-macos11" $SRCS Sources/main.swift -o "$TMPDIR_BUILD/$BIN-$arch" || { echo "✗ бинарь не собрался для $arch"; rm -rf "$TMPDIR_BUILD"; exit 1; }
+done
+lipo -create -output "$APP/Contents/MacOS/$BIN" $TMPDIR_BUILD/$BIN-x86_64 $TMPDIR_BUILD/$BIN-arm64
+rm -rf "$TMPDIR_BUILD"
 # страховка от «тихой» неудачи: swiftc, убитый по OOM (SIGKILL), может оставить пустой бандл при exit 0
 [ -x "$APP/Contents/MacOS/$BIN" ] || { echo "✗ бинарь не собрался (пустой бандл — вероятно OOM)"; exit 1; }
 strip -x "$APP/Contents/MacOS/$BIN" 2>/dev/null || true   # снять локальные символы: `nm` больше не выдаёт локатор гейта (isPro)
 
 echo "→ Демон вентиляторов (fand)…"
-xcrun swiftc -O Sources/SMCReader.swift helper/fand.swift -o "$APP/Contents/Resources/kelvin-fand" \
-    && echo "  ✓ kelvin-fand" || echo "  ✗ демон не собрался"
+# Universal Binary для fand
+TMPDIR_FAND=$(mktemp -d)
+for arch in $ARCHS; do
+    xcrun swiftc -O -target "$arch-apple-macos11" Sources/IOKitCompat.swift Sources/SMCReader.swift helper/fand.swift -o "$TMPDIR_FAND/fand-$arch" \
+        && echo "  ✓ fand ($arch)" || { echo "  ✗ демон не собрался для $arch"; rm -rf "$TMPDIR_FAND"; exit 1; }
+done
+lipo -create -output "$APP/Contents/Resources/kelvin-fand" $TMPDIR_FAND/fand-x86_64 $TMPDIR_FAND/fand-arm64
+rm -rf "$TMPDIR_FAND"
 strip -x "$APP/Contents/Resources/kelvin-fand" 2>/dev/null || true
 
 cp Info.plist "$APP/Contents/Info.plist"

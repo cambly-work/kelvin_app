@@ -235,7 +235,7 @@ final class SKGroupHeader: NSTextField {
         textColor = NSColor.labelColor.withAlphaComponent(0.74)
         alignment = .left
         lineBreakMode = .byTruncatingTail
-        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         translatesAutoresizingMaskIntoConstraints = false
     }
@@ -276,7 +276,7 @@ private final class BadgePillView: NSView {
 
 private final class SettingsDisclosureView: NSView {
     private let header = NSView()
-    private let titleLabel = NSTextField(labelWithString: "")
+    private let titleLabel: NSTextField
     private let chevron = NSImageView()
     private let action = KActionButton()
     private let body = NSStackView()
@@ -292,19 +292,20 @@ private final class SettingsDisclosureView: NSView {
         self.expanded = expanded
         self.builder = builder
         self.onStateChange = onStateChange
+        self.titleLabel = NSTextField(labelWithString: title)
         super.init(frame: .zero)
 
         translatesAutoresizingMaskIntoConstraints = false
 
         header.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.stringValue = title
         titleLabel.font = Design.Font.body
         titleLabel.textColor = .labelColor
         titleLabel.alignment = .left
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentHuggingPriority(.required, for: .horizontal)
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        let naturalTitleWidth = min(600, ceil(titleLabel.intrinsicContentSize.width))
 
         chevron.contentTintColor = .tertiaryLabelColor
         chevron.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
@@ -317,16 +318,24 @@ private final class SettingsDisclosureView: NSView {
         action.setAccessibilityLabel(title)
         action.onClick = { [weak self] in self?.toggle() }
 
-        header.addSubview(titleLabel)
-        header.addSubview(chevron)
+        let flexibleSpace = NSView()
+        flexibleSpace.translatesAutoresizingMaskIntoConstraints = false
+        flexibleSpace.setContentHuggingPriority(.init(1), for: .horizontal)
+        flexibleSpace.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        let headerRow = NSStackView(views: [titleLabel, flexibleSpace, chevron])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 10
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+        header.addSubview(headerRow)
         header.addSubview(action)
         NSLayoutConstraint.activate([
             header.heightAnchor.constraint(greaterThanOrEqualToConstant: 40),
-            titleLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -10),
-            chevron.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            chevron.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            headerRow.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            headerRow.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            headerRow.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            titleLabel.widthAnchor.constraint(equalToConstant: naturalTitleWidth),
             chevron.widthAnchor.constraint(equalToConstant: 12),
             chevron.heightAnchor.constraint(equalToConstant: 12),
             action.leadingAnchor.constraint(equalTo: header.leadingAnchor),
@@ -375,7 +384,10 @@ private final class SettingsDisclosureView: NSView {
             for view in builder() {
                 view.translatesAutoresizingMaskIntoConstraints = false
                 body.addArrangedSubview(view)
-                view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+                NSLayoutConstraint.activate([
+                    view.leadingAnchor.constraint(equalTo: body.leadingAnchor),
+                    view.trailingAnchor.constraint(equalTo: body.trailingAnchor),
+                ])
             }
         }
         body.isHidden = !expanded
@@ -495,8 +507,11 @@ enum SK {
     private static func titleBlock(_ title: String, _ subtitle: String?) -> NSView {
         let titleLabel = NSTextField(wrappingLabelWithString: title)
         titleLabel.font = Design.Font.body
+        titleLabel.alignment = .left
+        titleLabel.baseWritingDirection = .natural
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 2
+        titleLabel.setContentHuggingPriority(.required, for: .horizontal)
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         guard let subtitle, !subtitle.isEmpty else {
@@ -506,15 +521,26 @@ enum SK {
         let subtitleLabel = NSTextField(wrappingLabelWithString: subtitle)
         subtitleLabel.font = Design.Font.caption
         subtitleLabel.textColor = NSColor.labelColor.withAlphaComponent(0.64)
+        subtitleLabel.alignment = .left
+        subtitleLabel.baseWritingDirection = .natural
         subtitleLabel.lineBreakMode = .byWordWrapping
         subtitleLabel.maximumNumberOfLines = 3
+        subtitleLabel.setContentHuggingPriority(.required, for: .horizontal)
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let stack = NSStackView(views: [titleLabel, subtitleLabel])
         stack.orientation = .vertical
-        stack.alignment = .width
+        stack.alignment = .leading
         stack.spacing = 2
         stack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: stack.trailingAnchor),
+            subtitleLabel.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: stack.trailingAnchor),
+        ])
         return stack
     }
 
@@ -883,12 +909,17 @@ enum SK {
         stack.setContentHuggingPriority(.defaultLow, for: .horizontal)
         stack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        // NSStackView.Alignment.width behaves inconsistently for views without an intrinsic width.
-        // Pin every arranged view to one column explicitly: all titles, headers and cards now share
-        // the same left and right edges regardless of localization or content length.
+        // Width-only constraints leave the horizontal origin ambiguous for an
+        // NSStackView with `.leading` alignment; `.width` alignment, in turn,
+        // has unstable intrinsic sizing for cards. Pin both edges explicitly.
         for view in views {
             view.translatesAutoresizingMaskIntoConstraints = false
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+            if view is NSTextField {
+                view.trailingAnchor.constraint(lessThanOrEqualTo: stack.trailingAnchor).isActive = true
+            } else {
+                view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+            }
         }
 
         if let subtitleLabel {

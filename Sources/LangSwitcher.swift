@@ -38,7 +38,11 @@ final class LangSwitcher {
         set { updateConfiguration { $0.snippets = newValue } }
     }
 
-    enum Feedback { case layout(toRU: Bool); case spell }
+    enum Feedback {
+        case layout(toRU: Bool)
+        case spell(original: String, corrected: String)
+        case undo
+    }
     var onFeedback: ((Feedback) -> Void)?
 
     struct RuntimeDiagnostics {
@@ -71,8 +75,8 @@ final class LangSwitcher {
     private struct LastConversion {
         var original: String
         var converted: String
-        var sourceID: String
-        var targetID: String
+        var sourceID: String?
+        var targetID: String?
     }
 
     private var currentKeys: [LayoutTypedKey] = []
@@ -437,8 +441,59 @@ final class LangSwitcher {
             self.spellRequestLock.unlock()
             guard isCurrent, self.frontmostBundleID == bundleID else { return }
             self.replace(count: word.count + 1, with: correction + " ")
-            self.onFeedback?(.spell)
+            self.performOnTapThread {
+                self.lastConversion = LastConversion(
+                    original: word + " ",
+                    converted: correction + " ",
+                    sourceID: nil,
+                    targetID: nil
+                )
+                self.userTypedSinceConversion = false
+            }
+            self.onFeedback?(.spell(original: word, corrected: correction))
         }
+    }
+
+    /// Кнопка «Вернуть» в подсказке автокоррекции. Выполняется на том же
+    /// event-tap run loop, которому принадлежит состояние набора, и ничего не
+    /// меняет, если пользователь уже продолжил печатать или сменил контекст.
+    func undoLastSpellCorrection() {
+        performOnTapThread { [weak self] in
+            guard let self,
+                  !self.userTypedSinceConversion,
+                  let last = self.lastConversion,
+                  last.sourceID == nil,
+                  last.targetID == nil
+            else { return }
+            self.replace(count: last.converted.count, with: last.original)
+            self.lastConversion = nil
+            self.userTypedSinceConversion = true
+            DispatchQueue.main.async { self.onFeedback?(.undo) }
+        }
+    }
+
+    /// Явное подтверждение варианта из подсказки: после «Оставить» повторная
+    /// горячая клавиша уже не должна неожиданно откатывать слово.
+    func acceptLastSpellCorrection() {
+        performOnTapThread { [weak self] in
+            guard let self,
+                  self.lastConversion?.sourceID == nil,
+                  self.lastConversion?.targetID == nil
+            else { return }
+            self.lastConversion = nil
+            self.userTypedSinceConversion = true
+        }
+    }
+
+    /// Состояние набранного слова принадлежит event-tap потоку. Результат
+    /// NSSpellChecker приходит с main, поэтому возвращаем запись undo на его run loop.
+    private func performOnTapThread(_ block: @escaping () -> Void) {
+        tapStateLock.lock()
+        let loop = tapRunLoop
+        tapStateLock.unlock()
+        guard let loop else { return }
+        CFRunLoopPerformBlock(loop, CFRunLoopMode.commonModes.rawValue, block)
+        CFRunLoopWakeUp(loop)
     }
 
     private func invalidatePendingSpellRequest() {
@@ -491,7 +546,13 @@ final class LangSwitcher {
                 sourceID: last.targetID,
                 targetID: last.sourceID
             )
-            DispatchQueue.main.async { self.onFeedback?(.layout(toRU: false)) }
+            DispatchQueue.main.async {
+                if last.sourceID == nil {
+                    self.onFeedback?(.undo)
+                } else {
+                    self.onFeedback?(.layout(toRU: false))
+                }
+            }
             return
         }
 

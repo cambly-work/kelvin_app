@@ -11,6 +11,8 @@ import AppKit
 /// Демон BCLM НЕ трогаем напрямую — пишем только конфиг, демон применяет его сам (честность).
 /// Доступен из поповера (PopoverController) и из настроек: оба маршрутят через один путь.
 enum ChargeControl {
+    private static let helperRequestLock = NSLock()
+    private static var helperRequestScheduled = false
 
     // MARK: - Чтение состояния (read-only снимок текущих настроек заряда)
 
@@ -178,6 +180,22 @@ enum ChargeControl {
     /// Тонкая обёртка над installChargeHelperIfNeeded (системный диалог ставит root-демон,
     /// если ещё не стоит). Живёт на контроллере, т.к. трогает его UI (refreshFanDaemonRow/NSAlert).
     static func ensureHelper() {
-        SettingsWindowController.shared.ensureChargeHelper()
+        guard !HelperInstall.fandInstalled else { return }
+        helperRequestLock.lock()
+        guard !helperRequestScheduled else {
+            helperRequestLock.unlock()
+            return
+        }
+        helperRequestScheduled = true
+        helperRequestLock.unlock()
+
+        // Сначала дать контролу отрисовать новое состояние; системный диалог
+        // установки открывается следующим проходом main run loop.
+        DispatchQueue.main.async {
+            SettingsWindowController.shared.ensureChargeHelper()
+            helperRequestLock.lock()
+            helperRequestScheduled = false
+            helperRequestLock.unlock()
+        }
     }
 }

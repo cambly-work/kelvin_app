@@ -38,7 +38,7 @@ final class USBWatch {
         started = true
         // ОДИН порт на жизнь приложения; источник в main run loop в .commonModes —
         // без .commonModes события встанут, пока поповер (tracking-контекст) открыт, ровно когда они виднее.
-        guard let p = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        guard let p = IONotificationPortCreate(ioPort()) else { return }
         port = p
         let src = IONotificationPortGetRunLoopSource(p).takeUnretainedValue()
         runLoopSource = src

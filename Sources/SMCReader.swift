@@ -1,4 +1,5 @@
 import Foundation
+import os
 import IOKit
 
 // Чтение Apple SMC напрямую (без sudo). Структура повторяет SMCKeyData_t (80 байт).
@@ -23,6 +24,20 @@ private struct SMCParam {
     var bytes: SMCBytes = (0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0)
 }
 
+
+private func getArch() -> String {
+    var size = 0
+    sysctlbyname("hw.machine", nil, &size, nil, 0)
+    var machine = [CChar](repeating: 0, count: size)
+    sysctlbyname("hw.machine", &machine, &size, nil, 0)
+    return String(cString: machine)
+}
+
+private func getOSVersion() -> String {
+    let p = ProcessInfo.processInfo
+    return "\(p.operatingSystemVersion.majorVersion).\(p.operatingSystemVersion.minorVersion).\(p.operatingSystemVersion.patchVersion)"
+}
+
 final class SMC {
     private let lock = NSRecursiveLock()
     private var conn: io_connect_t = 0
@@ -38,11 +53,21 @@ final class SMC {
     // через перечисление по индексу и кэшируем. НЕ дёргать в горячем 1Гц-тике: ~200 syscall'ов.
     private var keyCatalog: [String]?
 
+    private static let log = Logger(subsystem: "com.trykelvin.kelvin", category: "SMC")
+
     init() {
-        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
-        guard svc != 0 else { return }
+        let svc = IOServiceGetMatchingService(ioPort(), IOServiceMatching("AppleSMC"))
+        guard svc != 0 else {
+            Self.log.warning("AppleSMC service not found — temperature sensors unavailable (arch=\(getArch()), os=\(getOSVersion()))")
+            return
+        }
         defer { IOObjectRelease(svc) }
         ok = IOServiceOpen(svc, mach_task_self_, 0, &conn) == kIOReturnSuccess
+        if !ok {
+            Self.log.warning("AppleSMC found but IOServiceOpen failed")
+        } else {
+            Self.log.info("AppleSMC connected successfully (arch=\(getArch()), os=\(getOSVersion()))")
+        }
     }
     deinit { if conn != 0 { IOServiceClose(conn) } }
     var available: Bool { ok }

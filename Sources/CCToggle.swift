@@ -20,7 +20,7 @@ final class CCToggle: NSView {
         wantsLayer = true
         layer?.cornerRadius = Design.Radius.control
         layer?.cornerCurve = .continuous
-        focusRingType = .default
+        focusRingType = .none
         translatesAutoresizingMaskIntoConstraints = false
         heightAnchor.constraint(equalToConstant: 44).isActive = true
 
@@ -92,17 +92,10 @@ final class CCToggle: NSView {
     }
     override func mouseDown(with event: NSEvent) { activate() }
 
-    // MARK: клавиатура — фокус + пробел/Enter
-    override var acceptsFirstResponder: Bool { true }
-    override var canBecomeKeyView: Bool { true }
-    override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
-    override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 49 || event.keyCode == 36 { activate() }   // Space / Return
-        else { super.keyDown(with: event) }
-    }
-    override var focusRingMaskBounds: NSRect { bounds }
-    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: Design.Radius.control, yRadius: Design.Radius.control).fill() }
+    // Плитки управляются мышью/VoiceOver и не входят в Tab-цепочку: постоянная
+    // синяя рамка выглядела как выбранное состояние и прыгала между плитками.
+    override var acceptsFirstResponder: Bool { false }
+    override var canBecomeKeyView: Bool { false }
 
     // MARK: VoiceOver — checkbox с меткой и состоянием
     override func isAccessibilityElement() -> Bool { true }

@@ -200,8 +200,13 @@ final class ChargeRing: NSView {
     private func renderBolt() {
         guard !bolt.isHidden,
               let base = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil) else { return }
-        let cfg = NSImage.SymbolConfiguration(pointSize: boltSide, weight: .bold).applying(.init(paletteColors: [accent]))
-        let img = base.withSymbolConfiguration(cfg) ?? base
+        let img: NSImage
+        if #available(macOS 12, *) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: boltSide, weight: .bold).applying(.init(paletteColors: [accent]))
+            img = base.withSymbolConfiguration(cfg) ?? base
+        } else {
+            img = base.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: boltSide, weight: .bold)) ?? base
+        }
         var r = CGRect(origin: .zero, size: img.size)
         bolt.contents = img.cgImage(forProposedRect: &r, context: nil, hints: nil)
     }

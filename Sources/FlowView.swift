@@ -1439,8 +1439,13 @@ final class FlowView: NSView, NSViewToolTipOwner {
         if let image = symbolCache[key] { return image }
 
         guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
-            .applying(.init(paletteColors: [color]))
+        let configuration: NSImage.SymbolConfiguration
+        if #available(macOS 12, *) {
+            configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+                .applying(.init(paletteColors: [color]))
+        } else {
+            configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+        }
         let image = base.withSymbolConfiguration(configuration) ?? base
         var rect = CGRect(origin: .zero, size: image.size)
         guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return nil }

@@ -18,7 +18,7 @@ enum MachineID {
     /// другой машине. Комбинируем ДВА: если один пуст (VM/необычное железо/сбой IOKit) — привязка держится
     /// на втором, а не деградирует в переносимый между машинами блоб. Кэшируем (одно чтение IOKit).
     static let hardwareUUID: String = {
-        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        let svc = IOServiceGetMatchingService(ioPort(), IOServiceMatching("IOPlatformExpertDevice"))
         guard svc != 0 else { return "" }
         defer { IOObjectRelease(svc) }
         func prop(_ k: String) -> String {
