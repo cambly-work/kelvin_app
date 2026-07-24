@@ -382,6 +382,142 @@ enum SettingsStore {
 /// Контейнер с координатами сверху-вниз — для документа в NSScrollView.
 private final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
+/// Ленивое раскрытие: тяжёлое содержимое создаётся только при первом открытии, а не во время
+/// построения всей секции. Это особенно важно для lsof, firewall rules и больших журналов.
+private final class LazyDisclosureView: NSView {
+    private let header: NSButton
+    private let body = NSStackView()
+    private let builder: () -> NSView
+    private let onStateChange: (Bool) -> Void
+    private var builtContent: NSView?
+    private(set) var isExpanded: Bool
+
+    init(title: String, expanded: Bool, onStateChange: @escaping (Bool) -> Void = { _ in },
+         builder: @escaping () -> NSView) {
+        self.isExpanded = expanded
+        self.builder = builder
+        self.onStateChange = onStateChange
+        self.header = NSButton(title: title, target: nil, action: nil)
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        header.target = self
+        header.action = #selector(toggle)
+        header.isBordered = false
+        header.alignment = .left
+        header.font = Design.Font.body
+        header.imagePosition = .imageLeading
+        header.contentTintColor = .labelColor
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.heightAnchor.constraint(greaterThanOrEqualToConstant: 38).isActive = true
+
+        body.orientation = .vertical
+        body.alignment = .width
+        body.spacing = Design.Space.s2
+        body.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [header, body])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        applyState(buildIfNeeded: expanded)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func toggle() {
+        isExpanded.toggle()
+        applyState(buildIfNeeded: isExpanded)
+        onStateChange(isExpanded)
+    }
+
+    private func applyState(buildIfNeeded: Bool) {
+        header.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
+                               accessibilityDescription: nil)
+        if buildIfNeeded, builtContent == nil {
+            let content = builder()
+            content.translatesAutoresizingMaskIntoConstraints = false
+            body.addArrangedSubview(content)
+            builtContent = content
+        }
+        body.isHidden = !isExpanded
+    }
+}
+
+/// Виртуализированный список для длинных настроечных списков. В отличие от сотен NSStackView,
+/// NSTableView создаёт только видимые строки и переиспользует ячейки.
+private final class SettingsListTable<Item>: NSView, NSTableViewDataSource, NSTableViewDelegate {
+    private let items: [Item]
+    private let rowHeightValue: CGFloat
+    private let makeRow: (Item) -> NSView
+    private let tableView = NSTableView()
+
+    init(items: [Item], rowHeight: CGFloat, makeRow: @escaping (Item) -> NSView) {
+        self.items = items
+        self.rowHeightValue = rowHeight
+        self.makeRow = makeRow
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("settings.list.column"))
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.rowHeight = rowHeight
+        tableView.intercellSpacing = .zero
+        tableView.selectionHighlightStyle = .none
+        tableView.backgroundColor = .clear
+
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.documentView = tableView
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { rowHeightValue }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard items.indices.contains(row) else { return nil }
+        let id = NSUserInterfaceItemIdentifier("settings.list.cell")
+        let cell = (tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView)
+            ?? NSTableCellView(frame: .zero)
+        cell.identifier = id
+        cell.subviews.forEach { $0.removeFromSuperview() }
+        let content = makeRow(items[row])
+        content.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: cell.topAnchor),
+            content.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+        ])
+        return cell
+    }
+}
+
 /// Кнопка раздела сайдбара с лёгкой подсветкой при наведении (как в Системных настройках macOS):
 /// выбранная строка держит accent-заливку, невыбранная мягко подсвечивается под курсором.
 final class SidebarButton: NSButton {
@@ -472,15 +608,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private let content = NSVisualEffectView()  // liquid glass — blur под всеми карточками
     private var sidebarRows: [NSButton] = []
-    private var currentSection: Section?            // чтобы при пересборке ТОЙ ЖЕ секции не сбрасывать прокрутку
-    private weak var currentScroll: NSScrollView?   // активный скролл секции — для сохранения позиции
-    private var docWidthConstraint: NSLayoutConstraint?  // doc.width == scroll.width; пересоздаётся при смене документа
+    private var currentSection: Section?
+    private var currentScroll: NSScrollView?
+
+    /// Постоянные страницы разделов. Переход по сайдбару больше не строит экран заново.
+    private var sectionScrolls: [Section: NSScrollView] = [:]
+    private var sectionWidthConstraints: [Section: NSLayoutConstraint] = [:]
+    private var sectionBuildVersion: [Section: Int] = [:]
+    private var dirtySections = Set<Section>()
+
+    /// Повторные запросы перестройки одного раздела объединяются в один кадр.
+    private var reloadWorkItems: [Section: DispatchWorkItem] = [:]
+
+    /// Тяжёлые фоновые загрузки имеют стабильный ключ, отмену ожидающей работы и защиту
+    /// от устаревшего результата после перестройки страницы.
+    private var asyncWorkItems: [String: DispatchWorkItem] = [:]
+    private var asyncWorkSections: [String: Section] = [:]
+    private var asyncGeneration: [String: Int] = [:]
+
+    /// Состояние ленивых раскрытий сохраняется при локальной перестройке раздела.
+    private var disclosureState: [String: Bool] = [:]
+
+    /// Debounce для дорогих каскадов: пересборка поповера и запись профиля вентилятора.
+    private var popoverNotifyWorkItem: DispatchWorkItem?
+    private var fanApplyWorkItem: DispatchWorkItem?
     /// Кешированная тема — вместо 8 мест дублирования `(window?.effectiveAppearance...).bestMatch(...)`.
     private var isDark: Bool {
         (window?.effectiveAppearance ?? NSApp.effectiveAppearance).bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
     private let settingsActionQueue = DispatchQueue(label: "com.trykelvin.kelvin.settings.actions",
                                                     qos: .userInitiated)
+    private let settingsWriteQueue = DispatchQueue(label: "com.trykelvin.kelvin.settings.writes",
+                                                   qos: .utility)
     private weak var fanStatusLabel: NSTextField?
     private weak var fanStatusIcon: NSImageView?
     private weak var fanToggleBtn: NSButton?
@@ -526,12 +685,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private convenience init() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 660),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 680),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        // ФИКС-ШИРИНА: min==max по ширине → окно НЕ гуляет, НЕ растягивается контентом, блоки не вылезают.
-        // Высота свободна (контент скроллится). Это убивает весь класс багов «экран стретчится/распирает».
-        win.contentMinSize = NSSize(width: 880, height: 460)
-        win.contentMaxSize = NSSize(width: 880, height: 100000)
+        // Окно адаптивное: достаточно широкое для сложных контролов, но больше не заперто на 880 px.
+        // Это убирает искусственное усечение локализаций и позволяет пользователю выбрать плотность.
+        win.contentMinSize = NSSize(width: 820, height: 500)
+        win.contentMaxSize = NSSize(width: 1180, height: 100000)
         win.title = L("Настройки Kelvin")
         win.titleVisibility = .visible              // заголовок виден + рабочая строка управления окном
         win.titlebarAppearsTransparent = true       // стекло сайдбара протекает во всю высоту под титул
@@ -545,8 +704,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         buildLayout()
         select(Self.lastSection)
         if !hadSavedFrame { win.center() }
-        else if win.frame.width != 880 {                          // старый автосейв другой ширины — вернуть к фиксу 880
-            var f = win.frame; f.size.width = 880; win.setFrame(f, display: false)
+        else if win.frame.width < win.contentMinSize.width || win.frame.width > win.contentMaxSize.width {
+            var f = win.frame
+            f.size.width = min(max(f.size.width, win.contentMinSize.width), win.contentMaxSize.width)
+            win.setFrame(f, display: false)
         }
     }
     private static var lastSection: Section {
@@ -560,9 +721,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // при закрытии последнего окна (windowWillClose). Положение восстанавливается из autosave.
         WindowChrome.becomeRegular()
         NSApp.activate(ignoringOtherApps: true)   // accessory-app: без активации окно всплывает ПОЗАДИ/на чужом спейсе → «окно не открывается»
-        // Автосейв мог сохранить другую ширину — запираем на фикс 880 (окно не гуляет).
-        if let w = window, w.frame.width != 880 {
-            var f = w.frame; f.size.width = 880; w.setFrame(f, display: false)
+        // Автосейв старой версии мог сохранить недопустимую ширину — только клампим её, не фиксируем.
+        if let w = window, w.frame.width < w.contentMinSize.width || w.frame.width > w.contentMaxSize.width {
+            var f = w.frame
+            f.size.width = min(max(f.size.width, w.contentMinSize.width), w.contentMaxSize.width)
+            w.setFrame(f, display: false)
         }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -623,10 +786,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                                                name: Notification.Name("BMLangRuntimeChanged"), object: nil)
         let root = NSView()
 
-        // — Liquid Glass: content area — живой blur под всеми карточками —
-        content.material = .underWindowBackground
-        content.blendingMode = .behindWindow
-        content.state = .active
+        // Контент — спокойный системный фон. Blur оставлен только сайдбару: меньше GPU-работы
+        // и нет эффекта «стеклянного супа» под каждой карточкой.
+        content.material = .contentBackground
+        content.blendingMode = .withinWindow
+        content.state = .followsWindowActiveState
         content.wantsLayer = true
 
         // сайдбар — групповые заголовки + кнопки с крупными иконками
@@ -736,15 +900,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     /// Цвет плитки для раздела (семантика как в Системных настройках).
     private func sidebarTint(_ s: Section) -> NSColor {
+        // Один брендовый акцент вместо радуги из системных цветов. Семантические цвета
+        // остаются только внутри статусов: ошибка/предупреждение/успех.
         switch s {
-        case .support:  return .systemPink
-        case .basics:   return .systemGray
-        case .power:    return .systemTeal
-        case .input:    return .systemBlue
-        case .netsec:   return .systemGreen
-        case .hub:      return .systemIndigo
-        case .about:    return .systemGray
-        case .license:  return .systemOrange
+        case .support: return .systemPink
+        case .basics, .about: return .systemGray
+        case .power, .input, .netsec, .hub, .license:
+            return SettingsStore.brandAccent(dark: isDark)
         }
     }
 
@@ -753,13 +915,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// горизонтали, чтобы они переносились/усекались под ширину окна, а не толкали его. Многострочные
     /// (wrapping) уже переносятся. Кнопки/слайдеры/сегменты не трогаем — у них своя нужная ширина.
     private func stabilizeH(_ view: NSView) {
-        view.setContentCompressionResistancePriority(.init(1), for: .horizontal)   // контейнер не толкает окно
+        // Не обнуляем сопротивление всему дереву: priority=1 заставлял AppKit хаотично
+        // схлопывать подписи. Ослабляем только однострочные тексты, которым допустимо усечение.
         func walk(_ v: NSView) {
             for sub in v.subviews {
                 if let tf = sub as? NSTextField {
                     let wraps = (tf.maximumNumberOfLines == 0) || (tf.cell as? NSTextFieldCell)?.wraps == true
-                    if !wraps { tf.lineBreakMode = .byTruncatingTail }
-                    tf.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                    if !wraps {
+                        tf.lineBreakMode = .byTruncatingTail
+                        tf.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                    }
                 }
                 walk(sub)
             }
@@ -783,13 +948,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         for b in sidebarRows {
             if let id = b.identifier?.rawValue, let sec = Section(rawValue: id) { b.title = "  " + L(sec.rawValue) }
         }
-        select(currentSection ?? .basics)                     // .general — устаревший дефолт из старой структуры
+        let section = currentSection ?? .basics
+        invalidateAllSections()
+        currentSection = section
+        updateSidebarSelection(section)
+        reloadSectionNow(section, preserveScroll: false)
         NotificationCenter.default.post(name: Notification.Name("BMPopoverChanged"), object: nil)
         NotificationCenter.default.post(name: Notification.Name("BMMenuBarChanged"), object: nil)   // релокализовать тултип строки меню сразу
     }
     @objc private func sidebarClick(_ sender: NSButton) {
-        guard let id = sender.identifier?.rawValue, let s = Section(rawValue: id) else { return }
-        select(s)
+        guard let id = sender.identifier?.rawValue, let section = Section(rawValue: id) else { return }
+        guard currentSection != section else { return }
+        select(section)
     }
 
     @objc private func inputRuntimeChanged() {
@@ -804,108 +974,184 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         settingsActionQueue.async { [weak self] in
             action()
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.currentSection == section else { return }
-                self.select(section)
+                self?.requestSectionReload(section, delay: 0)
             }
         }
     }
 
-    private func select(_ s: Section) {
-        // если пересобираем ТУ ЖЕ секции (после клика по галочке/стрелке) — запоминаем прокрутку,
-        // чтобы список не «спадал» к началу.
-        let keepScroll = (s == currentSection)
-        let savedY: CGFloat = keepScroll ? (currentScroll?.contentView.bounds.origin.y ?? 0) : 0
-        currentSection = s
-        UserDefaults.standard.set(s.rawValue, forKey: "settings.lastSection")   // вернёмся сюда при след. открытии
-        for b in sidebarRows {
-            let on = b.identifier?.rawValue == s.rawValue
-            (b as? SidebarButton)?.isSelectedRow = on          // держит accent-заливку + учитывает hover
-            b.contentTintColor = .labelColor
+    private func updateSidebarSelection(_ section: Section) {
+        for button in sidebarRows {
+            let selected = button.identifier?.rawValue == section.rawValue
+            (button as? SidebarButton)?.isSelectedRow = selected
+            button.contentTintColor = .labelColor
         }
-        let v: NSView
-        switch s {
-        case .support:  v = buildSupport()
-        case .basics:   v = buildBasics()
-        case .power:    v = buildPower()
-        case .input:    v = buildInput()
-        case .netsec:   v = buildNetSec()
-        case .hub:      v = buildHub()
-        case .about:    v = buildAbout()
-        case .license:  v = buildLicense()
+    }
+
+    private func buildSectionContent(_ section: Section) -> NSView {
+        switch section {
+        case .support: return buildSupport()
+        case .basics:  return buildBasics()
+        case .power:   return buildPower()
+        case .input:   return buildInput()
+        case .netsec:  return buildNetSec()
+        case .hub:     return buildHub()
+        case .about:   return buildAbout()
+        case .license: return buildLicense()
         }
-        // прокручиваемый контейнер — длинные секции не обрезаются
+    }
+
+    /// Создаёт страницу раздела один раз. Переходы по сайдбару затем только переключают hidden,
+    /// поэтому scroll position, first responder и уже загруженные данные не теряются.
+    private func makeSectionScroll(_ section: Section) -> NSScrollView {
+        sectionBuildVersion[section, default: 0] += 1
+        cancelAsyncWork(for: section)
+
+        let view = buildSectionContent(section)
         let doc = FlippedView()
         doc.translatesAutoresizingMaskIntoConstraints = false
-        v.translatesAutoresizingMaskIntoConstraints = false
-        doc.addSubview(v)
-        // КЛЮЧ СТАБИЛЬНОСТИ: ширину пейна задаёт ОКНО (doc.width == scroll.width == окно−сайдбар), а
-        // контент ТОЧНО заполняет его (leading/trailing == required) и НЕ распирает окно. Раньше widthы
-        // подписей/строк ip:port с высоким сопротивлением сжатия растягивали окно и вылезали за край —
-        // stabilizeH(v) глушит их горизонтальное сопротивление (усечение хвостом / перенос), поэтому
-        // окно не «гуляет», блоки не вылезают, карточки заполняют пейн ровно.
-        stabilizeH(v)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        doc.addSubview(view)
+        stabilizeH(view)
         NSLayoutConstraint.activate([
-            v.topAnchor.constraint(equalTo: doc.topAnchor, constant: 36),
-            v.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 24),
-            v.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -24),
-            v.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -32),
+            view.topAnchor.constraint(equalTo: doc.topAnchor, constant: 28),
+            view.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 24),
+            view.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -24),
+            view.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -28),
         ])
 
-        // Пересборка ТОЙ ЖЕ секции (клик по тумблеру/стрелке): переиспользуем существующий scroll и
-        // подменяем только документ. Без сноса контента и пересоздания scroll — нет мигания «всё
-        // исчезло и вернулось», ничего не «дёргается», прокрутка сохраняется. Смена раздела — ниже.
-        if keepScroll, let scroll = currentScroll, scroll.superview === content {
-            docWidthConstraint?.isActive = false
-            scroll.documentView = doc
-            let wc = doc.widthAnchor.constraint(equalTo: scroll.widthAnchor)
-            wc.isActive = true; docWidthConstraint = wc
-            if savedY > 0 {
-                scroll.layoutSubtreeIfNeeded()
-                let maxY = max(0, doc.fittingSize.height - scroll.contentView.bounds.height)
-                scroll.contentView.scroll(to: NSPoint(x: 0, y: min(savedY, maxY)))
-                scroll.reflectScrolledClipView(scroll.contentView)
-            }
-            return
-        }
-
-        // Смена раздела: новый scroll добавляем ПОВЕРХ старого и лишь затем убираем старый — так нет
-        // пустого кадра между ними. Fade убран намеренно (владелец: «активируется с задержкой»).
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.automaticallyAdjustsContentInsets = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = doc
-        let old = currentScroll
+
+        sectionWidthConstraints[section]?.isActive = false
+        let width = doc.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        width.isActive = true
+        sectionWidthConstraints[section] = width
+        return scroll
+    }
+
+    private func installSectionScrollIfNeeded(_ scroll: NSScrollView) {
+        guard scroll.superview !== content else { return }
         content.addSubview(scroll)
-        docWidthConstraint?.isActive = false
-        let wc = doc.widthAnchor.constraint(equalTo: scroll.widthAnchor)
-        docWidthConstraint = wc
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: content.topAnchor),
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            wc,
         ])
+    }
+
+    private func showSection(_ section: Section) {
+        let scroll: NSScrollView
+        if let cached = sectionScrolls[section], !dirtySections.contains(section) {
+            scroll = cached
+        } else {
+            let old = sectionScrolls[section]
+            scroll = makeSectionScroll(section)
+            sectionScrolls[section] = scroll
+            dirtySections.remove(section)
+            old?.removeFromSuperview()
+        }
+        installSectionScrollIfNeeded(scroll)
+        for (_, page) in sectionScrolls { page.isHidden = page !== scroll }
+        scroll.isHidden = false
         currentScroll = scroll
+    }
+
+    /// Публичная семантика старого select сохранена:
+    /// - другой раздел: мгновенно показываем уже созданную страницу;
+    /// - тот же раздел: не уничтожаем UI в обработчике, а объединяем запросы в одну перестройку.
+    private func select(_ section: Section) {
+        let sameSection = currentSection == section
+        currentSection = section
+        UserDefaults.standard.set(section.rawValue, forKey: "settings.lastSection")
+        updateSidebarSelection(section)
+
+        if sameSection {
+            requestSectionReload(section)
+        } else {
+            showSection(section)
+        }
+    }
+
+    private func requestSectionReload(_ section: Section, delay: TimeInterval = 0.06) {
+        dirtySections.insert(section)
+        reloadWorkItems[section]?.cancel()
+        guard currentSection == section else { return }
+
+        let item = DispatchWorkItem { [weak self] in
+            self?.reloadSectionNow(section, preserveScroll: true)
+        }
+        reloadWorkItems[section] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func reloadSectionNow(_ section: Section, preserveScroll: Bool) {
+        reloadWorkItems[section]?.cancel()
+        reloadWorkItems[section] = nil
+
+        let old = sectionScrolls[section]
+        let savedY = preserveScroll ? (old?.contentView.bounds.origin.y ?? 0) : 0
+        let replacement = makeSectionScroll(section)
+        sectionScrolls[section] = replacement
+        dirtySections.remove(section)
+
+        if currentSection == section {
+            installSectionScrollIfNeeded(replacement)
+            for (_, page) in sectionScrolls { page.isHidden = page !== replacement }
+            replacement.isHidden = false
+            currentScroll = replacement
+            replacement.layoutSubtreeIfNeeded()
+            if savedY > 0, let doc = replacement.documentView {
+                let maxY = max(0, doc.fittingSize.height - replacement.contentView.bounds.height)
+                replacement.contentView.scroll(to: NSPoint(x: 0, y: min(savedY, maxY)))
+                replacement.reflectScrolledClipView(replacement.contentView)
+            }
+        }
         old?.removeFromSuperview()
     }
 
-    /// Секция с тяжёлой загрузкой данных (lsof/pmset/socketfilterfw) — иначе beachball на main.
-    /// Сразу показываем спиннер; данные читаем в фоне; по готовности наполняем, если секция ещё активна.
+    private func invalidateAllSections() {
+        for section in Section.allCases { dirtySections.insert(section) }
+        for item in reloadWorkItems.values { item.cancel() }
+        reloadWorkItems.removeAll()
+        for item in asyncWorkItems.values { item.cancel() }
+        asyncWorkItems.removeAll()
+        asyncWorkSections.removeAll()
+    }
+
+    private func cancelAsyncWork(for section: Section) {
+        let keys = asyncWorkSections.compactMap { $0.value == section ? $0.key : nil }
+        for key in keys {
+            asyncWorkItems[key]?.cancel()
+            asyncWorkItems[key] = nil
+            asyncWorkSections[key] = nil
+            asyncGeneration[key, default: 0] += 1
+        }
+    }
+
+    /// Тяжёлые system tools не блокируют AppKit. Одинаковый key отменяет ожидающую предыдущую
+    /// загрузку; version не позволяет старому результату заменить уже перестроенную страницу.
     private func asyncSection<T>(_ section: Section,
+                                 key: String,
                                  fetch: @escaping () -> T,
                                  build: @escaping (T) -> NSView) -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         let spinner = NSProgressIndicator()
-        spinner.style = .spinning; spinner.controlSize = .small
+        spinner.style = .spinning
+        spinner.controlSize = .small
         spinner.translatesAutoresizingMaskIntoConstraints = false
         spinner.startAnimation(nil)
         let label = NSTextField(labelWithString: L("Загрузка…"))
-        label.font = Design.Font.callout; label.textColor = .secondaryLabelColor
-        let row = NSStackView(views: [spinner, label]); row.spacing = 8
+        label.font = Design.Font.callout
+        label.textColor = .secondaryLabelColor
+        let row = NSStackView(views: [spinner, label])
+        row.spacing = 8
         row.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(row)
         NSLayoutConstraint.activate([
@@ -914,12 +1160,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             container.trailingAnchor.constraint(greaterThanOrEqualTo: row.trailingAnchor),
             container.bottomAnchor.constraint(greaterThanOrEqualTo: row.bottomAnchor, constant: 4),
         ])
-        DispatchQueue.global(qos: .userInitiated).async {
+
+        asyncWorkItems[key]?.cancel()
+        asyncGeneration[key, default: 0] += 1
+        let generation = asyncGeneration[key] ?? 0
+        let buildVersion = sectionBuildVersion[section] ?? 0
+        asyncWorkSections[key] = section
+
+        let work = DispatchWorkItem { [weak self, weak container] in
             let data = fetch()
             DispatchQueue.main.async {
-                guard self.currentSection == section, container.window != nil else { return }
+                guard let self, let container else { return }
+                guard self.asyncGeneration[key] == generation,
+                      self.sectionBuildVersion[section] == buildVersion else { return }
+
                 let real = build(data)
-                self.stabilizeH(real)   // async-контент достраивается ПОСЛЕ select() — стабилизируем и его (иначе ip:port/строки распирали окно)
+                self.stabilizeH(real)
                 real.translatesAutoresizingMaskIntoConstraints = false
                 container.subviews.forEach { $0.removeFromSuperview() }
                 container.addSubview(real)
@@ -929,16 +1185,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                     real.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                     real.bottomAnchor.constraint(equalTo: container.bottomAnchor),
                 ])
-                container.window?.contentView?.layoutSubtreeIfNeeded()
+                self.asyncWorkItems[key] = nil
+                container.needsLayout = true
+                container.superview?.needsLayout = true
             }
         }
-        // Обёртка по ширине: SK.scaffold тянет во всю ширину только SettingsCard/NSStackView.
-        // Голый async-контейнер иначе получает интринзик-ширину и оказывается ýже соседних
-        // карточек — та самая визуальная «ступенька». Стек с .width гарантирует ровный край.
+        asyncWorkItems[key] = work
+        DispatchQueue.global(qos: .utility).async(execute: work)
+
         let wrap = NSStackView(views: [container])
-        wrap.orientation = .vertical; wrap.alignment = .width; wrap.spacing = 0
+        wrap.orientation = .vertical
+        wrap.alignment = .width
+        wrap.spacing = 0
         wrap.translatesAutoresizingMaskIntoConstraints = false
         return wrap
+    }
+
+    private func lazyDisclosure(key: String, title: String, builder: @escaping () -> NSView) -> NSView {
+        let expanded = disclosureState[key] ?? false
+        return LazyDisclosureView(title: title, expanded: expanded, onStateChange: { [weak self] on in
+            self?.disclosureState[key] = on
+        }, builder: builder)
     }
 
     // MARK: секции
@@ -1144,8 +1411,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         b.toolTip = ["arrow.up": L("Поднять выше"), "arrow.down": L("Опустить ниже"), "trash": L("Удалить")][symbol]
         return b
     }
-    private func notifyPopoverChanged() {
-        NotificationCenter.default.post(name: Notification.Name("BMPopoverChanged"), object: nil)
+    private func notifyPopoverChanged(immediate: Bool = false) {
+        popoverNotifyWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            NotificationCenter.default.post(name: Notification.Name("BMPopoverChanged"), object: nil)
+        }
+        popoverNotifyWorkItem = item
+        if immediate { DispatchQueue.main.async(execute: item) }
+        else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item) }
     }
 
     // MARK: секция «Переключатели» — встроенные + свои кнопки-команды
@@ -1440,9 +1713,15 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     /// стоит) и есть Pro. Иначе no-op: профиль лишь сохраняется как предпочтение, включение — через applyProfile().
     private func applyLiveIfControlled() {
         guard fanDaemonInstalled else { return }
-        let p = activeDraft()
-        if p.mode != .auto, !Licensing.shared.isPro { return }
-        writeProfileJSON(p)
+        let profile = activeDraft()
+        if profile.mode != .auto, !Licensing.shared.isPro { return }
+
+        // Drag слайдера больше не пишет JSON десятки раз в секунду. Последнее значение
+        // применяется после короткой паузы, визуальный preview при этом остаётся мгновенным.
+        fanApplyWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.writeProfileJSON(profile) }
+        fanApplyWorkItem = item
+        settingsWriteQueue.asyncAfter(deadline: .now() + 0.08, execute: item)
     }
 
     /// Сентинел «+ Новый профиль…» — служебный пункт (id = nil в representedObject).
@@ -2079,7 +2358,15 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
 
 
 
-    private struct FWState { let enabled: Bool; let stealth: Bool; let blockAll: Bool; let apps: [Firewall.AppRule]; let domains: [String] }
+    private struct FWState {
+        let enabled: Bool
+        let stealth: Bool
+        let blockAll: Bool
+    }
+    private struct NetSecCoreState {
+        let firewall: FWState?
+        let vpn: VPN.Status
+    }
 
     /// Вердикт-карточка фаервола: SF-щит + одна фраза о реальном состоянии, цвет по уровню.
     /// enabled+stealth → levelOK «невидимость»; enabled → levelOK «включён»; выключен → levelWarn.
@@ -2634,7 +2921,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         if let cached = cachedLoginScan {
             items.append(startupBlockView(cached))                   // из кэша — без спиннера/мерцания при тумблерах
         } else {
-            items.append(asyncSection(.basics, fetch: { LoginItems.scan() }) { [weak self] result in
+            items.append(asyncSection(.basics, key: "basics.login-items", fetch: { LoginItems.scan() }) { [weak self] result in
                 guard let self else { return NSView() }
                 self.cachedLoginScan = result
                 return self.startupBlockView(result)
@@ -2943,10 +3230,10 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
             // При системной «Уменьшить прозрачность» стекло и так плотное — слайдер остаётся, но эффект мал.
             SK.sliderRow(icon: "circle.lefthalf.filled", title: L("Прозрачность фона"),
                          min: 0, max: 100,
-                         value: (1.0 - SettingsStore.popoverOpacity) / 0.82 * 100, unit: "%") { v, lbl in
+                         value: (1.0 - SettingsStore.popoverOpacity) / 0.82 * 100, unit: "%") { [weak self] v, lbl in
                 SettingsStore.popoverOpacity = 1.0 - (v / 100.0) * 0.82
                 lbl.stringValue = String(format: "%.0f%%", v)
-                NotificationCenter.default.post(name: Notification.Name("BMPopoverChanged"), object: nil)
+                self?.notifyPopoverChanged()
             },
             SK.customRow(PopoverLayoutEditor(), minHeight: 214),
             SK.infoRow(icon: "square.grid.2x2",
@@ -3128,7 +3415,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         // asyncSection возвращает голый NSView-контейнер; SK.scaffold тянет во всю ширину ТОЛЬКО
         // SettingsCard/NSStackView (SettingsKit.scaffold), поэтому оборачиваем контейнер в стек
         // с выравниванием .width — иначе карточки GPU схлопнутся по intrinsic-ширине.
-        let gfxAsync = asyncSection(.power, fetch: {
+        let gfxAsync = asyncSection(.power, key: "power.gpu", fetch: {
             GFXState(gpus: GPUInfo.all(), active: GPUInfo.active(), switchable: GPUInfo.switchable,
                      mode: GPUInfo.mode(), isAppleSilicon: GPUInfo.isAppleSilicon)
         }) { [weak self] st in
@@ -3551,57 +3838,69 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     private func buildNetSec() -> NSView {
         var items: [NSView] = []
 
-        // 1) СТАТУС — нейтральная карточка состояния сетевого экрана (async, т.к. socketfilterfw блокирует main).
-        if Firewall.available {
-            items.append(asyncSection(.netsec, fetch: {
-                (enabled: Firewall.enabled, stealth: Firewall.stealth, blockAll: Firewall.blockAll)
-            }) { [weak self] st in
-                self?.netsecStatusCard(enabled: st.enabled, stealth: st.stealth, blockAll: st.blockAll) ?? NSView()
-            })
-        } else {
-            items.append(SK.card([
-                SK.infoRow(icon: "exclamationmark.triangle",
-                           text: L("Сетевой экран недоступен на этом Mac."), tint: Design.Color.levelWarn),
-            ]))
-        }
+        // Состояние firewall + VPN читается одним фоновым снимком. Раньше один вход в раздел
+        // запускал три socketfilterfw и отдельный scutil, а закрытые disclosure уже грузили списки.
+        items.append(asyncSection(.netsec, key: "netsec.core", fetch: {
+            let firewall: FWState?
+            if Firewall.available {
+                firewall = FWState(enabled: Firewall.enabled,
+                                   stealth: Firewall.stealth,
+                                   blockAll: Firewall.blockAll)
+            } else {
+                firewall = nil
+            }
+            return NetSecCoreState(firewall: firewall, vpn: VPN.status())
+        }) { [weak self] state in
+            guard let self else { return NSView() }
+            var views: [NSView] = []
+            if let firewall = state.firewall {
+                views.append(self.netsecStatusCard(enabled: firewall.enabled,
+                                                   stealth: firewall.stealth,
+                                                   blockAll: firewall.blockAll))
+            } else {
+                views.append(SK.card([
+                    SK.infoRow(icon: "exclamationmark.triangle",
+                               text: L("Сетевой экран недоступен на этом Mac."),
+                               tint: Design.Color.levelWarn),
+                ]))
+            }
+            views.append(self.groupHeader(L("Защита")))
+            if let firewall = state.firewall {
+                views.append(self.netsecFirewallCard(firewall))
+            }
+            views.append(contentsOf: self.netsecVPNItems(state.vpn))
 
-        // 2) ЗАЩИТА — фаервол + VPN вместе (меньше визуального шума).
-        items.append(groupHeader(L("Защита")))
-        // Фаервол — переключатели (async: читаем состояние в фоне, гейт Pro с откатом select(.netsec)).
-        if Firewall.available {
-            items.append(asyncSection(.netsec, fetch: {
-                FWState(enabled: Firewall.enabled, stealth: Firewall.stealth, blockAll: Firewall.blockAll,
-                        apps: Firewall.apps(), domains: HostBlock.current())
-            }) { [weak self] st in
-                self?.netsecFirewallCard(st) ?? NSView()
-            })
-        }
-        // VPN — статус бесплатно, подключение/отключение системного профиля — Pro (.vpn).
-        // VPN.status() спавнит scutil-подпроцессы → в фон (иначе блокирует main при каждой сборке netsec).
-        let vpnStack = asyncSection(.netsec, fetch: { VPN.status() }) { [weak self] st in
-            let stack = NSStackView(views: self?.netsecVPNItems(st) ?? [])
-            stack.orientation = .vertical; stack.alignment = .width; stack.spacing = Design.Space.s2
+            let stack = NSStackView(views: views)
+            stack.orientation = .vertical
+            stack.alignment = .width
+            stack.spacing = Design.Space.s4
+            stack.translatesAutoresizingMaskIntoConstraints = false
             return stack
-        }
-        items.append(vpnStack)
+        })
 
-        // 3) АКТИВНЫЕ ПОДКЛЮЧЕНИЯ — какие программы сейчас соединены (async lsof + офлайн-гео).
         items.append(groupHeader(L("Активные подключения")))
         items.append(netsecConnectionsContainer())
 
-        // 4) ДЕМОТИРОВАННЫЕ длинные списки — под раскрытие: правила по программам, журнал сеанса, блокировка доменов.
+        // Тяжёлые списки действительно ленивые: до клика нет Firewall.apps(), журнала
+        // и редактора /etc/hosts. Состояние раскрытия переживает локальные перестройки.
         items.append(groupHeader(L("Дополнительно")))
         if Firewall.available {
             items.append(SK.card([
-                SK.disclosure(title: L("Правила по программам"), expanded: false, rows: [netsecRulesContainer()]),
+                lazyDisclosure(key: "netsec.rules.disclosure", title: L("Правила по программам")) { [weak self] in
+                    self?.netsecRulesContainer() ?? NSView()
+                },
             ]))
         }
         items.append(SK.card([
-            SK.disclosure(title: L("Журнал сеанса"), expanded: false, rows: [netsecSessionLogContainer()]),
+            lazyDisclosure(key: "netsec.session.disclosure", title: L("Журнал сеанса")) { [weak self] in
+                self?.netsecSessionLogContainer() ?? NSView()
+            },
         ]))
         if Firewall.available {
             items.append(SK.card([
-                SK.disclosure(title: L("Блокировка доменов"), expanded: false, rows: [netsecDomainCard()]),
+                lazyDisclosure(key: "netsec.domains.disclosure", title: L("Блокировка доменов")) { [weak self] in
+                    self?.netsecDomainCard() ?? NSView()
+                },
             ]))
         }
 
@@ -3766,7 +4065,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     /// Фон: lsof-снимок + офлайн-гео. Main: резолв имён/иконок → netsecConnectionsCard.
     /// Ретаргет прежнего asyncSection(.network,…) на .netsec.
     private func netsecConnectionsContainer() -> NSView {
-        return asyncSection(.netsec, fetch: { () -> RawNet in
+        return asyncSection(.netsec, key: "netsec.connections", fetch: { () -> RawNet in
             let raw = Connections.rawSnapshot()
             var geo: [String: String?] = [:]
             for rp in raw { for c in rp.conns where geo[c.remoteIP] == nil {
@@ -3816,7 +4115,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     /// Асинхронный контейнер «Правила по программам» для секции «Сеть и защита».
     /// Фон: чтение правил сетевого экрана. Main: netsecRulesCard. Ретаргет .firewall → .netsec.
     private func netsecRulesContainer() -> NSView {
-        return asyncSection(.netsec, fetch: { Firewall.apps() }) { [weak self] apps in
+        return asyncSection(.netsec, key: "netsec.rules", fetch: { Firewall.apps() }) { [weak self] apps in
             self?.netsecRulesCard(apps) ?? NSView()
         }
     }
@@ -3884,9 +4183,9 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     /// Асинхронный контейнер «Журнал сеанса» для секции «Сеть и защита».
     /// Снимок леджера на main (не thread-safe) → рендер строк в build. Ретаргет .netlog → .netsec.
     private func netsecSessionLogContainer() -> NSView {
-        return asyncSection(.netsec, fetch: { AppSession.connectionLog() }) { [weak self] log in
-            self?.netsecSessionLogCard(log) ?? NSView()
-        }
+        // Леджер принадлежит main thread; снимок дешёвый. Тяжёлым раньше был рендер сотен stack-row,
+        // теперь список виртуализирован через NSTableView.
+        return netsecSessionLogCard(AppSession.connectionLog())
     }
 
     /// Карточка «Журнал сеанса»: исходящие соединения за сессию. Обновить/Очистить
@@ -3894,33 +4193,38 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     /// Переиспользует netLogRow. Все действия ретаргетят select(.netsec).
     private func netsecSessionLogCard(_ log: [AppSession.LedgerEntry]) -> NSView {
         let refresh = GlassButton(title: L("Обновить"), symbol: "arrow.clockwise", cornerRadius: Design.Radius.chip)
-        refresh.onClick = { [weak self] in self?.select(.netsec) }
+        refresh.onClick = { [weak self] in self?.requestSectionReload(.netsec, delay: 0) }
         let clear = GlassButton(title: L("Очистить журнал"), symbol: "trash", cornerRadius: Design.Radius.chip)
-        clear.onClick = { [weak self] in AppSession.clearLog(); self?.select(.netsec) }
-        let btnStack = NSStackView(views: [refresh, clear])
-        btnStack.orientation = .horizontal; btnStack.spacing = 8
+        clear.onClick = { [weak self] in
+            AppSession.clearLog()
+            self?.requestSectionReload(.netsec, delay: 0)
+        }
+        let buttons = NSStackView(views: [refresh, clear])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
 
         var rows: [NSView] = [
             SK.controlRow(icon: "list.bullet.rectangle",
                           title: log.isEmpty
                             ? L("Записей за эту сессию пока нет")
                             : String(format: L("Записей за сессию: %d"), log.count),
-                          control: btnStack),
+                          control: buttons),
             SK.infoRow(icon: "memorychip",
                 text: L("Журнал хранится только в памяти и очищается при завершении Kelvin или перезагрузке. Данные никуда не сохраняются и не передаются.")),
         ]
+
         if log.isEmpty {
             rows.append(SK.infoRow(icon: "tray",
-                text: L("Записей пока нет. Соединения фиксируются, пока открыто окно Kelvin.")))
+                text: L("Записей пока нет. Соединения фиксируются, пока открыт Kelvin.")))
         } else {
-            let df = DateFormatter(); df.dateFormat = "HH:mm"; df.locale = Locale(identifier: I18n.current.rawValue)
-            let shown = 250
-            for e in log.prefix(shown) { rows.append(netLogRow(e, df)) }
-            if log.count > shown {
-                rows.append(SK.infoRow(icon: "ellipsis",
-                    text: String(format: L("…и ещё %d (показаны первые %d)."), log.count - shown, shown),
-                    tint: .tertiaryLabelColor))
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            formatter.locale = Locale(identifier: I18n.current.rawValue)
+            let table = SettingsListTable(items: log, rowHeight: 44) { [weak self] entry in
+                self?.netLogRow(entry, formatter) ?? NSView()
             }
+            let visibleRows = min(max(log.count, 3), 7)
+            rows.append(SK.stretchRow(table, height: CGFloat(visibleRows) * 44))
         }
         return SK.card(rows)
     }
