@@ -8,7 +8,7 @@ BIN="Kelvin"
 
 echo "→ Компиляция…"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
 # main.swift должен идти последним (в нём top-level код)
 SRCS=$(ls Sources/*.swift | grep -v '/main.swift$')
@@ -23,6 +23,13 @@ rm -rf "$TMPDIR_BUILD"
 # страховка от «тихой» неудачи: swiftc, убитый по OOM (SIGKILL), может оставить пустой бандл при exit 0
 [ -x "$APP/Contents/MacOS/$BIN" ] || { echo "✗ бинарь не собрался (пустой бандл — вероятно OOM)"; exit 1; }
 strip -x "$APP/Contents/MacOS/$BIN" 2>/dev/null || true   # снять локальные символы: `nm` больше не выдаёт локатор гейта (isPro)
+
+echo "→ Копирование Sparkle.framework…"
+# Копируем Sparkle.framework в бандл (Universal Binary уже внутри)
+cp -R "Sparkle.framework" "$APP/Contents/Frameworks/"
+# Подписываем фреймворк ad-hoc для локальной сборки (в релизе подпишем Developer ID)
+codesign --force --deep --sign - "$APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
+echo "  ✓ Sparkle.framework скопирован"
 
 echo "→ Демон вентиляторов (fand)…"
 # Universal Binary для fand

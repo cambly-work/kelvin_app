@@ -1,43 +1,27 @@
 ```
-# Compiled and build artifacts
-*.pyc
-__pycache__/
-*.o
-*.obj
-*.class
-*.exe
-*.dll
-*.so
-*.a
-*.out
+# Build artifacts and binaries
+Sparkle.framework/
+Symbols/
+bin/
 
-# Dependencies
-node_modules/
-venv/
-.venv/
+# Debug symbols
+*.dSYM/
+
+# Temporary files
+*.tmp
+*.log
+
+# Environment files
 .env
 .env.local
-.env.*
+*.env.*
 
-# Build directories
-dist/
-build/
-target/
-*.log
-*.tmp
+# macOS system files
+.DS_Store
 *.swp
 *.swo
 
-# Editors
-.vscode/
-.idea/
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# Compression
+# Compressed files
 *.zip
 *.gz
 *.tar
@@ -60,9 +44,4 @@ htmlcov/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-
-# Cache
-.mypy_cache/
-.pytest_cache/
-.gradle/
 ```
