@@ -153,8 +153,46 @@ final class KelvinSettingsModel: ObservableObject {
     @Published private(set) var revision = 0
     @Published var firewallEnabled = false
     @Published var firewallAvailable = false
+    @Published var firewallStealth = false
+    @Published var firewallBlockAll = false
     @Published var vpnSummary = L("Проверка…")
+    @Published var vpnProfiles: [VPN.Profile] = []
     @Published var loginEnabled = false
+    @Published var thermalLive: [AlertKind: Double] = [:]
+    private var thermalTimer: Timer?
+
+    func startThermalPolling() {
+        stopThermalPolling()
+        pollThermalOnce()
+        thermalTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            self?.pollThermalOnce()
+        }
+    }
+
+    func stopThermalPolling() {
+        thermalTimer?.invalidate()
+        thermalTimer = nil
+    }
+
+    private func pollThermalOnce() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var values: [AlertKind: Double] = [:]
+            let smc = EnergyModel.smc
+            if smc.available {
+                func maxOf(_ ks: [String]) -> Double? {
+                    ks.compactMap { smc.read($0) }.filter { $0 > -40 && $0 < 130 }.max()
+                }
+                values[.cpuTemp] = maxOf(["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"])
+                values[.gpuTemp] = maxOf(["TG0D","TG0P"])
+            }
+            values[.cpuLoad] = SystemUsage.shared.cpu() * 100
+            if let batt = BatteryReader.read() {
+                values[.batteryLow]  = Double(batt.charge)
+                values[.batteryFull] = Double(batt.charge)
+            }
+            DispatchQueue.main.async { self?.thermalLive = values }
+        }
+    }
 
     func reload() {
         revision &+= 1
@@ -176,12 +214,17 @@ final class KelvinSettingsModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let available = Firewall.available
             let enabled = available && Firewall.enabled
+            let stealth = available && Firewall.stealth
+            let blockAll = available && Firewall.blockAll
             let vpn = VPN.status()
             let summary = vpn.active.map { String(format: L("Подключено: %@"), $0.name) } ?? L("Не подключено")
             DispatchQueue.main.async {
                 self.firewallAvailable = available
                 self.firewallEnabled = enabled
+                self.firewallStealth = stealth
+                self.firewallBlockAll = blockAll
                 self.vpnSummary = summary
+                self.vpnProfiles = vpn.profiles
             }
         }
     }
@@ -390,8 +433,62 @@ private func settingBinding<T>(
     Binding(get: get, set: set)
 }
 
+// MARK: - Thermal Rules helpers
+
+private func alertRules() -> [AlertRule] { SettingsStore.alertRules }
+
+private func updateAlertRule(_ kind: AlertKind, _ transform: (inout AlertRule) -> Void) {
+    var rules = SettingsStore.alertRules
+    if let idx = rules.firstIndex(where: { $0.kind == kind }) {
+        transform(&rules[idx])
+        SettingsStore.alertRules = rules
+    }
+}
+
+private func alertSymbol(_ kind: AlertKind) -> String {
+    switch kind {
+    case .cpuTemp: return "thermometer.medium"
+    case .gpuTemp: return "thermometer.medium"
+    case .batteryLow: return "battery.25percent"
+    case .batteryFull: return "battery.100percent"
+    case .cpuLoad: return "cpu"
+    }
+}
+
+// MARK: - Custom Toggle helpers (for new settings UI)
+
+extension SettingsStore {
+    static func deleteCustomToggle(_ id: String) {
+        guard id.hasPrefix("custom:") else { return }
+        let cid = String(id.dropFirst("custom:".count))
+        var customs = customToggles; customs.removeAll { $0.id == cid }; customToggles = customs
+        var lay = toggleLayout; lay.removeAll { $0.id == id }; toggleLayout = lay
+    }
+
+    static func addCustomToggle(label: String, icon: String, command: String) {
+        let c = CustomToggle(id: UUID().uuidString, label: label, icon: icon, command: command, color: "blue")
+        var customs = customToggles; customs.append(c); customToggles = customs
+    }
+}
+
 private struct GeneralSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
+
+    /// Extra indicator definitions (id → label).
+    private static let menuExtraDefs: [(id: String, label: String)] = [
+        ("watts",   L("Потребление (Вт)")),
+        ("cputemp", L("Температура CPU")),
+        ("gputemp", L("Температура GPU")),
+        ("fan",     L("Обороты вентилятора")),
+        ("cpu",     L("Загрузка CPU")),
+        ("ram",     L("Оперативная память")),
+        ("net",     L("Сетевая скорость")),
+        ("clock",   L("Часы")),
+        ("date",    L("Дата")),
+        ("diskio",  L("Диск (R/W)")),
+        ("diskfree",L("Диск (свободно)")),
+        ("btbatt",  L("Bluetooth-аккумулятор")),
+    ]
 
     var body: some View {
         VStack(spacing: 18) {
@@ -419,6 +516,20 @@ private struct GeneralSettingsPage: View {
                     .labelsHidden()
                     .frame(width: 150)
                 }
+                if SettingsStore.menuBarMode == "battery" {
+                    CardDivider()
+                    SettingsRow("thermometer.medium", L("Иконка")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.mainIconStyle },
+                            set: { SettingsStore.mainIconStyle = $0; model.changed(menuBar: true) }
+                        )) {
+                            Text(L("Термометр")).tag("thermometer")
+                            Text(L("Батарея")).tag("battery")
+                        }
+                        .labelsHidden()
+                        .frame(width: 150)
+                    }
+                }
                 CardDivider()
                 SettingsRow("bolt", L("Показывать потребление")) {
                     Toggle("", isOn: settingBinding(
@@ -433,9 +544,100 @@ private struct GeneralSettingsPage: View {
                         set: { SettingsStore.menuBarCombined = $0; model.changed(menuBar: true) }
                     )).labelsHidden()
                 }
+                if SettingsStore.menuBarCombined {
+                    CardDivider()
+                    SettingsRow("paintpalette", L("Стиль иконок")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.menuBarIconStyle },
+                            set: { SettingsStore.menuBarIconStyle = $0; model.changed(menuBar: true) }
+                        )) {
+                            Text("Kelvin").tag("kelvin")
+                            Text(L("Системный")).tag("system")
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+                    }
+                    ForEach(Array(Self.menuExtraDefs.enumerated()), id: \.element.id) { index, def in
+                        CardDivider()
+                        SettingsRow("circle", def.label) {
+                            Toggle("", isOn: settingBinding(
+                                get: { SettingsStore.menuBarExtras.contains(def.id) },
+                                set: { isOn in
+                                    var extras = SettingsStore.menuBarExtras
+                                    if isOn && extras.count < 3 { extras.append(def.id) }
+                                    else if !isOn { extras.removeAll { $0 == def.id } }
+                                    SettingsStore.menuBarExtras = extras
+                                    model.changed(menuBar: true)
+                                }
+                            )).labelsHidden()
+                            .disabled(!SettingsStore.menuBarExtras.contains(def.id) && SettingsStore.menuBarExtras.count >= 3)
+                        }
+                    }
+                }
+            }
+            // MARK: - Interface Language
+            KelvinCard(L("Язык интерфейса")) {
+                SettingsRow("globe", L("Язык"), detail: L("Меню и панель обновляются мгновенно.")) {
+                    Picker("", selection: settingBinding(
+                        get: { I18n.override?.rawValue ?? "system" },
+                        set: { v in
+                            I18n.override = v == "system" ? nil : Lang(rawValue: v)
+                        }
+                    )) {
+                        Text(L("Системный")).tag("system")
+                        ForEach(Lang.allCases, id: \.rawValue) { lang in
+                            Text(lang.title).tag(lang.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+            }
+            // MARK: - Global Hotkey
+            KelvinCard(L("Горячая клавиша поповера")) {
+                SettingsRow("command", L("Открывать поповер по хоткею")) {
+                    Toggle("", isOn: settingBinding(
+                        get: { SettingsStore.popoverHotkeyEnabled },
+                        set: { v in
+                            SettingsStore.popoverHotkeyEnabled = v
+                            reapplyPopoverHotkey()
+                        }
+                    )).labelsHidden()
+                }
+                if SettingsStore.popoverHotkeyEnabled {
+                    CardDivider()
+                    SettingsRow("keyboard", L("Комбинация"), detail: hotkeyDisplayText) {
+                        Button(L("Сбросить")) {
+                            SettingsStore.popoverHotkeyKeyCode = 11
+                            SettingsStore.popoverHotkeyMods = Int(NSEvent.ModifierFlags([.command, .option]).rawValue)
+                            reapplyPopoverHotkey()
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+/// Re-registers the global hotkey with current settings.
+private func reapplyPopoverHotkey() {
+    GlobalHotkey.shared.apply(
+        enabled: SettingsStore.popoverHotkeyEnabled,
+        keyCode: SettingsStore.popoverHotkeyKeyCode,
+        modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(SettingsStore.popoverHotkeyMods))
+    )
+}
+
+/// Human-readable display for the current hotkey combination.
+private var hotkeyDisplayText: String {
+    let mods = NSEvent.ModifierFlags(rawValue: UInt(SettingsStore.popoverHotkeyMods))
+    var parts: [String] = []
+    if mods.contains(.control)  { parts.append("⌃") }
+    if mods.contains(.option)   { parts.append("⌥") }
+    if mods.contains(.command)  { parts.append("⌘") }
+    if mods.contains(.shift)    { parts.append("⇧") }
+    parts.append(HotkeyFormat.keyName(SettingsStore.popoverHotkeyKeyCode) ?? "B")
+    return parts.joined()
 }
 
 private struct PowerSettingsPage: View {
@@ -511,12 +713,73 @@ private struct PowerSettingsPage: View {
                     )).labelsHidden()
                 }
             }
+            // MARK: - Top-up & Scheduled Charge
+            if SettingsStore.chargeMode != "off" {
+                KelvinCard(L("Дозарядка")) {
+                    if SettingsStore.chargeMode == "sail" || SettingsStore.chargeLimit < 100 {
+                        SettingsRow("bolt.badge.clock", L("Зарядить до 100% сейчас")) {
+                            Button(L("Зарядить")) { _ = ChargeControl.topUp() }
+                        }
+                        CardDivider()
+                    }
+                    SettingsRow("alarm", L("Запланированная дозарядка"), detail: L("Полная зарядка к указанному времени.")) {
+                        Toggle("", isOn: settingBinding(
+                            get: { SettingsStore.chargeAlarmOn },
+                            set: { v in
+                                SettingsStore.chargeAlarmOn = v
+                                _ = ChargeControl.setAlarm(on: v, targetMin: SettingsStore.chargeAlarmTargetMin, leadMin: SettingsStore.chargeAlarmLeadMin)
+                                model.changed(popover: true)
+                            }
+                        )).labelsHidden()
+                    }
+                    if SettingsStore.chargeAlarmOn {
+                        CardDivider()
+                        SettingsRow("clock", L("Время полной зарядки")) {
+                            Picker("", selection: settingBinding(
+                                get: { SettingsStore.chargeAlarmTargetMin },
+                                set: { v in
+                                    SettingsStore.chargeAlarmTargetMin = v
+                                    _ = ChargeControl.setAlarm(on: true, targetMin: v, leadMin: SettingsStore.chargeAlarmLeadMin)
+                                    model.changed(popover: true)
+                                }
+                            )) {
+                                ForEach(Array(stride(from: 0, to: 1440, by: 30)), id: \.self) { m in
+                                    Text(String(format: "%02d:%02d", m / 60, m % 60)).tag(m)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 100)
+                        }
+                        CardDivider()
+                        SettingsRow("timer", L("Начать зарядку за")) {
+                            Picker("", selection: settingBinding(
+                                get: { SettingsStore.chargeAlarmLeadMin },
+                                set: { v in
+                                    SettingsStore.chargeAlarmLeadMin = v
+                                    _ = ChargeControl.setAlarm(on: true, targetMin: SettingsStore.chargeAlarmTargetMin, leadMin: v)
+                                    model.changed(popover: true)
+                                }
+                            )) {
+                                Text("30 " + L("мин")).tag(30)
+                                Text("45 " + L("мин")).tag(45)
+                                Text("1 " + L("ч")).tag(60)
+                                Text("1 ч 30 " + L("мин")).tag(90)
+                                Text("2 " + L("ч")).tag(120)
+                            }
+                            .labelsHidden()
+                            .frame(width: 120)
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 private struct CoolingSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
+
+    private var rules: [AlertRule] { alertRules() }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -543,6 +806,128 @@ private struct CoolingSettingsPage: View {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.fanAutoBySource },
                         set: { SettingsStore.fanAutoBySource = $0; model.changed(popover: true) }
+                    )).labelsHidden()
+                }
+            }
+
+            // MARK: - GPU
+            if GPUInfo.switchable {
+                KelvinCard(L("Графика")) {
+                    if let active = GPUInfo.active() {
+                        SettingsRow(active.integrated ? "checkmark.circle.fill" : "circle.fill",
+                                    active.name,
+                                    detail: active.kind + " · " + active.vramText) {
+                            EmptyView()
+                        }
+                    }
+                    CardDivider()
+                    SettingsRow("cpu", L("Режим графики")) {
+                        Picker("", selection: settingBinding(
+                            get: { GPUInfo.mode() ?? .automatic },
+                            set: { m in
+                                guard m != .automatic else { _ = GPUInfo.setMode(.automatic); return }
+                                guard SettingsWindowController.shared.requirePro(.gpuSwitch) else { model.reload(); return }
+                                _ = GPUInfo.setMode(m)
+                            }
+                        )) {
+                            ForEach([GPUMode.automatic, .integratedOnly, .discreteOnly], id: \.rawValue) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 180)
+                    }
+                }
+            }
+
+            // MARK: - Thermal Rules
+            KelvinCard(L("Тепловые правила")) {
+                ForEach(Array(rules.enumerated()), id: \.element.kind) { index, rule in
+                    thermalRuleRows(rule: rule, index: index)
+                    if index < rules.count - 1 { CardDivider() }
+                }
+                if !SettingsStore.alertsEnabled {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle").font(.system(size: 11)).foregroundColor(.secondary)
+                        Text(L("Включите уведомления, чтобы тепловые правила работали."))
+                            .font(.system(size: 11)).foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+                }
+            }
+            .onAppear { model.startThermalPolling() }
+            .onDisappear { model.stopThermalPolling() }
+        }
+    }
+
+    private func thermalRuleRows(rule: AlertRule, index: Int) -> some View {
+        VStack(spacing: 0) {
+            // Header: icon + label + live value
+            SettingsRow(alertSymbol(rule.kind), rule.kind.label) {
+                if let v = model.thermalLive[rule.kind] {
+                    Text(String(format: L("сейчас %.0f%@"),
+                                v,
+                                rule.kind.unit))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Toggle: enable / disable rule
+            SettingsRow("bell", L("Уведомить при срабатывании")) {
+                Toggle("", isOn: settingBinding(
+                    get: { rule.on },
+                    set: { on in
+                        updateAlertRule(rule.kind) { r in
+                            r.on = on
+                            if !on { r.action = nil }
+                        }
+                        if on { AlertsEngine.shared.primeAuthorization() }
+                        AlertsEngine.shared.onRulesChanged()
+                        model.changed()
+                    }
+                )).labelsHidden()
+                .disabled(!SettingsStore.alertsEnabled)
+            }
+
+            // Threshold slider (only when rule is on + master on)
+            if rule.on && SettingsStore.alertsEnabled {
+                SettingsRow("slider.horizontal.3", L("Порог")) {
+                    HStack(spacing: 8) {
+                        Slider(value: settingBinding(
+                            get: { rule.threshold },
+                            set: { v in
+                                updateAlertRule(rule.kind) { $0.threshold = v }
+                                AlertsEngine.shared.onRulesChanged()
+                                model.changed()
+                            }
+                        ), in: rule.kind.range.lo...rule.kind.range.hi,
+                           step: rule.kind.range.step)
+                            .frame(width: 160)
+                        Text(String(format: "%.0f%@", rule.threshold, rule.kind.unit))
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                }
+            }
+
+            // Fan boost toggle (cpuTemp, gpuTemp, cpuLoad only, Pro-gated)
+            if rule.on && SettingsStore.alertsEnabled && rule.kind.canBoostFans {
+                SettingsRow("fanblades", L("Турбо-кулеры при срабатывании"),
+                           detail: L("Вентиляторы переключатся на максимум до恢复正常.")) {
+                    Toggle("", isOn: settingBinding(
+                        get: { rule.action == .fansMax },
+                        set: { on in
+                            guard SettingsWindowController.shared.requirePro(.fans) else {
+                                model.reload(); return
+                            }
+                            updateAlertRule(rule.kind) { r in
+                                r.action = on ? .fansMax : nil
+                            }
+                            AlertsEngine.shared.onRulesChanged()
+                            model.changed()
+                        }
                     )).labelsHidden()
                 }
             }
@@ -577,6 +962,36 @@ private struct InputSettingsPage: View {
                     .labelsHidden()
                     .frame(width: 170)
                 }
+                if SettingsStore.langMode == "hotkey" {
+                    CardDivider()
+                    SettingsRow("keyboard", L("Клавиша-триггер")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.langHotkey },
+                            set: { SettingsStore.langHotkey = $0; LangSwitcher.shared.hotkeyKeycode = CGKeyCode($0) }
+                        )) {
+                            Text(L("Правый Option")).tag(61)
+                            Text(L("Правый Command")).tag(54)
+                            Text(L("Правый Control")).tag(62)
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                    }
+                }
+                if SettingsStore.langMode == "auto" {
+                    CardDivider()
+                    SettingsRow("textformat.size", L("Мин. длина слова")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.langAutoMinLength },
+                            set: { SettingsStore.langAutoMinLength = $0 }
+                        )) {
+                            Text("3").tag(3)
+                            Text("4").tag(4)
+                            Text("5").tag(5)
+                        }
+                        .labelsHidden()
+                        .frame(width: 60)
+                    }
+                }
             }
             KelvinCard(L("Исправления")) {
                 SettingsRow("checkmark.circle", L("Исправлять явные опечатки"), detail: L("После замены можно оставить исправление или вернуть исходное слово.")) {
@@ -585,6 +1000,20 @@ private struct InputSettingsPage: View {
                         set: { SettingsStore.spellFixEnabled = $0; LangSwitcher.shared.spellFixEnabled = $0; model.changed() }
                     )).labelsHidden()
                 }
+                if SettingsStore.spellFixEnabled {
+                    CardDivider()
+                    SettingsRow("slider.horizontal.3", L("Строгость")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.spellFixMode },
+                            set: { SettingsStore.spellFixMode = $0 }
+                        )) {
+                            Text(L("Строгая")).tag("strict")
+                            Text(L("Сбалансированная")).tag("balanced")
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                    }
+                }
                 CardDivider()
                 SettingsRow("sparkles", L("Интерактивное предложение")) {
                     Toggle("", isOn: settingBinding(
@@ -592,11 +1021,87 @@ private struct InputSettingsPage: View {
                         set: { SettingsStore.langFeedbackHUD = $0; model.changed() }
                     )).labelsHidden()
                 }
+                if SettingsStore.langFeedbackHUD {
+                    CardDivider()
+                    SettingsRow("paintpalette", L("Стиль индикатора")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.langFeedbackStyle },
+                            set: { SettingsStore.langFeedbackStyle = $0 }
+                        )) {
+                            Text(L("Анимированный")).tag("animated")
+                            Text(L("Компактный")).tag("compact")
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                    }
+                }
                 CardDivider()
                 SettingsRow("speaker.wave.2", L("Звук обратной связи")) {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.langFeedbackSound },
                         set: { SettingsStore.langFeedbackSound = $0; model.changed() }
+                    )).labelsHidden()
+                }
+            }
+            KelvinCard(L("Дисплей")) {
+                SettingsRow("sun.max", L("Яркость экрана")) {
+                    Slider(value: settingBinding(
+                        get: { Double(ScreenBrightness.get()) },
+                        set: { ScreenBrightness.set(Float($0)) }
+                    ), in: 0...1)
+                    .frame(width: 200)
+                }
+                CardDivider()
+                SettingsRow("lightbulb.min", L("Подсветка клавиатуры")) {
+                    Slider(value: settingBinding(
+                        get: { Double(KeyboardBacklight.get()) },
+                        set: { KeyboardBacklight.set(Float($0)) }
+                    ), in: 0...1)
+                    .frame(width: 200)
+                }
+                CardDivider()
+                SettingsRow("moon", L("Гасить подсветку при бездействии")) {
+                    Toggle("", isOn: settingBinding(
+                        get: { SettingsStore.idleBacklight },
+                        set: { SettingsStore.idleBacklight = $0 }
+                    )).labelsHidden()
+                }
+                if SettingsStore.idleBacklight {
+                    CardDivider()
+                    SettingsRow("timer", L("Задержка")) {
+                        Picker("", selection: settingBinding(
+                            get: { SettingsStore.idleSeconds },
+                            set: { SettingsStore.idleSeconds = $0 }
+                        )) {
+                            Text("15 " + L("с")).tag(15)
+                            Text("30 " + L("с")).tag(30)
+                            Text("1 " + L("мин")).tag(60)
+                            Text("2 " + L("мин")).tag(120)
+                        }
+                        .labelsHidden()
+                        .frame(width: 100)
+                    }
+                }
+            }
+            KelvinCard(L("Ночной режим")) {
+                SettingsRow("thermometer.sun", L("Теплота экрана")) {
+                    Slider(value: settingBinding(
+                        get: { Double(SettingsStore.nightStrength) },
+                        set: { v in
+                            SettingsStore.nightStrength = Float(v)
+                            NightShift.enableNow(strength: Float(v))
+                        }
+                    ), in: 0...1)
+                    .frame(width: 200)
+                }
+                CardDivider()
+                SettingsRow("lightbulb.2", L("Всегда включён")) {
+                    Toggle("", isOn: settingBinding(
+                        get: { SettingsStore.nightKeepOn },
+                        set: { v in
+                            SettingsStore.nightKeepOn = v
+                            if v { NightShift.enableNow(strength: SettingsStore.nightStrength) }
+                        }
                     )).labelsHidden()
                 }
             }
@@ -623,10 +1128,26 @@ private struct InputSettingsPage: View {
 
 private struct PopoverSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
+    @State private var newToggleLabel = ""
+    @State private var newToggleIcon = "command"
+    @State private var newToggleCmd = ""
 
     var body: some View {
         VStack(spacing: 18) {
             KelvinCard(L("Внешний вид")) {
+                SettingsRow("rectangle.3.group", L("Набор модулей")) {
+                    Picker("", selection: settingBinding(
+                        get: { currentPopoverPreset() },
+                        set: { idx in applyPopoverPreset(idx); model.changed(popover: true) }
+                    )) {
+                        Text(L("Минимум")).tag(0)
+                        Text(L("Сбалансированный")).tag(1)
+                        Text(L("Все модули")).tag(2)
+                    }
+                    .labelsHidden()
+                    .frame(width: 170)
+                }
+                CardDivider()
                 SettingsRow("circle.lefthalf.filled", L("Прозрачность"), detail: "\(Int((1 - SettingsStore.popoverOpacity) * 100))%") {
                     Slider(value: settingBinding(
                         get: { SettingsStore.popoverOpacity },
@@ -651,24 +1172,131 @@ private struct PopoverSettingsPage: View {
                     }
                 }
             }
+            // MARK: - Quick Toggles
+            KelvinCard(L("Быстрые действия")) {
+                ForEach(Array(SettingsStore.toggleLayout.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 { CardDivider() }
+                    SettingsRow(toggleIcon(item.id), toggleLabel(item.id)) {
+                        Toggle("", isOn: Binding(
+                            get: { item.on },
+                            set: { value in
+                                var layout = SettingsStore.toggleLayout
+                                if let i = layout.firstIndex(where: { $0.id == item.id }) { layout[i].on = value }
+                                SettingsStore.toggleLayout = layout
+                                model.changed(popover: true)
+                            }
+                        )).labelsHidden()
+                    }
+                    if item.id.hasPrefix("custom:") {
+                        HStack(spacing: 6) {
+                            Spacer()
+                            Button {
+                                SettingsStore.deleteCustomToggle(item.id)
+                                model.changed(popover: true)
+                            } label: {
+                                Image(systemName: "trash").font(.system(size: 10)).foregroundColor(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 4)
+                    }
+                }
+                if Licensing.shared.isPro {
+                    CardDivider()
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            TextField(L("Название"), text: $newToggleLabel)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                            TextField(L("Команда"), text: $newToggleCmd)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                        }
+                        Button(L("Добавить")) {
+                            SettingsStore.addCustomToggle(label: newToggleLabel, icon: newToggleIcon, command: newToggleCmd)
+                            newToggleLabel = ""
+                            newToggleCmd = ""
+                            model.changed(popover: true)
+                        }
+                        .disabled(newToggleLabel.isEmpty || newToggleCmd.isEmpty)
+                    }
+                    .padding(12)
+                }
+            }
         }
     }
 
-    private func moduleSymbol(_ id: String) -> String {
-        switch id {
-        case "battery": return "battery.75"
-        case "toggles": return "switch.2"
-        case "flow": return "bolt"
-        case "hardware": return "cpu"
-        case "apps": return "square.grid.2x2"
-        case "privacy": return "hand.raised"
-        case "maintenance": return "wrench.and.screwdriver"
-        case "history": return "chart.xyaxis.line"
-        case "disk": return "internaldrive"
-        case "btbattery": return "bolt.horizontal.circle"
-        case "audio": return "speaker.wave.2"
-        default: return "square"
+    // MARK: - Popover preset helpers
+
+    private static let presetSets: [[String]] = [
+        ["battery", "toggles"],  // Minimum
+        Array(PopoverModules.defaultOn), // Balance
+        PopoverModules.all.map { $0.id } // Everything
+    ]
+
+    private func currentPopoverPreset() -> Int {
+        let on = Set(SettingsStore.popoverLayout.filter { $0.on }.map { $0.id })
+        for (idx, preset) in Self.presetSets.enumerated() {
+            if on == Set(preset) { return idx }
         }
+        return -1
+    }
+
+    private func applyPopoverPreset(_ idx: Int) {
+        guard idx >= 0, idx < Self.presetSets.count else { return }
+        let on = Set(Self.presetSets[idx])
+        var layout = SettingsStore.popoverLayout
+        for i in layout.indices { layout[i].on = on.contains(layout[i].id) }
+        SettingsStore.popoverLayout = layout
+    }
+}
+
+// MARK: - Quick Toggle helpers
+
+private func toggleIcon(_ id: String) -> String {
+    if id.hasPrefix("custom:") {
+        if let ct = SettingsStore.customToggles.first(where: { $0.id == id }) { return ct.icon }
+        return "square"
+    }
+    switch id {
+    case "limit80":  return "battery.75"
+    case "topup":    return "bolt.fill"
+    case "turbofan": return "fanblades"
+    case "panic":    return "exclamationmark.triangle"
+    case "caffeine": return "cup.and.saucer"
+    default:         return "toggleswitch"
+    }
+}
+
+private func toggleLabel(_ id: String) -> String {
+    if id.hasPrefix("custom:") {
+        if let ct = SettingsStore.customToggles.first(where: { $0.id == id }) { return ct.label }
+        return L("Пользовательский")
+    }
+    switch id {
+    case "limit80":  return L("Лимит 80%")
+    case "topup":    return L("Дозарядка")
+    case "turbofan": return L("Турбо-кулеры")
+    case "panic":    return L("Аварийный режим")
+    case "caffeine": return L("Не засыпать")
+    default:         return id
+    }
+}
+
+private func moduleSymbol(_ id: String) -> String {
+    switch id {
+    case "battery": return "battery.75"
+    case "toggles": return "switch.2"
+    case "flow": return "bolt"
+    case "hardware": return "cpu"
+    case "apps": return "square.grid.2x2"
+    case "privacy": return "hand.raised"
+    case "maintenance": return "wrench.and.screwdriver"
+    case "history": return "chart.xyaxis.line"
+    case "disk": return "internaldrive"
+    case "btbattery": return "bolt.horizontal.circle"
+    case "audio": return "speaker.wave.2"
+    case "batteryStats": return "chart.bar"
+    default: return "square"
     }
 }
 
@@ -718,10 +1346,51 @@ private struct SecuritySettingsPage: View {
                     .labelsHidden()
                     .disabled(!model.firewallAvailable)
                 }
+                if model.firewallEnabled && model.firewallAvailable {
+                    CardDivider()
+                    SettingsRow("eye.slash", L("Невидимый режим (Stealth)")) {
+                        Toggle("", isOn: settingBinding(
+                            get: { model.firewallStealth },
+                            set: { value in
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    _ = Firewall.setStealth(value)
+                                    DispatchQueue.main.async { model.refreshSecurity() }
+                                }
+                            }
+                        )).labelsHidden()
+                    }
+                    CardDivider()
+                    SettingsRow("shield.lefthalf.filled", L("Блокировать всё, кроме подписанного")) {
+                        Toggle("", isOn: settingBinding(
+                            get: { model.firewallBlockAll },
+                            set: { value in
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    _ = Firewall.setBlockAll(value)
+                                    DispatchQueue.main.async { model.refreshSecurity() }
+                                }
+                            }
+                        )).labelsHidden()
+                    }
+                }
             }
             KelvinCard("VPN") {
                 SettingsRow("lock.shield", L("Системный профиль"), detail: model.vpnSummary) {
                     Button(L("Обновить")) { model.refreshSecurity() }
+                }
+                ForEach(Array(model.vpnProfiles.enumerated()), id: \.element.name) { _, profile in
+                    CardDivider()
+                    SettingsRow("network.badge.shield.half.filled", profile.name,
+                                detail: profile.connected ? L("Подключено") : (profile.enabled ? L("Готов к подключению") : L("Отключён в системе"))) {
+                        Button(profile.connected ? L("Отключить") : L("Подключить")) {
+                            guard SettingsWindowController.shared.requirePro(.vpn) else { model.refreshSecurity(); return }
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                if profile.connected { VPN.disconnect(profile.name) }
+                                else { VPN.connect(profile.name) }
+                                Thread.sleep(forTimeInterval: 0.6)
+                                DispatchQueue.main.async { model.refreshSecurity() }
+                            }
+                        }
+                    }
                 }
             }
             KelvinCard(L("Активные подключения")) {
@@ -773,6 +1442,49 @@ private struct AboutSettingsPage: View {
                 }
                 .padding(18)
             }
+            // MARK: - Updates
+            KelvinCard(L("Обновления")) {
+                SettingsRow("arrow.triangle.2.circlepath", L("Проверять автоматически")) {
+                    Toggle("", isOn: settingBinding(
+                        get: { Updater.autoCheck },
+                        set: { Updater.autoCheck = $0 }
+                    )).labelsHidden()
+                }
+                CardDivider()
+                SettingsRow("arrow.down.circle", L("Проверить сейчас")) {
+                    Button(L("Проверить")) { Updater.checkManually() }
+                }
+            }
+            // MARK: - Tools
+            KelvinCard(L("Инструменты")) {
+                SettingsRow("sparkles", L("Первый запуск")) {
+                    Button(L("Показать")) { OnboardingWindowController.shared.present() }
+                }
+                CardDivider()
+                SettingsRow("doc.text.magnifyingglass", L("Диагностический отчёт"), detail: L("Снимок состояния системы для поддержки.")) {
+                    Button(L("Создать")) {
+                        let log = AppSession.connectionLog()
+                        DiagnosticReport.generate(log: log) { md in
+                            DispatchQueue.main.async {
+                                let panel = NSSavePanel()
+                                panel.nameFieldStringValue = "Kelvin-diagnostics.md"
+                                panel.allowedContentTypes = [.plainText]
+                                panel.begin { resp in
+                                    if resp == .OK, let url = panel.url {
+                                        try? md.write(to: url, atomically: true, encoding: .utf8)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // MARK: - Support & Links
+            KelvinCard(L("Поддержка")) {
+                SettingsRow("heart.fill", L("Поддержать Kelvin"), detail: L("Kelvin бесплатен — и останется таким. Поддержка помогает развитию.")) {
+                    Button(L("Поддержать")) { AppConfig.openDonate() }
+                }
+            }
             KelvinCard {
                 SettingsRow("envelope", L("Обратная связь")) {
                     Button(L("Написать")) {
@@ -782,6 +1494,10 @@ private struct AboutSettingsPage: View {
                 CardDivider()
                 SettingsRow("globe", L("Сайт Kelvin")) {
                     Button(L("Открыть")) { AppConfig.openWebsite() }
+                }
+                CardDivider()
+                SettingsRow("copyright", L("© Tim Blau / Kelvin")) {
+                    EmptyView()
                 }
             }
         }
