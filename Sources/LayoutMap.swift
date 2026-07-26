@@ -55,5 +55,16 @@ enum LayoutMap {
         let lat = word.filter { isLatinLetter($0) }.count
         return cyr >= lat ? .en : .ru
     }
+    
+    /// Известные пары раскладок для автопереключения (source ID → target ID паттерны)
+    static var knownPairs: [String: String] {
+        // Паттерны ID → целевой паттерн (упрощённо: RU ↔ UK)
+        return [
+            "com.apple.keylayout.Russian": "com.apple.keylayout.Ukrainian",
+            "com.apple.keylayout.Ukrainian": "com.apple.keylayout.Russian",
+            "com.apple.inputmethod.Russian.Cyrillic": "com.apple.inputmethod.Ukrainian",
+            "com.apple.inputmethod.Ukrainian": "com.apple.inputmethod.Russian.Cyrillic",
+        ]
+    }
 }
 

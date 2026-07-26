@@ -177,14 +177,40 @@ final class KelvinSettingsModel: ObservableObject {
     private func pollThermalOnce() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var values: [AlertKind: Double] = [:]
+            
+            // Использовать SensorResolver для получения подтверждённых CPU/GPU датчиков.
+            let model = FanController.sysctlStr("hw.model")
+            let arch = FanController.architecture()
+            let catalog = SensorCatalog.build()
             let smc = EnergyModel.smc
+            
             if smc.available {
+                let resolved = SensorResolver.resolve(
+                    model: model,
+                    architecture: arch,
+                    catalog: catalog,
+                    readValue: { smc.read($0) }
+                )
+                
+                // Функция для получения max температуры из набора ключей.
                 func maxOf(_ ks: [String]) -> Double? {
                     ks.compactMap { smc.read($0) }.filter { $0 > -40 && $0 < 130 }.max()
                 }
-                values[.cpuTemp] = maxOf(["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"])
-                values[.gpuTemp] = maxOf(["TG0D","TG0P"])
+                
+                // Приоритет: confirmed keys из resolver, иначе fallback на legacy.
+                if let cpuSensor = resolved.cpuTemperature {
+                    values[.cpuTemp] = maxOf(cpuSensor.keys)
+                } else {
+                    values[.cpuTemp] = maxOf(["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"])
+                }
+                
+                if let gpuSensor = resolved.gpuTemperature {
+                    values[.gpuTemp] = maxOf(gpuSensor.keys)
+                } else {
+                    values[.gpuTemp] = maxOf(["TG0D","TG0P"])
+                }
             }
+            
             values[.cpuLoad] = SystemUsage.shared.cpu() * 100
             if let batt = BatteryReader.read() {
                 values[.batteryLow]  = Double(batt.charge)
@@ -778,11 +804,33 @@ private struct PowerSettingsPage: View {
 
 private struct CoolingSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
-
+    
     private var rules: [AlertRule] { alertRules() }
-
+    
+    // Определить cooling topology для текущего Mac.
+    private let coolingTopology = FanController.coolingTopology()
+    private let isPassive = FanController.isPassiveCooling
+    private let hasFans = FanController.hasActiveCooling
+    
     var body: some View {
         VStack(spacing: 18) {
+            // MARK: - Cooling Topology Info
+            if isPassive {
+                KelvinCard(L("Охлаждение")) {
+                    SettingsRow("fanblades.fill", L("Пассивное охлаждение"), detail: L("Ваш Mac не имеет вентиляторов и полагается на естественное рассеивание тепла.")) {
+                        EmptyView()
+                    }
+                }
+            } else if !hasFans {
+                KelvinCard(L("Охлаждение")) {
+                    SettingsRow("questionmark.circle", L("Данные недоступны"), detail: L("Не удалось определить наличие вентиляторов. Управление может быть недоступно.")) {
+                        EmptyView()
+                    }
+                }
+            }
+            
+            // MARK: - Fan Profile (только если есть активное охлаждение)
+            if hasFans && !isPassive {
             KelvinCard(L("Профиль вентиляторов")) {
                 SettingsRow("fanblades", L("Активный профиль"), detail: L("Системный режим безопаснее всего для повседневной работы.")) {
                     Picker("", selection: settingBinding(
@@ -808,6 +856,7 @@ private struct CoolingSettingsPage: View {
                         set: { SettingsStore.fanAutoBySource = $0; model.changed(popover: true) }
                     )).labelsHidden()
                 }
+            }
             }
 
             // MARK: - GPU

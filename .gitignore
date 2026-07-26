@@ -1,68 +1,41 @@
 ```
-# Compiled and build artifacts
-*.pyc
-__pycache__/
+# Build artifacts
 *.o
 *.obj
-*.class
-*.exe
-*.dll
-*.so
 *.a
-*.out
+*.dylib
+*.so
+*.dll
+
+# Swift build artifacts
+.build/
+DerivedData/
 
 # Dependencies
-node_modules/
-venv/
-.venv/
+Package.resolved
+.swiftpm/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
 .env
 .env.local
 .env.*
 
-# Build directories
-dist/
-build/
-target/
-*.log
-*.tmp
-*.swp
-*.swo
-
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Coverage
+.coverage
 coverage/
 htmlcov/
-.coverage
 
-# Compression
-*.zip
-*.gz
-*.tar
-*.tgz
-*.bz2
-*.xz
-*.7z
-*.rar
-*.zst
-*.lz4
-*.lzh
-*.cab
-*.arj
-*.rpm
-*.deb
-*.Z
-*.lz
-*.lzo
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tar.zst
-
-# Cache
-.mypy_cache/
-.pytest_cache/
-.gradle/
+# OS generated files
+.DS_Store
+Thumbs.db
 ```

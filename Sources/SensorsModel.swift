@@ -1,4 +1,5 @@
 import Foundation
+import Darwin   // sysctlbyname
 
 /// Один сенсор для интерактивной панели «Железо».
 struct Sensor {
@@ -52,6 +53,48 @@ enum SensorsModel {
         return h
     }
 
+    /// Кэшированный resolved sensor set (обновляется при первом вызове snapshot).
+    private static var cachedResolvedSet: ResolvedSensorSet? = nil
+    private static var cachedModel: String? = nil
+    
+    /// Получить или закэшировать resolved sensor set.
+    private static func getResolvedSet() -> ResolvedSensorSet? {
+        let model = sysctlStr("hw.model")
+        let arch = architecture()
+        
+        if cachedResolvedSet == nil || cachedModel != model {
+            guard smc.available else { return nil }
+            let catalog = SensorCatalog.build()
+            cachedResolvedSet = SensorResolver.resolve(
+                model: model,
+                architecture: arch,
+                catalog: catalog,
+                readValue: { smc.read($0) }
+            )
+            cachedModel = model
+        }
+        return cachedResolvedSet
+    }
+    
+    /// Определить архитектуру (arm64/x86_64).
+    private static func architecture() -> String {
+        var size = 0
+        guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.machine", &buf, &size, nil, 0) == 0 else { return "unknown" }
+        let machine = String(cString: buf)
+        return machine.hasPrefix("arm") ? "arm64" : "x86_64"
+    }
+    
+    /// Хелпер для sysctl-строк.
+    private static func sysctlStr(_ name: String) -> String {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "—" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "—" }
+        return String(cString: buf)
+    }
+
     /// record:false — прогрев без записи в историю (см. pushHistory): тёплому прогону нужны текущие
     /// значения для замера высоты, а кольцо трассы должно двигаться строго раз в тик (1 Гц).
     static func snapshot(cpuLoad: Double, ramLoad: Double, components: ComponentPower, record: Bool = true) -> SensorsSnapshot {
@@ -60,6 +103,9 @@ enum SensorsModel {
         var s = SensorsSnapshot()
         guard smc.available else { return s }
         func r(_ k: String) -> Double? { smc.read(k) }
+        
+        // Получить resolved sensor set для текущей модели.
+        let resolved = getResolvedSet()
 
         // — температуры (выбираем осмысленные, не свалку) —
         // smooth=true → мягкое EMA: гасит одно-кадровый спайк ядра (PECI скачет на турбо-бусте),
@@ -91,23 +137,40 @@ enum SensorsModel {
                                   text: String(format: "%.0f°", v), level: lvl, kind: .temp,
                                   detail: detail, history: hist))
         }
+        
+        // Использовать ключи из resolved sensor set, если доступны.
+        // Fallback на legacy-списки для обратной совместимости.
+        let cpuKeys = resolved?.cpuTemperature?.keys ?? ["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"]
+        let cpuPkgKeys = resolved?.sensors[.cpuPackageTemperature]?.keys ?? ["TC0P"]
+        let gpuKeys = resolved?.gpuTemperature?.keys ?? ["TG0D","TG0P"]
+        let memKeys = resolved?.sensors[.memoryTemperature]?.keys ?? ["TM0P"]
+        let pchKeys = resolved?.sensors[.platformTemperature]?.keys ?? ["TPCD"]
+        let wifiKeys = resolved?.sensors[.wifiTemperature]?.keys ?? ["TW0P"]
+        let battKeys = resolved?.batteryTemperature?.keys ?? ["TB0T","TB1T","TB2T"]
+        
         // «CPU» — РЕАЛЬНАЯ температура кристалла (PECI/ядра), а не сглаженный датчик-близость TC0P:
         // именно по ней процессор греется и троттлит. TC0P (корпус пакета) показываем как «CPU корпус».
-        temp("cpu",   "CPU",            "cpu.fill",            ["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"], smooth: true)
-        temp("cpupkg",L("CPU корпус"),  "cpu",                ["TC0P"])
-        temp("gpu",   "GPU",            "display",             ["TG0D","TG0P"], smooth: true)
-        temp("mem",   L("Память"),      "memorychip.fill",     ["TM0P"])
-        temp("pch",   L("Платформа"),   "square.stack.3d.up.fill", ["TPCD"])
-        temp("wifi",  "Wi-Fi",          "wifi",                ["TW0P"])
-        temp("batt",  L("Батарея"),     "battery.100",         ["TB0T","TB1T","TB2T"])
+        temp("cpu",   "CPU",            "cpu.fill",            cpuKeys, smooth: true)
+        temp("cpupkg",L("CPU корпус"),  "cpu",                 cpuPkgKeys)
+        temp("gpu",   "GPU",            "display",             gpuKeys, smooth: true)
+        temp("mem",   L("Память"),      "memorychip.fill",     memKeys)
+        temp("pch",   L("Платформа"),   "square.stack.3d.up.fill", pchKeys)
+        temp("wifi",  "Wi-Fi",          "wifi",                wifiKeys)
+        temp("batt",  L("Батарея"),     "battery.100",         battKeys)
 
         // — вентиляторы (текущие + положение между мин/макс) —
         // FS! — битовая маска «какие вентиляторы на ручном/форсе» (бит i = вентилятор i).
         // Если форс есть, обороты НЕ реагируют на нагрев — показываем это бейджем, чтобы не путать.
         let forceMask = Int(r("FS! ") ?? 0)
-        for (i, k) in [("F0Ac","F0Mn","F0Mx"), ("F1Ac","F1Mn","F1Mx")].enumerated() {
-            guard let cur = r(k.0), cur > 1 else { continue }
-            let mn = r(k.1) ?? 0, mx = max(r(k.2) ?? (cur + 1), cur)
+        
+        // Построить fan rows из resolved cooling topology.
+        let fanIndices = resolved?.fanIndices ?? []
+        for i in fanIndices {
+            let acKey = "F\(i)Ac"
+            let mnKey = "F\(i)Mn"
+            let mxKey = "F\(i)Mx"
+            guard let cur = r(acKey), cur > 1 else { continue }
+            let mn = r(mnKey) ?? 0, mx = max(r(mxKey) ?? (cur + 1), cur)
             let lvl = mx > mn ? max(0, min(1, (cur - mn) / (mx - mn))) : 0
             let forced = (forceMask & (1 << i)) != 0
             let base = String(format: L("Кулер %d · %.0f об/мин · %.0f%% (от %.0f до %.0f)"), i+1, cur, lvl*100, mn, mx)

@@ -32,9 +32,97 @@ enum DiagnosticReport {
 
         // — Система —
         h(L("Система"))
-        kv(L("Модель"), sysctlStr("hw.model"))
+        let model = sysctlStr("hw.model")
+        kv(L("Модель"), model)
+        let arch = architecture()
+        kv("Архитектура", arch)
         kv("macOS", ProcessInfo.processInfo.operatingSystemVersionString)
         if let up = SystemUptime.seconds() { kv(L("Аптайм"), fmtDuration(up)) }
+
+        // — Оборудование и SMC —
+        h(L("Оборудование и SMC"))
+        let smcAvailable = SMCReader.shared.available
+        kv("SMC available", smcAvailable ? L("да") : L("нет"))
+        
+        if smcAvailable {
+            // Получаем каталог ключей (ограниченно, не полный перебор)
+            let catalogKeys = SMCReader.shared.enumerateKeys().prefix(200).map { $0 }
+            kv(L("Ключей в каталоге"), "\(catalogKeys.count)")
+            
+            // Resolved sensor set
+            let resolved = SensorResolver.resolve(
+                model: model,
+                architecture: arch,
+                catalog: catalogKeys,
+                values: [:] // значения читаются внутри resolver при необходимости
+            )
+            
+            // Cooling topology
+            switch resolved.cooling {
+            case .passive:
+                kv(L("Охлаждение"), L("Пассивное"))
+            case .active(let fanIndices):
+                kv(L("Охлаждение"), L("Активное") + " (\(fanIndices.count) " + L("вентиляторов") + ")")
+            case .unknown:
+                kv(L("Охлаждение"), L("Данные недоступны"))
+            }
+            
+            // FNum если доступен
+            if let fnum = SMCReader.shared.readDouble("FNum") {
+                kv("FNum", "\(Int(fnum))")
+            }
+            
+            // Разрешённые сенсоры
+            s += "\n### " + L("Разрешённые сенсоры") + "\n\n"
+            if resolved.sensors.isEmpty {
+                s += "_" + L("Нет подтверждённых физических ролей для этой модели.") + "_\n"
+            } else {
+                for (role, sensor) in resolved.sensors.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+                    let roleName = roleDisplayName(role)
+                    let confidenceName = confidenceDisplayName(sensor.confidence)
+                    s += "- **\(roleName)**: `\(sensor.keys.joined(separator: ", "))` · \(confidenceName)\n"
+                    if let value = sensor.keys.compactMap({ SMCReader.shared.readDouble($0) }).first {
+                        s += "  - " + String(format: "%.1f °C", value) + "\n"
+                    }
+                }
+            }
+            
+            // Сырой каталог (температурные и fan ключи)
+            s += "\n### " + L("Доступные датчики (сырой каталог)") + "\n\n"
+            let tempAndFanKeys = catalogKeys.filter { key in
+                let type = String(cString: key.type)
+                return type.hasPrefix("sp") || type.hasPrefix("flt") || key.fourCC.hasPrefix("T") || key.fourCC.hasPrefix("F")
+            }
+            if tempAndFanKeys.isEmpty {
+                s += "_" + L("Температурные и fan ключи не найдены.") + "_\n"
+            } else {
+                s += "| FourCC | Тип | Размер | Значение |\n"
+                s += "|--------|-----|--------|----------|\n"
+                for key in tempAndFanKeys.prefix(50) { // ограничим 50 для читаемости
+                    let fourCC = String(cString: key.fourCC)
+                    let type = String(cString: key.type)
+                    let size = Int(key.size)
+                    let valueStr: String
+                    if let value = SMCReader.shared.readDouble(fourCC) {
+                        if type.hasPrefix("sp78") {
+                            valueStr = String(format: "%.1f", value)
+                        } else if fourCC.hasPrefix("F") && fourCC.contains("Ac") {
+                            valueStr = "\(Int(value)) RPM"
+                        } else {
+                            valueStr = String(format: "%.2f", value)
+                        }
+                    } else {
+                        valueStr = "—"
+                    }
+                    s += "| `\(fourCC)` | `\(type)` | \(size) | \(valueStr) |\n"
+                }
+                if tempAndFanKeys.count > 50 {
+                    s += "| … | … | … | " + String(format: L("и ещё %d"), tempAndFanKeys.count - 50) + " |\n"
+                }
+            }
+        } else {
+            kv(L("Статус"), L("SMC недоступен на этой системе"))
+        }
 
         // — Безопасность / Здоровье (Maintenance posture; sync) —
         let p = Maintenance.posture()
@@ -84,6 +172,45 @@ enum DiagnosticReport {
             if log.count > 30 { s += "- _…" + String(format: L("и ещё %d"), log.count - 30) + "_\n" }
         }
 
+        // — Автоязык —
+        h(L("Автоязык"))
+        let langStatus = LangSwitcherStatus.current()
+        kv(L("Режим (сохранён)"), modeDisplayName(langStatus.savedMode))
+        kv(L("Статус runtime"), langStatus.runtimeStatus.localizedDescription)
+        kv(L("Pro доступ"), langStatus.hasProAccess ? L("да") : L("нет"))
+        kv(L("Accessibility"), langStatus.accessibilityTrusted ? L("разрешено") : L("запрещено"))
+        kv(L("Event tap активен"), langStatus.tapActive ? L("да") : L("нет"))
+        if langStatus.recoveries > 0 || langStatus.creationFailures > 0 {
+            kv(L("Восстановления / ошибки"), "\(langStatus.recoveries) / \(langStatus.creationFailures)")
+        }
+        if let sourceID = langStatus.currentSourceID {
+            kv(L("Текущий input source"), sourceID)
+        }
+        
+        s += "\n### " + L("Доступные раскладки") + "\n\n"
+        if langStatus.availableLayouts.isEmpty {
+            s += "_" + L("Раскладки не найдены.") + "_\n"
+        } else {
+            s += "| ID | Название | Язык |\n"
+            s += "|----|----------|------|\n"
+            for layout in langStatus.availableLayouts.prefix(20) {
+                let lang = layout.language ?? "—"
+                s += "| `\(layout.id)` | \(mdText(layout.name)) | \(lang) |\n"
+            }
+            if langStatus.availableLayouts.count > 20 {
+                s += "| … | … | " + String(format: L("и ещё %d"), langStatus.availableLayouts.count - 20) + " |\n"
+            }
+        }
+        
+        s += "\n### " + L("Пары конвертации") + "\n\n"
+        if langStatus.conversionPairs.isEmpty {
+            s += "_" + L("Пары конвертации не настроены.") + "_\n"
+        } else {
+            for pair in langStatus.conversionPairs {
+                s += "- `\(pair.from)` → `\(pair.to)`\n"
+            }
+        }
+
         s += "\n---\n_" + L("Данные локальны (IOKit/SMC/системные утилиты). Kelvin не отправляет ничего в сеть.") + "_\n"
         return s
     }
@@ -120,5 +247,47 @@ enum DiagnosticReport {
          .replacingOccurrences(of: "_", with: "\\_")
          .replacingOccurrences(of: "[", with: "\\[")
          .replacingOccurrences(of: "]", with: "\\]")
+    }
+    
+    // MARK: - Хелперы для SMC отчёта
+    
+    private static func architecture() -> String {
+        var size = 0
+        guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0, size > 0 else { return "—" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.machine", &buf, &size, nil, 0) == 0 else { return "—" }
+        let machine = String(cString: buf)
+        if machine.hasPrefix("arm64") || machine.hasPrefix("armv") { return "arm64" }
+        if machine.hasPrefix("x86_64") { return "x86_64" }
+        return machine
+    }
+    
+    private static func roleDisplayName(_ role: PhysicalSensorRole) -> String {
+        switch role {
+        case .cpuTemperature: return L("Температура CPU")
+        case .cpuPackageTemperature: return L("Температура пакета CPU")
+        case .gpuTemperature: return L("Температура GPU")
+        case .memoryTemperature: return L("Температура памяти")
+        case .platformTemperature: return L("Температура платформы")
+        case .wifiTemperature: return L("Температура Wi-Fi")
+        case .batteryTemperature: return L("Температура батареи")
+        }
+    }
+    
+    private static func confidenceDisplayName(_ confidence: SensorConfidence) -> String {
+        switch confidence {
+        case .modelVerified: return L("подтверждено моделью")
+        case .familyVerified: return L("подтверждено семейством")
+        case .legacyVerified: return L("legacy fallback")
+        case .unknown: return L("неизвестно")
+        }
+    }
+    
+    private static func modeDisplayName(_ mode: LangSwitcher.Mode) -> String {
+        switch mode {
+        case .off: return L("Выключено")
+        case .hotkey: return L("По горячей клавише")
+        case .auto: return L("Автоматически")
+        }
     }
 }

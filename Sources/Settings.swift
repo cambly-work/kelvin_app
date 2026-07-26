@@ -1698,8 +1698,50 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     private func thermalNowText(_ kind: AlertKind) -> String {
         switch kind {
         case .cpuTemp:
+            // Использовать SensorResolver для получения подтверждённого CPU датчика.
+            let model = FanController.sysctlStr("hw.model")
+            let arch = FanController.architecture()
+            let catalog = SensorCatalog.build()
+            let smc = EnergyModel.smc
+            
+            if smc.available {
+                let resolved = SensorResolver.resolve(
+                    model: model,
+                    architecture: arch,
+                    catalog: catalog,
+                    readValue: { smc.read($0) }
+                )
+                
+                if let cpuSensor = resolved.cpuTemperature,
+                   let t = FanController.leadingTemp(cpuSensor.keys) {
+                    return String(format: L("сейчас %.0f°"), t)
+                }
+            }
+            
+            // Fallback на legacy-ключи.
             if let t = FanController.temp("TC0E") ?? FanController.leadingTemp(["TCXC", "TC0P"]) { return String(format: L("сейчас %.0f°"), t) }
         case .gpuTemp:
+            // Использовать SensorResolver для получения подтверждённого GPU датчика.
+            let model = FanController.sysctlStr("hw.model")
+            let arch = FanController.architecture()
+            let catalog = SensorCatalog.build()
+            let smc = EnergyModel.smc
+            
+            if smc.available {
+                let resolved = SensorResolver.resolve(
+                    model: model,
+                    architecture: arch,
+                    catalog: catalog,
+                    readValue: { smc.read($0) }
+                )
+                
+                if let gpuSensor = resolved.gpuTemperature,
+                   let t = FanController.leadingTemp(gpuSensor.keys) {
+                    return String(format: L("сейчас %.0f°"), t)
+                }
+            }
+            
+            // Fallback на legacy-ключи.
             if let t = FanController.temp("TG0D") ?? FanController.temp("TCGC") { return String(format: L("сейчас %.0f°"), t) }
         case .batteryLow, .batteryFull:
             if let p = BatteryReader.systemChargePercent() { return String(format: L("сейчас %d%%"), p) }

@@ -45,6 +45,30 @@ enum InputSources {
             NSWorkspace.shared.open(u)
         }
     }
+    
+    /// Получить все input sources (для диагностики)
+    static func allInputSources() -> [[String: Any]] {
+        guard let list = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [TISInputSource] else { return [] }
+        return list.compactMap { source -> [String: Any]? in
+            var dict: [String: Any] = [:]
+            if let id = str(source, kTISPropertyInputSourceID) { dict[kTISPropertyInputSourceID as String] = id }
+            if let name = str(source, kTISPropertyLocalizedName) { dict[kTISPropertyLocalizedName as String] = name }
+            if let lang = str(source, kTISPropertyPrimaryLanguage) { dict[kTISPropertyPrimaryLanguage as String] = lang }
+            if let enabled = bool(source, kTISPropertyInputSourceIsEnabled) { dict["enabled"] = enabled }
+            return dict.isEmpty ? nil : dict
+        }
+    }
+    
+    /// Список ID доступных клавиатурных раскладок
+    static func availableKeyboardLayouts() -> [String] {
+        installed().map { $0.id }
+    }
+    
+    /// Текущий активный input source ID
+    static func currentInputSourceID() -> String? {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
+        return str(source, kTISPropertyInputSourceID)
+    }
 
     // MARK: TIS-свойства
     private static func cat(_ s: TISInputSource) -> String? { str(s, kTISPropertyInputSourceCategory) }
