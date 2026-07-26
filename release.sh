@@ -75,13 +75,11 @@ ditto -c -k --keepParent "$APP" "$UPDATE_ARCHIVE"
 # Подписываем архив EdDSA ключом (если есть приватный ключ)
 ED_SIGNATURE=""
 if [ -n "$SPARKLE_ED_KEY_FILE" ] && [ -f "$SPARKLE_ED_KEY_FILE" ]; then
-    ED_SIGNATURE=$(./bin/sign_update --ed-key-file "$SPARKLE_ED_KEY_FILE" "$UPDATE_ARCHIVE" | grep -o '"edSignature":"[^"]*"' | cut -d'"' -f4)
+    ED_SIGNATURE=$(python3 sign_update.py "$UPDATE_ARCHIVE" "$(cat "$SPARKLE_ED_KEY_FILE")" | grep 'sparkle:edSignature' | sed 's/.*sparkle:edSignature="\([^"]*\)".*/\1/')
     echo "  ✓ Update archive подписан EdDSA"
 elif [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
     # Альтернативно: ключ из переменной окружения
-    echo "$SPARKLE_ED_PRIVATE_KEY" > /tmp/sparkle_ed_key.tmp
-    ED_SIGNATURE=$(./bin/sign_update --ed-key-file /tmp/sparkle_ed_key.tmp "$UPDATE_ARCHIVE" | grep -o '"edSignature":"[^"]*"' | cut -d'"' -f4)
-    rm -f /tmp/sparkle_ed_key.tmp
+    ED_SIGNATURE=$(python3 sign_update.py "$UPDATE_ARCHIVE" "$SPARKLE_ED_PRIVATE_KEY" | grep 'sparkle:edSignature' | sed 's/.*sparkle:edSignature="\([^"]*\)".*/\1/')
     echo "  ✓ Update archive подписан EdDSA (из env)"
 else
     echo "  ⚠ SPARKLE_ED_KEY_FILE или SPARKLE_ED_PRIVATE_KEY не заданы → архив НЕ подписан"

@@ -46,18 +46,21 @@
 DEVID_APP="Developer ID Application: Artem Balabanov (TEAMID)" \
 AC_PROFILE="kelvin-notary" \
 DOWNLOAD_BASE="https://<хост>" \
+SPARKLE_ED_KEY_FILE=/secure/path/to/private_ed_key \
 STYLE_DMG=1 \
 ./release.sh
 ```
 
 Скрипт: сборка → подпись + hardened runtime → DMG (стилизованный) → нотаризация → staple →
-генерация `docs/appcast.json`. На выходе — `Kelvin-X.Y.dmg`, готовый к раздаче.
+создание update archive → подпись EdDSA → генерация `docs/appcast.xml`.
+На выходе — `Kelvin-X.Y.dmg` и `Kelvin-X.Y.zip`, готовые к раздаче.
 
 Без `DEVID_APP`/`AC_PROFILE` скрипт всё равно соберёт DMG (для локальной проверки), но без нотаризации.
+Без `SPARKLE_ED_KEY_FILE` update archive не будет подписан — Sparkle откажется устанавливать обновление.
 
 ## 5. Опубликовать
 
-1. Залить `Kelvin-X.Y.dmg`, `docs/appcast.json`, обновлённый `docs/` на хостинг.
+1. Залить `Kelvin-X.Y.zip`, `docs/appcast.xml`, обновлённый `docs/` на хостинг.
 2. Проверить ссылку «Купить» на лендинге и активацию тестовым ключом Lemon Squeezy.
 3. Готово — можно вести трафик.
 
@@ -67,9 +70,22 @@ STYLE_DMG=1 \
 
 1. Поднять `CFBundleShortVersionString` (и `CFBundleVersion`) в [Info.plist](Info.plist).
 2. Добавить запись в [docs/notes.html](docs/notes.html).
-3. `./release.sh` с теми же env → новый DMG + обновлённый `docs/appcast.json`.
-4. Залить на хостинг. Установленные приложения подхватят обновление через `Updater` (раз в сутки) и
-   предложат скачать.
+3. Сгенерировать ключи EdDSA (если ещё не созданы): `./generate_update_keys.sh`
+4. Вставить публичный ключ в `Info.plist` как `SUPublicEDKey`.
+5. `./release.sh` с `SPARKLE_ED_KEY_FILE` → новый DMG + ZIP + подписанный `docs/appcast.xml`.
+6. Залить на хостинг. Установленные приложения подхватят обновление через Sparkle (раз в сутки) и
+   предложат установить внутри приложения.
+
+### Подробный runbook
+
+См. [UPDATE_RUNBOOK.md](UPDATE_RUNBOOK.md) — полная инструкция по:
+- Выпуску обычных и критических обновлений
+- Ротации ключей EdDSA
+- Отзыву ошибочного релиза
+- Временной остановке feed
+- Rollback и восстановлению service
+- Диагностике update failure
+- Проверке совместимости privileged service
 
 ## Чем проверять до релиза (dev-флаги)
 
