@@ -4207,6 +4207,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         Licensing.shared.revalidate()        // тихо обновляем офлайн-grace, если есть лицензия
 
+        // Инициализация системы отчётов о сбоях: отмечаем запуск в breadcrumbs
+        CrashBreadcrumbStore.shared.appStarted()
+        
+        // Проверка наличия crash reports после предыдущего запуска
+        checkForCrashReports()
+
         // welcome при первом запуске (но не во время скриншот-режимов)
         let env = ProcessInfo.processInfo.environment
         let screenshotMode = env["BM_SETTINGS"] != nil || env["BM_SHOWCASE"] != nil || env["BM_AUTOSHOW"] != nil
@@ -5476,10 +5482,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popoverAnchor?.close()
         popoverAnchor = nil
     }
+    
+    /// Проверка наличия crash reports и показ уведомления пользователю
+    private func checkForCrashReports() {
+        let pendingReports = CrashReportStore.shared.reports(state: .discovered)
+        guard !pendingReports.isEmpty else { return }
+        
+        // Показываем уведомление для первого найденного отчёта
+        // (остальные будут показаны после обработки первого)
+        let report = pendingReports.first!
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.showCrashNotification(for: report)
+        }
+    }
+    
+    /// Показать карточку уведомления о crash report
+    private func showCrashNotification(for report: CrashReport) {
+        // Проверяем, включена ли автоматическая отправка
+        let autoSend = UserDefaults.standard.bool(forKey: "autoSendCrashReports")
+        
+        if autoSend {
+            // Автоматическая отправка без показа UI
+            CrashReportStore.shared.updateState(report.id, to: .queued)
+            CrashReportUploader.shared.enqueue(report)
+        } else {
+            // Показываем карточку с запросом согласия
+            // Для этого используем простое alert-like окно поверх status bar
+            let alert = NSAlert()
+            alert.messageText = "Kelvin неожиданно завершил работу"
+            alert.informativeText = "Мы нашли отчёт о сбое. Вы можете отправить обезличенный отчёт разработчику, чтобы помочь исправить эту ошибку."
+            alert.addButton(withTitle: "Посмотреть")
+            alert.addButton(withTitle: "Отправить")
+            alert.addButton(withTitle: "Не отправлять")
+            alert.alertStyle = .warning
+            
+            let modalResponse = alert.runModal()
+            
+            switch modalResponse {
+            case .alertFirstButtonReturn: // Посмотреть
+                // Открываем preview в отдельном окне
+                openCrashPreviewWindow(for: report)
+                
+            case .alertSecondButtonReturn: // Отправить
+                CrashReportStore.shared.updateState(report.id, to: .consented)
+                CrashReportUploader.shared.enqueue(report)
+                
+            case .alertThirdButtonReturn: // Не отправлять
+                CrashReportStore.shared.updateState(report.id, to: .declined)
+                
+            default:
+                break
+            }
+        }
+    }
+    
+    /// Открыть окно предпросмотра crash report
+    private func openCrashPreviewWindow(for report: CrashReport) {
+        // Санитизируем отчёт для показа
+        guard let sanitized = CrashReportSanitizer.sanitize(fileURL: report.filePath) else {
+            return
+        }
+        
+        // Создаём простое текстовое окно для просмотра
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.string = sanitized.previewText
+        
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.documentView = textView
+        
+        let contentSize = NSSize(width: 500, height: 400)
+        textView.frame = NSRect(origin: .zero, size: contentSize)
+        scrollView.frame = NSRect(origin: .zero, size: contentSize)
+        
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: contentSize.width + 40, height: contentSize.height + 80),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Отчёт о сбое — \(report.appVersion)"
+        window.contentViewController = NSViewController()
+        window.contentViewController?.view = scrollView
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        
+        // Добавляем кнопки действий
+        // (упрощённая версия — в полной реализации нужен SwiftUI preview)
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         usbWatch.stop()        // E1 teardown: релиз итераторов + снятие run-loop source + destroy порта
         GlobalHotkey.shared.teardown()   // снять Carbon-хоткей + хендлер без утечки
+        
+        // Ожидание завершения активных загрузок crash reports (до 5 секунд)
+        CrashReportUploader.shared.waitForCompletion(timeout: 5.0)
     }
 }
 

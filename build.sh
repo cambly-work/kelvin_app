@@ -24,6 +24,12 @@ rm -rf "$TMPDIR_BUILD"
 [ -x "$APP/Contents/MacOS/$BIN" ] || { echo "✗ бинарь не собрался (пустой бандл — вероятно OOM)"; exit 1; }
 strip -x "$APP/Contents/MacOS/$BIN" 2>/dev/null || true   # снять локальные символы: `nm` больше не выдаёт локатор гейта (isPro)
 
+# Сохраняем dSYM для symbolication crash reports (если сборка с отладочной информацией)
+if [ -d "$APP.dSYM" ]; then
+    echo "→ Архивация dSYM для symbolication…"
+    ./archive-dsyms.sh
+fi
+
 echo "→ Демон вентиляторов (fand)…"
 # Universal Binary для fand
 TMPDIR_FAND=$(mktemp -d)
