@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trykelvin.kelvin.privileged</string>
+    
+    <key>MachServices</key>
+    <dict>
+        <key>com.trykelvin.kelvin.privileged.xpc</key>
+        <true/>
+    </dict>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/PrivilegedHelperTools/com.trykelvin.kelvin.privileged</string>
+    </array>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/var/log/com.trykelvin.kelvin.privileged.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/var/log/com.trykelvin.kelvin.privileged.err</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    
+    <!-- Security Hardening -->
+    <key>HardenedRuntime</key>
+    <true/>
+    
+    <key>LimitLoadToSessionType</key>
+    <string>System</string>
+    
+    <!-- Root only -->
+    <key>UserName</key>
+    <string>root</string>
+    
+    <key>GroupName</key>
+    <string>wheel</string>
+    
+    <!-- Filesystem restrictions (if supported) -->
+    <key>RootDirectory</key>
+    <string>/</string>
+    
+    <!-- Network restrictions: none needed for local XPC -->
+    
+    <!-- System Integrity Protection compatibility -->
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.trykelvin.kelvin</string>
+</dict>
+</plist>

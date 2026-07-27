@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Root privilege: required for system-wide changes -->
+    <key>com.apple.security.root</key>
+    <true/>
+    
+    <!-- ServiceManagement: регистрация launch daemon -->
+    <key>com.apple.security.service-management</key>
+    <true/>
+    
+    <!-- Доступ к SMC для управления вентиляторами (если используется direct SMC) -->
+    <key>com.apple.driver.AppleSMC</key>
+    <true/>
+    
+    <!-- Доступ к powermetrics -->
+    <key>com.apple.security.temporary-exception.powermetrics</key>
+    <true/>
+    
+    <!-- Доступ к pmset для GPU switching -->
+    <key>com.apple.security.temporary-exception.pmset</key>
+    <true/>
+    
+    <!-- Доступ к socketfilterfw для firewall -->
+    <key>com.apple.security.temporary-exception.firewall</key>
+    <true/>
+    
+    <!-- Доступ к /etc/hosts для блокировки доменов -->
+    <key>com.apple.security.temporary-exception.hosts-file</key>
+    <true/>
+    
+    <!-- Наследование не требуется, это отдельный root процесс -->
+    <key>com.apple.security.inherit</key>
+    <false/>
+    
+    <!-- Отладка (удалить перед релизом) -->
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+</dict>
+</plist>
