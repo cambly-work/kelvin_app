@@ -21,5 +21,23 @@
     <string>Kelvin показывает статус Bluetooth и позволяет включать/выключать его из строки меню.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Kelvin использует системные команды для переключателей (тёмная тема, Night Shift и др.).</string>
+    
+    <!-- Sparkle Update Framework -->
+    <key>SUFeedURL</key>
+    <string>https://trykelvin.com/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>HAPOoVYrVY0BjcK3UXKi8ydp9kG/M2+DvM6HckfJ6n8=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUEnableSystemProfiling</key>
+    <false/>
+    <key>SUSendProfileInfo</key>
+    <false/>
 </dict>
 </plist>
