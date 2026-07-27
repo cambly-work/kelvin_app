@@ -1,43 +1,116 @@
 import AppKit
+import Sparkle
 
-/// Лёгкий собственный механизм обновлений (без Sparkle): тянет appcast-JSON, сравнивает версию,
-/// предлагает скачать DMG. Полнофункциональный in-app install — задача Sparkle на будущее;
-/// здесь — надёжная проверка + переход на загрузку, чего достаточно для прямой дистрибуции.
+/// Адаптер для Sparkle updater — скрывает API фреймворка за протоколом UpdateProviding.
+/// Весь UI работает только через этот протокол, что позволяет:
+/// - тестировать настройки без сети
+/// - заменить implementation
+/// - централизовать логирование
+protocol UpdateProviding {
+    var automaticallyChecksForUpdates: Bool { get set }
+    var canCheckForUpdates: Bool { get }
+    func checkInBackground()
+    func checkManually()
+}
+
+/// Реализация адаптера для Sparkle 2.x
+final class SparkleUpdater: UpdateProviding {
+    private let controller: SPUStandardUpdaterController
+    
+    init() {
+        // Инициализируем Sparkle с стандартным UI (алерты, прогресс)
+        // updaterDelegate: nil — используем поведение по умолчанию
+        // userDriverDelegate: nil — стандартный driver для macOS
+        self.controller = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+        
+        // Настраиваем поведение
+        controller.updater.automaticallyChecksForUpdates = true
+        controller.updater.updateCheckInterval = 24 * 3600 // раз в сутки
+    }
+    
+    var automaticallyChecksForUpdates: Bool {
+        get { controller.updater.automaticallyChecksForUpdates }
+        set { controller.updater.automaticallyChecksForUpdates = newValue }
+    }
+    
+    var canCheckForUpdates: Bool {
+        return controller.canCheckForUpdates
+    }
+    
+    func checkInBackground() {
+        // Sparkle автоматически проверяет обновления при запуске,
+        // если automaticallyChecksForUpdates = true
+        // Явный вызов не требуется, но можно форсировать:
+        controller.updater.checkForUpdatesInBackground()
+    }
+    
+    func checkManually() {
+        // Показывает стандартный UI Sparkle (прогресс, алерт о новой версии)
+        controller.checkForUpdates(nil)
+    }
+}
+
+/// Legacy Updater — оставлен для совместимости, но делегирует Sparkle
 enum Updater {
+    private static var sparkle: UpdateProviding?
+    
+    private static func getSparkle() -> UpdateProviding {
+        if sparkle == nil {
+            sparkle = SparkleUpdater()
+        }
+        return sparkle!
+    }
+    
     /// Публикуется рядом с DMG (см. release.sh). Заменить на реальный хост при запуске.
     /// BM_FEED переопределяет адрес ТОЛЬКО в DEBUG — иначе env подменил бы канал обновлений в релизе.
     static var feedURL: String {
         #if DEBUG
         if let f = ProcessInfo.processInfo.environment["BM_FEED"] { return f }
         #endif
-        return "https://trykelvin.com/appcast.json"
+        return "https://trykelvin.com/appcast.xml"
     }
-
+    
     struct Release: Decodable {
         let version: String          // "1.1.0"
         let url: String              // прямой URL .dmg
         let minOS: String?           // "11.0" — не предлагать на более старой macOS
         let notes: String?           // URL заметок о выпуске (необязательно)
     }
-
+    
     private static let d = UserDefaults.standard
+    
     static var autoCheck: Bool {
-        get { d.object(forKey: "updates.auto") as? Bool ?? true }   // по умолчанию включено
-        set { d.set(newValue, forKey: "updates.auto") }
+        get { 
+            // Миграция: читаем старое значение, но используем Sparkle
+            if let legacy = d.object(forKey: "updates.auto") as? Bool {
+                return legacy
+            }
+            return getSparkle().automaticallyChecksForUpdates
+        }
+        set { 
+            d.set(newValue, forKey: "updates.auto")
+            getSparkle().automaticallyChecksForUpdates = newValue
+        }
     }
+    
     private static var skipped: String? {
         get { d.string(forKey: "updates.skip") }
         set { d.set(newValue, forKey: "updates.skip") }
     }
+    
     private static var lastCheck: Date? {
         get { d.object(forKey: "updates.lastCheck") as? Date }
         set { d.set(newValue, forKey: "updates.lastCheck") }
     }
-
+    
     static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.9.0"
     }
-
+    
     /// remote > current по компонентам (1.2.0 > 1.1.9).
     static func isNewer(_ remote: String, than current: String) -> Bool {
         let r = remote.split(separator: ".").map { Int($0) ?? 0 }
@@ -48,6 +121,7 @@ enum Updater {
         }
         return false
     }
+    
     private static func osSatisfies(_ minOS: String?) -> Bool {
         guard let minOS, !minOS.isEmpty else { return true }
         let parts = minOS.split(separator: ".").map { Int($0) ?? 0 }
@@ -59,78 +133,17 @@ enum Updater {
         }
         return true
     }
-
+    
     // MARK: проверки
-    /// Тихая проверка при запуске: не чаще раза в сутки, только если включено; алерт лишь при новой версии.
+    /// Тихая проверка при запуске: делегирует Sparkle
     static func checkOnLaunch() {
         guard autoCheck else { return }
-        if let last = lastCheck, Date().timeIntervalSince(last) < 24 * 3600 { return }
-        fetch { rel in
-            lastCheck = Date()
-            guard let rel, isNewer(rel.version, than: currentVersion), osSatisfies(rel.minOS),
-                  rel.version != skipped else { return }
-            present(rel, allowSkip: true)
-        }
+        // Sparkle автоматически проверяет при запуске, если настроено
+        getSparkle().checkInBackground()
     }
-
-    /// Ручная проверка (из настроек): всегда показывает результат — есть новее / актуально / ошибка.
+    
+    /// Ручная проверка (из настроек): показывает стандартный UI Sparkle
     static func checkManually() {
-        fetch { rel in
-            lastCheck = Date()
-            guard let rel else {
-                return alert(L("Не удалось проверить обновления"), L("Проверьте соединение и попробуйте позже."), L("Понятно"))
-            }
-            if isNewer(rel.version, than: currentVersion), osSatisfies(rel.minOS) {
-                present(rel, allowSkip: false)
-            } else {
-                alert(L("Установлена последняя версия"), String(format: L("Kelvin %@ — обновлений нет."), currentVersion), L("Отлично"))
-            }
-        }
-    }
-
-    // MARK: сеть
-    private static func fetch(_ done: @escaping (Release?) -> Void) {
-        guard let url = URL(string: feedURL) else { return done(nil) }
-        var req = URLRequest(url: url); req.timeoutInterval = 12
-        req.cachePolicy = .reloadIgnoringLocalCacheData
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            let rel = data.flatMap { try? JSONDecoder().decode(Release.self, from: $0) }
-            DispatchQueue.main.async { done(rel) }
-        }.resume()
-    }
-
-    // MARK: UI
-    private static func present(_ rel: Release, allowSkip: Bool) {
-        let a = NSAlert()
-        a.messageText = String(format: L("Доступна Kelvin %@"), rel.version)
-        a.informativeText = String(format: L("Установлена %@. Скачать новую версию?"), currentVersion)
-        a.addButton(withTitle: L("Скачать"))
-        if rel.notes != nil { a.addButton(withTitle: L("Что нового")) }
-        a.addButton(withTitle: allowSkip ? L("Пропустить эту версию") : L("Позже"))
-        NSApp.activate(ignoringOtherApps: true)
-        let r = a.runModal()
-        switch r {
-        case .alertFirstButtonReturn:
-            safeOpen(rel.url)
-        case .alertSecondButtonReturn where rel.notes != nil:
-            if let n = rel.notes { safeOpen(n) }
-        default:
-            if allowSkip { skipped = rel.version }   // последняя кнопка
-        }
-    }
-
-    /// Defense-in-depth: URL из remote appcast открываем только по http(s).
-    /// Подменённый фид (MITM) не сможет протолкнуть file:// / x-... схему.
-    private static func safeOpen(_ s: String) {
-        guard let u = URL(string: s), let sc = u.scheme?.lowercased(),
-              sc == "http" || sc == "https" else {
-            NSLog("Kelvin updater: отклонён не-http(s) URL из appcast")
-            return
-        }
-        NSWorkspace.shared.open(u)
-    }
-    private static func alert(_ title: String, _ msg: String, _ ok: String) {
-        let a = NSAlert(); a.messageText = title; a.informativeText = msg; a.addButton(withTitle: ok)
-        NSApp.activate(ignoringOtherApps: true); a.runModal()
+        getSparkle().checkManually()
     }
 }
