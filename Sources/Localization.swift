@@ -1166,7 +1166,6 @@ enum Strings {
         "Показать в Finder": [.uk: "Показати у Finder", .en: "Show in Finder", .pt: "Mostrar no Finder"],
         "Заблокировать входящие": [.uk: "Заблокувати вхідні", .en: "Block incoming", .pt: "Bloquear entrada"],
         "Путь к приложению недоступен.": [.uk: "Шлях до застосунку недоступний.", .en: "App path unavailable.", .pt: "Caminho do app indisponível."],
-    ]
         "/ %d Вт": [.uk: "/ %d Вт", .en: "/ %d Вт", .pt: "/ %d Вт"],
         "%.0f / %.0f Вт·ч": [.uk: "%.0f / %.0f Вт·ч", .en: "%.0f / %.0f Вт·ч", .pt: "%.0f / %.0f Вт·ч"],
         "%.2f В": [.uk: "%.2f В", .en: "%.2f В", .pt: "%.2f В"],

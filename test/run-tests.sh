@@ -28,5 +28,14 @@ rm -rf "$TMP"
 echo "→ Покрытие локализации (uk/en/pt)"
 bash test/check-i18n.sh || fail=1
 
+echo "→ State machine автокоррекции"
+TMP=$(mktemp -d)
+if xcrun swiftc -O Sources/PendingCorrection.swift test/correction/main.swift -o "$TMP/correction" 2>"$TMP/err"; then
+    "$TMP/correction" || fail=1
+else
+    echo "  ✗ не скомпилировался тест коррекции:"; sed 's/^/    /' "$TMP/err"; fail=1
+fi
+rm -rf "$TMP"
+
 if [ "$fail" -ne 0 ]; then echo "✗ Тесты упали"; exit 1; fi
 echo "✓ Все тесты прошли"

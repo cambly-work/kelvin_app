@@ -4629,9 +4629,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .layout(let toRU):
             if sound { playFeedbackSound("Morse") }
             if hud { FeedbackHUD.shared.show(symbol: "globe", text: toRU ? L("Русский") : "English", tint: .systemTeal) }
-        case .spell(let original, let corrected):
+        case .spell(let original, let corrected, let id):
             if sound { playFeedbackSound("Pop") }
-            if hud { CorrectionChoiceHUD.shared.show(original: original, corrected: corrected) }
+            if hud { CorrectionChoiceHUD.shared.show(original: original, corrected: corrected, id: id) }
         case .undo:
             if sound { playFeedbackSound("Tink") }
             if hud { FeedbackHUD.shared.show(symbol: "arrow.uturn.backward.circle.fill", text: L("Исходное слово возвращено"), tint: .systemOrange) }

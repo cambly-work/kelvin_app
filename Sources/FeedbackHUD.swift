@@ -116,9 +116,10 @@ final class CorrectionChoiceHUD {
     private let panel: NSPanel
     private let correctedLabel = NSTextField(labelWithString: "")
     private let originalLabel = NSTextField(labelWithString: "")
-    private let keepButton = GlassButton(title: L("Оставить"), symbol: "checkmark")
-    private let restoreButton = GlassButton(title: L("Вернуть"), symbol: "arrow.uturn.backward")
+    private let restoreButton = GlassButton(title: L("Вернуть"), symbol: "arrow.uturn.backward", accentText: true)
+    private let closeButton = GlassButton(title: "", symbol: "xmark")
     private var hideWork: DispatchWorkItem?
+    private var correctionID: UUID?
 
     private init() {
         panel = NSPanel(
@@ -160,43 +161,50 @@ final class CorrectionChoiceHUD {
         words.alignment = .centerY
         words.spacing = 6
 
-        keepButton.onClick = { [weak self] in
-            self?.dismiss()
-            LangSwitcher.shared.acceptLastSpellCorrection()
-        }
         restoreButton.onClick = { [weak self] in
-            self?.dismiss()
-            LangSwitcher.shared.undoLastSpellCorrection()
+            guard let self, let id = self.correctionID else { return }
+            self.dismiss()
+            LangSwitcher.shared.undoLastSpellCorrection(id: id)
         }
-        let actions = NSStackView(views: [keepButton, restoreButton])
-        actions.orientation = .horizontal
-        actions.alignment = .centerY
-        actions.spacing = 7
+        closeButton.onClick = { [weak self] in
+            guard let self, let id = self.correctionID else { return }
+            self.dismiss()
+            LangSwitcher.shared.acceptLastSpellCorrection(id: id)
+        }
+        // Accessibility: the close button needs a label since title is ""
+        closeButton.setAccessibilityLabel(L("Закрыть"))
 
-        let row = NSStackView(views: [words, NSView(), actions])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
+        let topRow = NSStackView(views: [words, NSView(), closeButton])
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 8
+
+        let column = NSStackView(views: [topRow, restoreButton])
+        column.orientation = .vertical
+        column.alignment = .trailing
+        column.spacing = 6
 
         let root = NSView()
         root.addSubview(blur)
-        blur.addSubview(row)
+        blur.addSubview(column)
         panel.contentView = root
         NSLayoutConstraint.activate([
             blur.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             blur.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             blur.topAnchor.constraint(equalTo: root.topAnchor),
             blur.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -12),
-            row.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
-            keepButton.heightAnchor.constraint(equalToConstant: 32),
-            restoreButton.heightAnchor.constraint(equalToConstant: 32),
+            column.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 12),
+            column.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -12),
+            column.topAnchor.constraint(equalTo: blur.topAnchor, constant: 10),
+            column.bottomAnchor.constraint(equalTo: blur.bottomAnchor, constant: -10),
+            restoreButton.heightAnchor.constraint(equalToConstant: 28),
+            closeButton.widthAnchor.constraint(equalToConstant: 28),
+            closeButton.heightAnchor.constraint(equalToConstant: 28),
         ])
     }
 
-    func show(original: String, corrected: String) {
+    func show(original: String, corrected: String, id: UUID) {
+        correctionID = id
         correctedLabel.stringValue = corrected
         originalLabel.stringValue = original
 
@@ -205,16 +213,16 @@ final class CorrectionChoiceHUD {
             correctedLabel.intrinsicContentSize.width
                 + originalLabel.intrinsicContentSize.width + 22
         )
-        let width = max(300, min(460, wordsWidth + 210))
-        let size = NSSize(width: width, height: 58)
-        let anchor = caretAnchor() ?? NSEvent.mouseLocation
-        let screen = NSScreen.screens.first(where: { $0.frame.contains(anchor) }) ?? NSScreen.main
+        let width = max(260, min(420, wordsWidth + 130))
+        let size = NSSize(width: width, height: 70)
+        let origin = positionForHUD()
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(origin) }) ?? NSScreen.main
         guard let screen else { return }
         let visible = screen.visibleFrame
-        var x = anchor.x - 16
-        var y = anchor.y - size.height - 10
+        var x = origin.x - size.width / 2
+        var y = origin.y - size.height - 12
         x = min(max(x, visible.minX + 8), visible.maxX - size.width - 8)
-        if y < visible.minY + 8 { y = anchor.y + 22 }
+        if y < visible.minY + 8 { y = origin.y + 24 }
         y = min(max(y, visible.minY + 8), visible.maxY - size.height - 8)
 
         hideWork?.cancel()
@@ -222,7 +230,12 @@ final class CorrectionChoiceHUD {
         panel.alphaValue = 1
         panel.orderFrontRegardless()
 
-        let work = DispatchWorkItem { [weak self] in self?.dismiss() }
+        // Таймер = неявное «Оставить» — принимает исправление.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let id = self.correctionID else { return }
+            self.dismiss()
+            LangSwitcher.shared.acceptLastSpellCorrection(id: id)
+        }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: work)
     }
@@ -230,12 +243,28 @@ final class CorrectionChoiceHUD {
     private func dismiss() {
         hideWork?.cancel()
         hideWork = nil
+        correctionID = nil
         panel.orderOut(nil)
     }
 
-    /// Возвращает экранную точку каретки focused AX-текстового элемента.
-    /// При неподдерживаемом редакторе show() безопасно привязывается к курсору.
-    private func caretAnchor() -> NSPoint? {
+    // MARK: - Позиционирование
+
+    /// Возвращает экранную точку под кареткой для позиционирования HUD.
+    /// При неподдерживаемом редакторе (AX возвращает nil) безопасно привязывается
+    /// к верхней части активного экрана, а не к курсору мыши.
+    private func positionForHUD() -> NSPoint {
+        if let rect = caretRect() {
+            return NSPoint(x: rect.midX, y: rect.minY)
+        }
+        // Fallback: верхняя часть активного экрана, а не курсор мыши.
+        let screen = (NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+        guard let s = screen else { return NSEvent.mouseLocation }
+        return NSPoint(x: s.visibleFrame.midX, y: s.visibleFrame.maxY - 40)
+    }
+
+    /// Возвращает прямоугольник каретки focused AX-текстового элемента в
+    /// AppKit-координатах (bottom-left origin). При ошибке AX — nil.
+    private func caretRect() -> CGRect? {
         let system = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -273,9 +302,18 @@ final class CorrectionChoiceHUD {
         var rect = CGRect.zero
         guard AXValueGetValue(boundsAX, .cgRect, &rect) else { return nil }
 
-        // Accessibility использует начало координат сверху основного дисплея,
-        // AppKit — снизу. X уже находится в глобальном пространстве.
+        // Accessibility использует начало координат сверху левого угла основного
+        // дисплея. AppKit использует bottom-left. Конвертируем, учитывая
+        // конкретный экран, а не только основной, для корректной работы с
+        // несколькими мониторами.
+        let midX = rect.midX
+        let axTop = rect.maxY
+        // Найти экран, содержащий эту точку
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: midX, y: axTop - 1)) }) {
+            return CGRect(x: rect.minX, y: screen.frame.maxY - axTop, width: rect.width, height: rect.height)
+        }
+        // Fallback: использовать основной экран
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
-        return NSPoint(x: rect.minX, y: primaryTop - rect.maxY)
+        return CGRect(x: rect.minX, y: primaryTop - axTop, width: rect.width, height: rect.height)
     }
 }
