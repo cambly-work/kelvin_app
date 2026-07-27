@@ -1,0 +1,53 @@
+// Entitlements для привилегированного сервиса
+// Требуется для доступа к системным функциям
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Разрешение на работу как launch daemon -->
+    <key>com.apple.security.temporary-exception.sbpl</key>
+    <string>(allow mach-lookup (name \"com.trykelvin.kelvin.privileged.xpc\"))</string>
+    
+    <!-- Доступ к сети (для firewall и host blocking) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    
+    <!-- Чтение/запись файлов (для /etc/hosts и логов) -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    
+    <!-- Доступ к системным файлам (ограниченный) -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+    <array>
+        <string>/etc/hosts</string>
+        <string>/var/log/kelvin</string>
+    </array>
+    
+    <!-- Запуск процессов (для powermetrics, pmset, socketfilterfw) -->
+    <key>com.apple.security.temporary-exception.process-execution</key>
+    <array>
+        <string>/usr/bin/powermetrics</string>
+        <string>/usr/bin/pmset</string>
+        <string>/usr/libexec/ApplicationFirewall/socketfilterfw</string>
+    </array>
+    
+    <!-- IOKit доступ (для SMC и battery info) -->
+    <key>com.apple.security.temporary-exception.iokit-user-client-class</key>
+    <array>
+        <string>IOSMCFamily</string>
+        <string>IOBatteryStatus</string>
+    </array>
+    
+    <!-- Hardened runtime entitlements -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+    
+    <!-- Apple Events (не требуется для сервиса, только для app) -->
+    <key>com.apple.security.automation.apple-events</key>
+    <false/>
+</dict>
+</plist>

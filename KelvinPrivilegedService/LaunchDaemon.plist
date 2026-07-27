@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Идентификатор демона -->
+    <key>Label</key>
+    <string>com.trykelvin.kelvin.privileged</string>
+    
+    <!-- Путь к исполняемому файлу внутри bundle -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/PrivilegedHelperTools/com.trykelvin.kelvin.privileged</string>
+    </array>
+    
+    <!-- Запуск при загрузке системы -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- Сохранение процесса активным (для XPC) -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.trykelvin.kelvin.privileged.xpc</key>
+        <true/>
+    </dict>
+    
+    <!-- Запуск от root -->
+    <key>UserName</key>
+    <string>root</string>
+    
+    <!-- Group -->
+    <key>GroupName</key>
+    <string>wheel</string>
+    
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/</string>
+    
+    <!-- Стандартный вывод в лог -->
+    <key>StandardOutPath</key>
+    <string>/var/log/kelvin/privileged.log</string>
+    
+    <!-- Стандартные ошибки в лог -->
+    <key>StandardErrorPath</key>
+    <string>/var/log/kelvin/privileged.err</string>
+    
+    <!-- Ограничение ресурсов -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>256</integer>
+        <key>MemoryLock</key>
+        <integer>67108864</integer> <!-- 64 MB -->
+    </dict>
+    
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>1024</integer>
+        <key>MemoryLock</key>
+        <integer>134217728</integer> <!-- 128 MB -->
+    </dict>
+    
+    <!-- KeepAlive: перезапуск при падении -->
+    <key>KeepAlive</key>
+    <true/>
+    
+    <!-- WatchPaths: мониторинг конфигурации (опционально) -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Preferences/com.trykelvin.kelvin.plist</string>
+    </array>
+    
+    <!-- Environment variables (безопасные) -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>OS_ACTIVITY_DT_MODE</key>
+        <string>YES</string>
+    </dict>
+    
+    <!-- Отключение лишнего -->
+    <key>Disabled</key>
+    <false/>
+    
+    <!-- Debug mode (выключить в production) -->
+    <key>Debug</key>
+    <false/>
+</dict>
+</plist>
