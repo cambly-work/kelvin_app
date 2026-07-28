@@ -1,23 +1,27 @@
 ```
 # Build artifacts
+build/
+dist/
 *.o
 *.obj
-*.a
-*.dylib
-*.so
-*.dll
-
-# Swift build artifacts
-.build/
-DerivedData/
+*.out
 
 # Dependencies
-Package.resolved
-.swiftpm/
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.egg-info/
 
-# Logs and temp files
+# Logs and temporary files
 *.log
 *.tmp
+*.swp
+
+# Environment variables
+.env
+.env.local
+*.env.*
 
 # Environment
 .env
@@ -30,12 +34,11 @@ Package.resolved
 *.swp
 *.swo
 
-# Coverage
-.coverage
+# Coverage reports
 coverage/
 htmlcov/
 
-# OS generated files
+# OS specific
 .DS_Store
 Thumbs.db
 ```
