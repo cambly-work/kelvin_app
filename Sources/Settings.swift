@@ -16,10 +16,12 @@ enum PopoverModules {
         ("disk",         "Диск"),
         ("btbattery",    "Bluetooth-устройства"),
         ("audio",        "Звук (вывод)"),
+        ("health",       "Здоровье"),
     ]
     // V2 макет-дефолт: шапка + тумблеры + звук + 6 доменов. БЕЗ большого блока Батарея-кратко/Диск/BT
     // (в макете его нет; доступны по желанию через настройки). audio добавлен — в макете звук на месте.
-    static let defaultOn: Set<String> = ["battery", "toggles", "audio", "flow", "hardware", "apps", "privacy", "maintenance", "history"]
+    // health добавлен — Центр здоровья Mac (Kelvin Advisor)
+    static let defaultOn: Set<String> = ["battery", "toggles", "audio", "flow", "hardware", "apps", "privacy", "maintenance", "history", "health"]
     static func title(_ id: String) -> String { L(all.first { $0.id == id }?.title ?? id) }
 }
 
