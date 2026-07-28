@@ -619,7 +619,7 @@ final class PopoverController: NSViewController {
     private static let topIDs: Set<String> = ["battery", "toggles", "batteryStats", "disk", "btbattery", "audio"]   // компактный верх
     /// Read-only стат-модули: смежный их прогон сливается в ОДНУ консоль-плитку с волосяными швами.
     private static let statIDs: Set<String> = ["batteryStats", "disk", "btbattery"]
-    private static let tabIDs: Set<String> = ["flow", "hardware", "apps", "privacy", "maintenance", "history"]   // секции-вкладки
+    private static let tabIDs: Set<String> = ["flow", "hardware", "apps", "privacy", "maintenance", "history", "health"]   // секции-вкладки
     /// Ярлык вкладки — резолвим L() СВЕЖИМ при каждой сборке таб-бара (buildModules), а не один раз:
     /// иначе static let замораживал бы язык первого показа и вкладки не переводились бы при смене языка.
     private static func tabLabel(_ id: String) -> String {
@@ -630,6 +630,7 @@ final class PopoverController: NSViewController {
         case "privacy":     return L("Приватность")
         case "maintenance": return L("Обслуживание")
         case "history":     return L("История")
+        case "health":      return L("Здоровье")
         default:            return id
         }
     }
@@ -642,6 +643,7 @@ final class PopoverController: NSViewController {
         case "privacy":     return "shield.lefthalf.filled"
         case "maintenance": return "wrench.and.screwdriver.fill"
         case "history":     return "chart.line.uptrend.xyaxis"
+        case "health":      return "heart.fill"
         default:            return "square"
         }
     }
@@ -701,6 +703,13 @@ final class PopoverController: NSViewController {
     private let histCardHealth = NSTextField(labelWithString: "—")  // три крупных числа карточки
     private let histCardCycles = NSTextField(labelWithString: "—")
     private let histCardTrend = NSTextField(labelWithString: "—")
+
+    // Advisor (Health Center) UI elements
+    private let healthVerdictLabel = NSTextField(labelWithString: "")
+    private let healthMetaLabel = NSTextField(labelWithString: "")
+    private let healthFindingsContainer = NSStackView()
+    private var lastAdvisorResult: AdvisorResult?
+    private var advisorDismissalStore = AdvisorDismissalStore()
 
     private let compStatus = NSTextField(labelWithString: "")
     private var comp: [String: NSTextField] = [:]
@@ -1258,6 +1267,7 @@ final class PopoverController: NSViewController {
         }
         if prev < tabOrder.count, tabOrder[prev] == "privacy" { privacyView.stopAnimations() }
         if sel < tabOrder.count, tabOrder[sel] == "history" { DispatchQueue.main.async { [weak self] in self?.refreshHistory() } }
+        if sel < tabOrder.count, tabOrder[sel] == "health" { DispatchQueue.main.async { [weak self] in self?.refreshAdvisor() } }
         // Адаптивный свап: в контейнере остаётся только показанная вкладка → поповер ресайзится под неё
         // (пустота под короткими вкладками исчезает). Уходящая убирается из иерархии — cross-fade скрытой не нужен.
         showTab(sel)
@@ -1303,6 +1313,7 @@ final class PopoverController: NSViewController {
         case "btbattery":    return buildBTBatteryTile()
         case "audio":        return buildAudioTile()
         case "history":      return buildHistoryTile()
+        case "health":       return buildHealthTile()
         default:             return nil
         }
     }
@@ -1899,6 +1910,39 @@ final class PopoverController: NSViewController {
     /// Плитка «Звук · вывод»: строки-устройства, текущее с галкой; клик по другому → сделать выводом
     /// по умолчанию (Pro). ЧЕСТНОСТЬ: меняем СИСТЕМНЫЙ вывод по умолчанию, не «маршрутизируем весь звук».
     private func buildAudioTile() -> NSView { glassTile(buildAudioContent(), fill: false) }   // V3: топ-модуль ХУГАЕТ контент (fill:true растягивался на слабину .fill-стека → пустой провал)
+    
+    /// Вкладка «Здоровье» — Центр здоровья Mac (Kelvin Advisor).
+    /// Показывает общий статус и список рекомендаций.
+    private func buildHealthTile() -> NSView {
+        // Общий статус (вердикт)
+        healthVerdictLabel.font = Design.Font.headline
+        healthVerdictLabel.textColor = .labelColor
+        healthVerdictLabel.lineBreakMode = .byWordWrapping
+        healthVerdictLabel.maximumNumberOfLines = 2
+        healthVerdictLabel.preferredMaxLayoutWidth = IW
+        healthVerdictLabel.translatesAutoresizingMaskIntoConstraints = false
+        healthVerdictLabel.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        
+        // Мета-информация: количество рекомендаций, время анализа
+        healthMetaLabel.font = Design.Font.sys(9, .regular)
+        healthMetaLabel.textColor = .tertiaryLabelColor
+        healthMetaLabel.lineBreakMode = .byTruncatingTail
+        healthMetaLabel.maximumNumberOfLines = 1
+        
+        // Список рекомендаций (контейнер)
+        healthFindingsContainer.orientation = .vertical
+        healthFindingsContainer.spacing = 8
+        healthFindingsContainer.translatesAutoresizingMaskIntoConstraints = false
+        healthFindingsContainer.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        
+        // Кнопка обновления
+        let refreshBtn = GlassButton(title: L(\"Обновить\"), symbol: \"arrow.clockwise\", cornerRadius: Design.Radius.chip)
+        refreshBtn.onClick = { [weak self] in self?.refreshAdvisor() }
+        
+        let content = vstack([healthVerdictLabel, healthMetaLabel, healthFindingsContainer, refreshBtn], 10)
+        return glassTile(content, fill: true)
+    }
+    
     private func buildAudioContent() -> NSView {
         let slotCount = 6                                  // покрывает почти любой набор; переполнение честно раскрываем в сноске
         audioSlots = []
@@ -2146,6 +2190,319 @@ final class PopoverController: NSViewController {
     func refreshHistoryIfVisible() {
         if currentTab < tabOrder.count, tabOrder[currentTab] == "history" { refreshHistory() }
     }
+    
+    /// Обновить Advisor (Центр здоровья Mac) — собрать снимок данных, проанализировать, отрисовать.
+    @objc private func refreshAdvisor() {
+        guard healthVerdictLabel.superview != nil else { return }  // плитка не построена
+        
+        // Собираем AdvisorSnapshot из текущих доступных данных
+        let battery = BatteryHealth.shared.batteryInfo
+        let energy = PowerInfo.shared.latestEnergy
+        let sensors = SensorsModel.shared.latestSnapshot
+        
+        // Батарея
+        let batteryPresent = battery?.present ?? false
+        let batteryChargePercent = battery?.charge
+        let batteryHealthPercent = battery?.health
+        let batteryCycles = battery?.cycleCount
+        let batteryRatedCycles = AppConfig.shared.maxBatteryCycles ?? 1000
+        let batteryTemperature = battery?.temperature
+        let batteryCharging = battery?.charging ?? false
+        let batteryExternalConnected = energy?.plugged ?? false
+        
+        // Заряд (из ChargeControl/SettingsStore)
+        let chargeLimitEnabled = ChargeControl.limit < 100
+        let chargeLimitValue = ChargeControl.limit
+        let sailModeActive = ChargeControl.mode == .sail
+        let heatProtectionActive = ChargeControl.mode == .heatProtection
+        
+        // Температуры
+        let cpuTempSensor = sensors.temps.first { $0.id == "cpu" }
+        let gpuTempSensor = sensors.temps.first { $0.id == "gpu" }
+        let cpuTemperature = cpuTempSensor?.value
+        let gpuTemperature = gpuTempSensor?.value
+        let cpuTemperatureKeys = cpuTempSensor.map { [$0.name] }
+        
+        // Производительность
+        let cpuLoad = SystemUsage.shared.cpuUsagePercent / 100.0
+        
+        // Память
+        let memInfo = MemoryInfo.shared.latestInfo
+        let memoryPressure = memInfo?.pressure ?? .unknown
+        let memoryTotalRAM = memInfo?.totalRAM ?? 0
+        let memorySwapUsed = memInfo?.swapUsed ?? 0
+        
+        // Диск
+        let diskInfo = Maintenance.shared.diskInfo
+        let diskFreeBytes = diskInfo?.freeBytes
+        let diskTotalBytes = diskInfo?.totalBytes
+        
+        // Обслуживание
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let crashSummary = Maintenance.shared.recentCrashSummary
+        let recentCrashesCount = crashSummary?.count ?? 0
+        
+        // Helpers
+        let fanHelperInstalled = HelperInstall.fanInstalled
+        let chargeHelperInstalled = HelperInstall.powerdInstalled
+        
+        let snapshot = AdvisorSnapshot(
+            batteryPresent: batteryPresent,
+            batteryChargePercent: batteryChargePercent,
+            batteryHealthPercent: batteryHealthPercent,
+            batteryCycles: batteryCycles,
+            batteryRatedCycles: batteryRatedCycles,
+            batteryTemperature: batteryTemperature,
+            batteryCharging: batteryCharging,
+            batteryExternalConnected: batteryExternalConnected,
+            chargeLimitEnabled: chargeLimitEnabled,
+            chargeLimitValue: chargeLimitValue,
+            sailModeActive: sailModeActive,
+            heatProtectionActive: heatProtectionActive,
+            cpuTemperature: cpuTemperature,
+            gpuTemperature: gpuTemperature,
+            cpuTemperatureKeys: cpuTemperatureKeys,
+            cpuLoad: cpuLoad,
+            thermalPressure: nil,
+            memoryPressure: memoryPressure,
+            memoryTotalRAM: memoryTotalRAM,
+            memorySwapUsed: memorySwapUsed,
+            diskFreeBytes: diskFreeBytes,
+            diskTotalBytes: diskTotalBytes,
+            uptime: uptime,
+            recentCrashesCount: recentCrashesCount,
+            crashSummary: crashSummary,
+            fanHelperInstalled: fanHelperInstalled,
+            chargeHelperInstalled: chargeHelperInstalled
+        )
+        
+        // Анализируем вне main thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = AdvisorEngine.shared.analyze(snapshot)
+            
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.lastAdvisorResult = result
+                
+                // Обновляем вердикт
+                self.healthVerdictLabel.stringValue = result.statusText
+                self.healthVerdictLabel.textColor = {
+                    switch result.maxSeverity {
+                    case .critical: return Design.Color.levelCrit
+                    case .warning: return Design.Color.levelWarn
+                    case .notice: return Design.Color.levelWarn
+                    case .info: return .labelColor
+                    }
+                }()
+                
+                // Мета-информация
+                let count = result.findings.count
+                let timeFormatted = DateFormatter.localizedString(from: result.analyzedAt, dateStyle: .none, timeStyle: .short)
+                self.healthMetaLabel.stringValue = count > 0
+                    ? String(format: L("%d рекомендаций · %@"), count, timeFormatted)
+                    : String(format: L("Анализ: %@ "), timeFormatted)
+                
+                // Очищаем контейнер
+                self.healthFindingsContainer.arrangedSubviews.forEach { $0.removeFromSuperview() }
+                
+                // Строим карточки рекомендаций
+                for finding in result.findings {
+                    let card = self.buildAdvisorCard(finding)
+                    self.healthFindingsContainer.addArrangedSubview(card)
+                }
+            }
+        }
+    }
+    
+    /// Построить карточку рекомендации.
+    private func buildAdvisorCard(_ finding: AdvisorFinding) -> NSView {
+        let card = NSStackView()
+        card.orientation = .vertical
+        card.spacing = 6
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        
+        // Header: иконка + заголовок + меню скрытия
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: finding.category.icon, accessibilityDescription: finding.category.label)
+        iconView.contentTintColor = {
+            switch finding.severity {
+            case .critical: return Design.Color.levelCrit
+            case .warning: return Design.Color.levelWarn
+            case .notice: return Design.Color.accent(isDark)
+            case .info: return .secondaryLabelColor
+            }
+        }()
+        iconView.imageScaling = .scaleProportionallyUp
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        
+        let titleLabel = NSTextField(labelWithString: finding.title)
+        titleLabel.font = Design.Font.sys(13, .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        
+        let titleRow = NSStackView(views: [iconView, titleLabel, spacer()])
+        titleRow.alignment = .centerY
+        titleRow.spacing = 8
+        
+        // Кнопка скрытия (меню)
+        let dismissBtn = GlassButton(title: "", symbol: "ellipsis.circle", cornerRadius: Design.Radius.chip)
+        dismissBtn.toolTip = L("Скрыть рекомендацию")
+        dismissBtn.onClick = { [weak self] in
+            self?.advisorDismissalStore.dismiss(finding.dismissKey)
+            self?.refreshAdvisor()
+        }
+        dismissBtn.translatesAutoresizingMaskIntoConstraints = false
+        dismissBtn.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        dismissBtn.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        
+        titleRow.addArrangedSubview(dismissBtn)
+        
+        // Explanation
+        let expLabel = NSTextField(wrappingLabelWithString: finding.explanation)
+        expLabel.font = Design.Font.sys(12, .regular)
+        expLabel.textColor = .secondaryLabelColor
+        expLabel.lineBreakMode = .byWordWrapping
+        expLabel.maximumNumberOfLines = 3
+        
+        // Metric (если есть)
+        var metricLabel: NSTextField? = nil
+        if let metric = finding.metric {
+            metricLabel = NSTextField(labelWithString: metric)
+            metricLabel?.font = Design.Font.sys(11, .medium)
+            metricLabel?.textColor = .tertiaryLabelColor
+        }
+        
+        // Action button
+        var actionBtn: GlassButton? = nil
+        if let action = finding.action {
+            let btnTitle: String
+            switch action {
+            case .enableChargeLimit: btnTitle = L("Включить лимит")
+            case .enableHeatProtection: btnTitle = L("Защита от нагрева")
+            case .activateFanProfile: btnTitle = L("Включить кулеры")
+            case .openSettings: btnTitle = L("Открыть настройки")
+            case .openPopoverSection: btnTitle = L("Показать")
+            case .revealApplication: btnTitle = L("Открыть")
+            case .openStorageManagement: btnTitle = L("Управление")
+            }
+            actionBtn = GlassButton(title: btnTitle, symbol: nil, cornerRadius: Design.Radius.chip)
+            actionBtn?.onClick = { [weak self] in
+                self?.handleAdvisorAction(action, finding: finding)
+            }
+        }
+        
+        // Details button
+        let detailsBtn = GlassButton(title: L("Подробнее"), symbol: "chevron.right", cornerRadius: Design.Radius.chip)
+        detailsBtn.font = Design.Font.sys(11, .regular)
+        if let dest = finding.detailsDestination {
+            detailsBtn.onClick = { [weak self] in
+                self?.openAdvisorDetails(destination: dest)
+            }
+        } else {
+            detailsBtn.isEnabled = false
+            detailsBtn.isHidden = true
+        }
+        
+        // Собираем
+        let buttonsRow = NSStackView()
+        buttonsRow.orientation = .horizontal
+        buttonsRow.spacing = 8
+        if let btn = actionBtn { buttonsRow.addArrangedSubview(btn) }
+        buttonsRow.addArrangedSubview(detailsBtn)
+        buttonsRow.addArrangedSubview(spacer())
+        
+        card.addArrangedSubview(titleRow)
+        card.addArrangedSubview(expLabel)
+        if let m = metricLabel { card.addArrangedSubview(m) }
+        card.addArrangedSubview(buttonsRow)
+        
+        // Glass style background
+        let glassCard = NSStackView()
+        glassCard.orientation = .vertical
+        glassCard.spacing = 8
+        glassCard.addArrangedSubview(card)
+        glassCard.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        glassCard.wantsLayer = true
+        glassCard.layer?.backgroundColor = Design.Color.glassBackground(isDark).cgColor
+        glassCard.layer?.cornerRadius = Design.Radius.card
+        glassCard.layer?.borderWidth = 1
+        glassCard.layer?.borderColor = Design.Color.glassBorder(isDark).cgColor
+        
+        return glassCard
+    }
+    
+    /// Обработать действие рекомендации.
+    private func handleAdvisorAction(_ action: AdvisorAction, finding: AdvisorFinding) {
+        switch action {
+        case .enableChargeLimit(let percent):
+            guard Licensing.shared.isPro else {
+                _ = SettingsWindowController.shared.requirePro(.chargeControl)
+                return
+            }
+            if !HelperInstall.powerdInstalled {
+                HelperInstall.installPowerd()
+                return
+            }
+            ChargeControl.setLimit(percent)
+            refreshAdvisor()
+            
+        case .enableHeatProtection:
+            guard Licensing.shared.isPro else {
+                _ = SettingsWindowController.shared.requirePro(.chargeControl)
+                return
+            }
+            if !HelperInstall.powerdInstalled {
+                HelperInstall.installPowerd()
+                return
+            }
+            ChargeControl.enableHeatProtection()
+            refreshAdvisor()
+            
+        case .activateFanProfile(let profile):
+            guard Licensing.shared.isPro else {
+                _ = SettingsWindowController.shared.requirePro(.fanControl)
+                return
+            }
+            if !HelperInstall.fanInstalled {
+                HelperInstall.installFan()
+                return
+            }
+            FanController.activateProfile(profile)
+            refreshAdvisor()
+            
+        case .openSettings(let section):
+            SettingsWindowController.shared.showSection(section)
+            
+        case .openPopoverSection(let section):
+            if let idx = tabOrder.firstIndex(of: section) {
+                selectTab(idx)
+            }
+            
+        case .revealApplication(let appName):
+            let workspace = NSWorkspace.shared
+            if let appURL = workspace.urlForApplication(withBundleIdentifier: appName) {
+                workspace.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+            } else if let appURL = workspace.urlForApplication(toOpen: URL(fileURLWithPath: "/Applications/\(appName).app")) {
+                workspace.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+            }
+            
+        case .openStorageManagement:
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.storage")!)
+        }
+    }
+    
+    /// Открыть подробности рекомендации.
+    private func openAdvisorDetails(destination: String) {
+        if let idx = tabOrder.firstIndex(of: destination) {
+            selectTab(idx)
+        } else {
+            SettingsWindowController.shared.showSection(destination)
+        }
+    }
+    
     /// Открыть/подсветить вкладку «Приватность» (из баннера first-conn). Поповер уже показан вызывающим.
     func focusPrivacyTab() {
         guard let idx = tabOrder.firstIndex(of: "privacy") else { return }
