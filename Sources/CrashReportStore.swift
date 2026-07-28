@@ -1,6 +1,13 @@
 import Foundation
 import CommonCrypto
 
+private extension String {
+    var crashStoreTrimmedNonEmpty: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
 /// Хранилище отчётов о сбоях Kelvin.
 ///
 /// Отвечает за:
@@ -186,6 +193,16 @@ enum CrashReportStore {
             loadMetadata().filter { $0.state == state }
         }
     }
+
+    static func report(id: String) -> ReportMetadata? {
+        queue.sync {
+            loadMetadata().first { $0.reportID == id }
+        }
+    }
+
+    static func sourceURL(for report: ReportMetadata) -> URL {
+        diagnosticReportsDirectory.appendingPathComponent(report.sourceFilename)
+    }
     
     /// Получить отчёт по fingerprint.
     static func report(byFingerprint fingerprint: String) -> ReportMetadata? {
@@ -287,7 +304,7 @@ enum CrashReportStore {
         do {
             files = try fm.contentsOfDirectory(atPath: diagnosticReportsDirectory.path)
         } catch {
-            Log.error("CrashReportStore: не удалось прочитать DiagnosticReports: \(error)")
+            Log.app.error("CrashReportStore: не удалось прочитать DiagnosticReports: \(error.localizedDescription, privacy: .public)")
             return ScanResult(newReports: [], queuedReports: [], allReports: loadMetadata())
         }
         
@@ -372,11 +389,11 @@ enum CrashReportStore {
         
         // Проверка имени процесса
         let processName = (dictionary["app_name"] as? String)?
-            .trimmedNonEmpty
+            .crashStoreTrimmedNonEmpty
             ?? (dictionary["proc_name"] as? String)?
-            .trimmedNonEmpty
+            .crashStoreTrimmedNonEmpty
             ?? (dictionary["process"] as? String)?
-            .trimmedNonEmpty
+            .crashStoreTrimmedNonEmpty
         
         guard let name = processName?.lowercased() else {
             return false
@@ -473,7 +490,7 @@ enum CrashReportStore {
             metadataLastLoad = Date()
             return metadata
         } catch {
-            Log.error("CrashReportStore: ошибка чтения метаданных: \(error)")
+            Log.app.error("CrashReportStore: ошибка чтения метаданных: \(error.localizedDescription, privacy: .public)")
             cachedMetadata = []
             metadataLastLoad = Date()
             return []
@@ -492,7 +509,7 @@ enum CrashReportStore {
             cachedMetadata = metadata
             metadataLastLoad = Date()
         } catch {
-            Log.error("CrashReportStore: ошибка записи метаданных: \(error)")
+            Log.app.error("CrashReportStore: ошибка записи метаданных: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

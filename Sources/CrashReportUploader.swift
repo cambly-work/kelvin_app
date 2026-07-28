@@ -79,12 +79,10 @@ protocol CrashUploadDelegate: AnyObject {
 
 /// Загрузчик отчётов о сбоях с очередью и retry logic
 final class CrashReportUploader {
+    static let shared = CrashReportUploader()
     weak var delegate: CrashUploadDelegate?
     
     private let config: CrashUploadConfig
-    private let store: CrashReportStore
-    private let sanitizer: CrashReportSanitizer
-    
     private let queue = DispatchQueue(label: "kelvin.crash.uploader", attributes: .concurrent)
     private var uploadQueue: [UploadQueueItem] = []
     
@@ -101,13 +99,9 @@ final class CrashReportUploader {
     
     init(
         config: CrashUploadConfig = .default,
-        store: CrashReportStore = .shared,
-        sanitizer: CrashReportSanitizer = .shared,
         fileManager: FileManager = .default
     ) {
         self.config = config
-        self.store = store
-        self.sanitizer = sanitizer
         self.fileManager = fileManager
         
         // Настройка URLSession с отдельной конфигурацией
@@ -148,7 +142,25 @@ final class CrashReportUploader {
                 self.delegate?.uploadQueueDidChange(self)
             }
             
-            self.processQueueIfNeeded()
+            DispatchQueue.global(qos: .utility).async {
+                self.processQueueIfNeeded(force: true)
+            }
+        }
+    }
+
+    func enqueue(_ report: CrashReportStore.ReportMetadata) {
+        enqueue(reportID: report.reportID)
+    }
+
+    func startProcessingQueue() {
+        processQueueIfNeeded()
+    }
+
+    func waitForCompletion(timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if queue.sync(execute: { activeTasks.isEmpty }) { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
     }
     
@@ -237,13 +249,12 @@ final class CrashReportUploader {
         }
     }
     
-    private func processQueueIfNeeded() {
-        // Если авто-отправка выключена, не обрабатываем pending элементы
-        guard autoSendEnabled else {
-            return
+    private func processQueueIfNeeded(force: Bool = false) {
+        let canAutoSend = autoSendEnabled
+        let pendingItems = getPendingItems().filter { item in
+            if force || canAutoSend { return true }
+            return CrashReportStore.report(id: item.reportID)?.state == .consented
         }
-        
-        let pendingItems = getPendingItems()
         for item in pendingItems {
             // Проверяем, не пора ли повторная попытка
             if let nextRetry = item.nextRetry, nextRetry > Date() {
@@ -259,10 +270,25 @@ final class CrashReportUploader {
     
     private func sendItem(_ item: UploadQueueItem) {
         // Получаем санитизированный отчёт из хранилища
-        guard let reportMetadata = store.getReportMetadata(reportID: item.reportID),
-              let sanitizedPayload = sanitizer.loadSanitizedPayload(reportID: item.reportID) else {
+        guard let reportMetadata = CrashReportStore.report(id: item.reportID) else {
             // Отчёт не найден или не санитизирован, помечаем как failed
             markItemFailed(itemID: item.id, error: NSError(domain: "CrashUploader", code: 404, userInfo: [NSLocalizedDescriptionKey: "Report not found or not sanitized"]))
+            return
+        }
+        let sourceURL = CrashReportStore.sourceURL(for: reportMetadata)
+        let sanitizedPayload: Data
+        switch CrashReportSanitizer.sanitize(
+            url: sourceURL,
+            reportID: reportMetadata.reportID,
+            sourceFingerprint: reportMetadata.fingerprint
+        ) {
+        case .success(let result) where !result.containsPII:
+            sanitizedPayload = result.jsonPayload
+        case .success:
+            markItemFailed(itemID: item.id, error: NSError(domain: "CrashUploader", code: 422, userInfo: [NSLocalizedDescriptionKey: "PII detected in payload"]))
+            return
+        case .failure(let error):
+            markItemFailed(itemID: item.id, error: error)
             return
         }
         
@@ -354,10 +380,14 @@ final class CrashReportUploader {
                 self.uploadQueue[index].nextRetry = Date().addingTimeInterval(300) // 5 минут
                 self.uploadQueue[index].state = .retrying
                 self.uploadQueue[index].errorMessage = "Rate limited by server"
+                self.activeTasks.removeValue(forKey: itemID)
                 self.saveQueue()
                 
                 DispatchQueue.main.async {
                     self.delegate?.uploadQueueDidChange(self)
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 300) { [weak self] in
+                    self?.processQueueIfNeeded()
                 }
             }
         }
@@ -370,6 +400,8 @@ final class CrashReportUploader {
             if let index = self.uploadQueue.firstIndex(where: { $0.id == itemID }) {
                 var item = self.uploadQueue[index]
                 item.retryCount += 1
+                self.activeTasks.removeValue(forKey: itemID)
+                var retryDelay: TimeInterval?
                 
                 if item.retryCount >= self.config.maxRetries {
                     item.state = .failed
@@ -383,6 +415,7 @@ final class CrashReportUploader {
                         self.config.minRetryDelay * pow(2.0, Double(item.retryCount - 1)),
                         self.config.maxRetryDelay
                     )
+                    retryDelay = delay
                     item.nextRetry = Date().addingTimeInterval(delay)
                 }
                 
@@ -394,7 +427,7 @@ final class CrashReportUploader {
                 }
                 
                 // Планируем следующую попытку
-                if item.state == .retrying {
+                if let delay = retryDelay {
                     DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
                         self?.processQueueIfNeeded()
                     }
@@ -430,7 +463,9 @@ final class CrashReportUploader {
                 
                 // Обновляем статус в хранилище
                 let reportID = self.uploadQueue[index].reportID
-                self.store.markReportAsSent(reportID: reportID, serverReportID: serverID)
+                if let report = CrashReportStore.report(id: reportID) {
+                    try? CrashReportStore.recordSendSuccess(for: report.fingerprint, serverReportID: serverID)
+                }
                 
                 DispatchQueue.main.async {
                     if let item = self.uploadQueue[index] as UploadQueueItem? {

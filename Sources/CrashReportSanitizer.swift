@@ -203,7 +203,7 @@ enum CrashReportSanitizer {
     private static let piiPatterns: [(pattern: String, description: String)] = [
         (#"/Users/[^/\s]+"#, "User path"),
         (#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#, "Email"),
-        (#"\b[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\b"#i, "UUID"),
+        (#"(?i)\b[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\b"#, "UUID"),
         (#"\b[A-Z0-9]{8}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{12}\b"#, "Hardware UUID"),
     ]
     
@@ -221,7 +221,7 @@ enum CrashReportSanitizer {
         url: URL,
         reportID: String,
         sourceFingerprint: String,
-        breadcrumbs: [CrashBreadcrumb] = []
+        breadcrumbs: [SanitizerBreadcrumb] = []
     ) -> Result<SanitizationResult, Error> {
         // Чтение файла
         guard let handle = FileHandle(forReadingAtPath: url.path) else {
@@ -236,9 +236,11 @@ enum CrashReportSanitizer {
         }
         
         // Парсинг header (первая строка JSON)
-        guard let firstLine = content.split(separator: "\n", maxSplits: 1).first,
-              let headerData = Data(firstLine.utf8),
-              let header = try? JSONSerialization.jsonObject(with: headerData, options: []) as? [String: Any] else {
+        guard let firstLine = content.split(separator: "\n", maxSplits: 1).first else {
+            return .failure(SanitizationError.parseError("Не удалось распарсить header"))
+        }
+        let headerData = Data(firstLine.utf8)
+        guard let header = try? JSONSerialization.jsonObject(with: headerData, options: []) as? [String: Any] else {
             return .failure(SanitizationError.parseError("Не удалось распарсить header"))
         }
         
@@ -310,7 +312,7 @@ enum CrashReportSanitizer {
     }
     
     /// Санировать breadcrumbs.
-    static func sanitizeBreadcrumbs(_ breadcrumbs: [CrashBreadcrumb]) -> [Breadcrumb] {
+    static func sanitizeBreadcrumbs(_ breadcrumbs: [SanitizerBreadcrumb]) -> [Breadcrumb] {
         breadcrumbs.prefix(maxBreadcrumbs).map { breadcrumb in
             Breadcrumb(
                 type: breadcrumb.typeName,
@@ -545,10 +547,17 @@ private extension Array {
     }
 }
 
+private extension String {
+    var trimmedNonEmpty: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
 // MARK: - Crash Breadcrumb integration
 
 /// Публичный интерфейс для breadcrumbs.
-enum CrashBreadcrumb {
+enum SanitizerBreadcrumb {
     case appStarted
     case popoverOpened
     case popoverClosed

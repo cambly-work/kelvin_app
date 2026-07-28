@@ -40,6 +40,11 @@ struct CustomToggle: Codable, Equatable {
 enum SettingsStore {
     private static let d = UserDefaults.standard
 
+    static var autoSendCrashReports: Bool {
+        get { d.bool(forKey: "CrashReports.AutoSendEnabled") }
+        set { d.set(newValue, forKey: "CrashReports.AutoSendEnabled") }
+    }
+
     /// Фирменный акцент Kelvin — единый «термокамерный» бирюзовый, тема-зависимый.
     /// Это цветовое лицо продукта: интерактив и навигация (нейтральная линия графа,
     /// бирюза зарядки, активная вкладка, дефолтные тумблеры, фокус). Семантику уровней
@@ -929,7 +934,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // остаются только внутри статусов: ошибка/предупреждение/успех.
         switch s {
         case .support: return .systemPink
-        case .basics, .about: return .systemGray
+        case .basics, .privacy, .about: return .systemGray
         case .power, .input, .hub, .license:
             return SettingsStore.brandAccent(dark: isDark)
         case .netsec:
@@ -2868,8 +2873,8 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
 
         // — Отчёты о сбоях —
         let autoSendCrashReports = SettingsStore.autoSendCrashReports
-        let hasPendingReports = !CrashReportStore.shared.reports(state: .discovered).isEmpty
-        let sentCount = CrashReportStore.shared.reports(state: .sent).count
+        let hasPendingReports = !CrashReportStore.reports(state: .discovered).isEmpty
+        let sentCount = CrashReportStore.reports(state: .sent).count
 
         items.append(SK.card([
             SK.toggleRow(icon: "doc.text.brokenheart",
@@ -2932,6 +2937,15 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         ]))
 
         return SK.scaffold(L("Приватность"), L("Настройки приватности и отчётов о сбоях."), items)
+    }
+
+    private func showCrashReportsReview() {
+        let count = CrashReportStore.reports(state: .discovered).count
+        let alert = NSAlert()
+        alert.messageText = L("Необработанные отчёты")
+        alert.informativeText = String(format: L("Найдено отчётов: %d"), count)
+        alert.addButton(withTitle: L("OK"))
+        alert.beginSheetModal(for: window!)
     }
 
     /// Консолидированная секция «Основные»: автозапуск, строка меню (режим/иконка/мощность/объединённый вид/

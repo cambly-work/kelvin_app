@@ -5552,7 +5552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     
     /// Проверка наличия crash reports и показ уведомления пользователю
     private func checkForCrashReports() {
-        let pendingReports = CrashReportStore.shared.reports(state: .discovered)
+        let pendingReports = CrashReportStore.scan().newReports
         guard !pendingReports.isEmpty else { return }
         
         // Показываем уведомление для первого найденного отчёта
@@ -5565,13 +5565,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     
     /// Показать карточку уведомления о crash report
-    private func showCrashNotification(for report: CrashReport) {
+    private func showCrashNotification(for report: CrashReportStore.ReportMetadata) {
         // Проверяем, включена ли автоматическая отправка
-        let autoSend = UserDefaults.standard.bool(forKey: "autoSendCrashReports")
+        let autoSend = SettingsStore.autoSendCrashReports
         
         if autoSend {
             // Автоматическая отправка без показа UI
-            CrashReportStore.shared.updateState(report.id, to: .queued)
+            try? CrashReportStore.updateState(for: report.fingerprint, to: .queued)
             CrashReportUploader.shared.enqueue(report)
         } else {
             // Показываем карточку с запросом согласия
@@ -5592,11 +5592,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 openCrashPreviewWindow(for: report)
                 
             case .alertSecondButtonReturn: // Отправить
-                CrashReportStore.shared.updateState(report.id, to: .consented)
+                try? CrashReportStore.updateState(for: report.fingerprint, to: .consented)
                 CrashReportUploader.shared.enqueue(report)
                 
             case .alertThirdButtonReturn: // Не отправлять
-                CrashReportStore.shared.updateState(report.id, to: .declined)
+                try? CrashReportStore.updateState(for: report.fingerprint, to: .declined)
                 
             default:
                 break
@@ -5605,16 +5605,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     
     /// Открыть окно предпросмотра crash report
-    private func openCrashPreviewWindow(for report: CrashReport) {
+    private func openCrashPreviewWindow(for report: CrashReportStore.ReportMetadata) {
         // Санитизируем отчёт для показа
-        guard let sanitized = CrashReportSanitizer.sanitize(fileURL: report.filePath) else {
-            return
-        }
+        let result = CrashReportSanitizer.sanitize(
+            url: CrashReportStore.sourceURL(for: report),
+            reportID: report.reportID,
+            sourceFingerprint: report.fingerprint
+        )
+        guard case .success(let sanitized) = result, !sanitized.containsPII else { return }
         
         // Создаём простое текстовое окно для просмотра
         let textView = NSTextView()
         textView.isEditable = false
-        textView.string = sanitized.previewText
+        textView.string = sanitized.jsonPreview
         
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -5630,7 +5633,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Отчёт о сбое — \(report.appVersion)"
+        window.title = "Отчёт о сбое — \(report.sourceFilename)"
         window.contentViewController = NSViewController()
         window.contentViewController?.view = scrollView
         window.center()
