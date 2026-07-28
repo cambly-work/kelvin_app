@@ -23,14 +23,20 @@ __pycache__/
 .env.local
 *.env.*
 
-# Editors
+# Environment
+.env
+.env.local
+.env.*
+
+# Editor/IDE files
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Coverage reports
 coverage/
 htmlcov/
-.coverage
 
 # OS specific
 .DS_Store

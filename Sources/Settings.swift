@@ -76,11 +76,11 @@ enum SettingsStore {
         set { if let data = try? JSONEncoder().encode(newValue) { d.set(data, forKey: "popover.layout") } }
     }
     /// Непрозрачность фона поповера: 1.0 = плотный тёмный прибор, ниже = больше стекла/вибранси.
-    /// Пол 0.4 — читаемость (никогда полностью прозрачный). Правит AuraView.applyBase; применяется
+    /// При 100% прозрачности оставляем лишь технические 0.02, чтобы vibrancy сохранял материал.
     /// на пересборке (BMPopoverChanged → buildModules). Слайдер «Прозрачность фона» в S19.
     static var popoverOpacity: Double {
         get { d.object(forKey: "popover.opacity") as? Double ?? 0.80 }   // дефолт прозрачнее (V5: владелец «докрути»)
-        set { d.set(Swift.min(1.0, Swift.max(0.18, newValue)), forKey: "popover.opacity") }   // предел прозрачности ещё глубже (V5)
+        set { d.set(Swift.min(1.0, Swift.max(0.02, newValue)), forKey: "popover.opacity") }
     }
     /// Свои кнопки-команды (id, подпись, иконка, shell-команда, цвет).
     static var customToggles: [CustomToggle] {
@@ -741,6 +741,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Область контента прозрачна (в живом окне за ней материал окна). Офскрин материала нет → был бы
         // белый фон и невидимый светлый (тёмнотемный) текст. Красим непрозрачным фоном окна под тему.
         root.wantsLayer = true; content.wantsLayer = true
+        let snapshotSidebar = root.subviews.compactMap { $0 as? NSVisualEffectView }
+            .first { $0.identifier?.rawValue == "settingsSidebar" }
+        let oldSidebarBlend = snapshotSidebar?.blendingMode
+        let oldSidebarState = snapshotSidebar?.state
+        let oldSidebarMaterial = snapshotSidebar?.material
+        // `.behindWindow` требует живого compositing-host. При cacheDisplay офскрин он иногда
+        // отдавал разорванный sidebar (верх пустой, нижняя половина от другого кадра).
+        snapshotSidebar?.blendingMode = .withinWindow
+        snapshotSidebar?.material = .underWindowBackground
+        snapshotSidebar?.state = .inactive
         let appr = win.appearance ?? NSApp.effectiveAppearance
         appr.performAsCurrentDrawingAppearance {
             root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -750,9 +760,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         for s in Section.allCases {
             select(s)
             root.layoutSubtreeIfNeeded()
+            // Каждая QA-картинка начинается с начала раздела независимо от сохранённой позиции.
+            currentScroll?.contentView.scroll(to: .zero)
+            if let clip = currentScroll?.contentView {
+                currentScroll?.reflectScrolledClipView(clip)
+            }
             let end = Date().addingTimeInterval(0.5)                    // даём секции долить async-данные
             while Date() < end { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05)) }
             root.layoutSubtreeIfNeeded()
+            // Async-колбэк мог заменить страницу уже после первого reset; перед самым cacheDisplay
+            // ещё раз ставим начало и принудительно дорисовываем дерево.
+            currentScroll?.contentView.scroll(to: .zero)
+            if let clip = currentScroll?.contentView {
+                currentScroll?.reflectScrolledClipView(clip)
+            }
+            root.layoutSubtreeIfNeeded()
+            root.displayIfNeeded()
             let r = root.bounds
             guard r.width > 1, r.height > 1, let rep = root.bitmapImageRepForCachingDisplay(in: r) else { continue }
             root.cacheDisplay(in: r, to: rep)
@@ -762,6 +785,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 n += 1
             }
         }
+        if let oldSidebarBlend { snapshotSidebar?.blendingMode = oldSidebarBlend }
+        if let oldSidebarState { snapshotSidebar?.state = oldSidebarState }
+        if let oldSidebarMaterial { snapshotSidebar?.material = oldSidebarMaterial }
         return n
     }
 
@@ -839,6 +865,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         let sideBg = NSVisualEffectView()
         sideBg.material = .sidebar; sideBg.blendingMode = .behindWindow; sideBg.state = .active
+        sideBg.identifier = NSUserInterfaceItemIdentifier("settingsSidebar")
         sideBg.translatesAutoresizingMaskIntoConstraints = false
         sideBg.addSubview(sidebar)
 
@@ -1701,8 +1728,50 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     private func thermalNowText(_ kind: AlertKind) -> String {
         switch kind {
         case .cpuTemp:
+            // Использовать SensorResolver для получения подтверждённого CPU датчика.
+            let model = FanController.sysctlStr("hw.model")
+            let arch = FanController.architecture()
+            let catalog = SensorCatalog.build()
+            let smc = EnergyModel.smc
+            
+            if smc.available {
+                let resolved = SensorResolver.resolve(
+                    model: model,
+                    architecture: arch,
+                    catalog: catalog,
+                    readValue: { smc.read($0) }
+                )
+                
+                if let cpuSensor = resolved.cpuTemperature,
+                   let t = FanController.leadingTemp(cpuSensor.keys) {
+                    return String(format: L("сейчас %.0f°"), t)
+                }
+            }
+            
+            // Fallback на legacy-ключи.
             if let t = FanController.temp("TC0E") ?? FanController.leadingTemp(["TCXC", "TC0P"]) { return String(format: L("сейчас %.0f°"), t) }
         case .gpuTemp:
+            // Использовать SensorResolver для получения подтверждённого GPU датчика.
+            let model = FanController.sysctlStr("hw.model")
+            let arch = FanController.architecture()
+            let catalog = SensorCatalog.build()
+            let smc = EnergyModel.smc
+            
+            if smc.available {
+                let resolved = SensorResolver.resolve(
+                    model: model,
+                    architecture: arch,
+                    catalog: catalog,
+                    readValue: { smc.read($0) }
+                )
+                
+                if let gpuSensor = resolved.gpuTemperature,
+                   let t = FanController.leadingTemp(gpuSensor.keys) {
+                    return String(format: L("сейчас %.0f°"), t)
+                }
+            }
+            
+            // Fallback на legacy-ключи.
             if let t = FanController.temp("TG0D") ?? FanController.temp("TCGC") { return String(format: L("сейчас %.0f°"), t) }
         case .batteryLow, .batteryFull:
             if let p = BatteryReader.systemChargePercent() { return String(format: L("сейчас %d%%"), p) }
@@ -3379,8 +3448,8 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
             // При системной «Уменьшить прозрачность» стекло и так плотное — слайдер остаётся, но эффект мал.
             SK.sliderRow(icon: "circle.lefthalf.filled", title: L("Прозрачность фона"),
                          min: 0, max: 100,
-                         value: (1.0 - SettingsStore.popoverOpacity) / 0.82 * 100, unit: "%") { [weak self] v, lbl in
-                SettingsStore.popoverOpacity = 1.0 - (v / 100.0) * 0.82
+                         value: (1.0 - SettingsStore.popoverOpacity) / 0.98 * 100, unit: "%") { [weak self] v, lbl in
+                SettingsStore.popoverOpacity = 1.0 - (v / 100.0) * 0.98
                 lbl.stringValue = String(format: "%.0f%%", v)
                 self?.notifyPopoverChanged()
             },

@@ -10,6 +10,9 @@
 #       xcrun notarytool store-credentials "имя-профиля" --apple-id you@mail --team-id TEAMID --password app-spec-pass
 #       Без него — нотаризация пропускается.
 #   STYLE_DMG=1  — стилизовать окно DMG через Finder (см. make-dmg.sh).
+#   SPARKLE_ED_KEY_FILE=/path/to/private_ed_key  — путь к файлу приватного EdDSA ключа Sparkle
+#       Для подписи update-артефактов. Ключ генерируется через bin/generate_keys.
+#   SPARKLE_ED_PRIVATE_KEY="-----BEGIN ED PRIVATE KEY-----..."  — альтернативно, ключ из env
 set -e
 cd "$(dirname "$0")"
 
@@ -58,19 +61,63 @@ echo "━━ 3/4  Сборка DMG ━━"
 DMG=$(ls -t Kelvin-*.dmg | head -1)
 [ -n "$DEVID_APP" ] && codesign --force --timestamp --sign "$DEVID_APP" "$DMG" && echo "  ✓ DMG подписан"
 
-# appcast для собственного апдейтера (Updater.swift). DOWNLOAD_BASE — где хостятся DMG.
+# Appcast для Sparkle (XML с EdDSA подписью)
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist")
 MINOS=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$APP/Contents/Info.plist" 2>/dev/null || echo "11.0")
 DOWNLOAD_BASE="${DOWNLOAD_BASE:-https://trykelvin.com}"
-cat > docs/appcast.json <<JSON
-{
-  "version": "$VERSION",
-  "url": "$DOWNLOAD_BASE/$DMG",
-  "minOS": "$MINOS",
-  "notes": "$DOWNLOAD_BASE/notes.html"
-}
-JSON
-echo "  ✓ docs/appcast.json → $VERSION"
+
+# Создаём archive для обновления (zip с app)
+UPDATE_ARCHIVE="Kelvin-${VERSION}.zip"
+echo "  → Создание update archive: $UPDATE_ARCHIVE"
+ditto -c -k --keepParent "$APP" "$UPDATE_ARCHIVE"
+
+# Подписываем архив EdDSA ключом (если есть приватный ключ)
+ED_SIGNATURE=""
+if [ -n "$SPARKLE_ED_KEY_FILE" ] && [ -f "$SPARKLE_ED_KEY_FILE" ]; then
+    ED_SIGNATURE=$(python3 sign_update.py "$UPDATE_ARCHIVE" "$(cat "$SPARKLE_ED_KEY_FILE")" | grep 'sparkle:edSignature' | sed 's/.*sparkle:edSignature="\([^"]*\)".*/\1/')
+    echo "  ✓ Update archive подписан EdDSA"
+elif [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
+    # Альтернативно: ключ из переменной окружения
+    ED_SIGNATURE=$(python3 sign_update.py "$UPDATE_ARCHIVE" "$SPARKLE_ED_PRIVATE_KEY" | grep 'sparkle:edSignature' | sed 's/.*sparkle:edSignature="\([^"]*\)".*/\1/')
+    echo "  ✓ Update archive подписан EdDSA (из env)"
+else
+    echo "  ⚠ SPARKLE_ED_KEY_FILE или SPARKLE_ED_PRIVATE_KEY не заданы → архив НЕ подписан"
+    echo "    Для релиза задайте переменную с путём к приватному ключу."
+fi
+
+# Вычисляем размер архива
+ARCHIVE_SIZE=$(stat -f%z "$UPDATE_ARCHIVE" 2>/dev/null || stat -c%s "$UPDATE_ARCHIVE" 2>/dev/null || echo "0")
+
+# Генерируем appcast.xml
+cat > docs/appcast.xml <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Kelvin Updates</title>
+    <description>Latest updates for Kelvin</description>
+    <language>en</language>
+    <item>
+      <title>Version $VERSION</title>
+      <pubDate>$(date -u +"%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+      <releaseNotesLink>${DOWNLOAD_BASE}/notes.html</releaseNotesLink>
+      <sparkle:version>$BUILD</sparkle:version>
+      <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>$MINOS</sparkle:minimumSystemVersion>
+      <enclosure
+          url="${DOWNLOAD_BASE}/${UPDATE_ARCHIVE}"
+          sparkle:version="$BUILD"
+          sparkle:shortVersionString="$VERSION"
+          sparkle:minimumSystemVersion="$MINOS"
+          length="$ARCHIVE_SIZE"
+          type="application/zip"
+${ED_SIGNATURE:+          sparkle:edSignature=\"$ED_SIGNATURE\"}
+      />
+    </item>
+  </channel>
+</rss>
+XML
+echo "  ✓ docs/appcast.xml → $VERSION (build $BUILD)"
 
 echo "━━ 4/4  Нотаризация ━━"
 if [ -n "$DEVID_APP" ] && [ -n "$AC_PROFILE" ]; then

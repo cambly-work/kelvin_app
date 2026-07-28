@@ -111,8 +111,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
             desc: L("Пороги температуры и заряда, новые сетевые подключения."),
             buttonTitle: L("Разрешить"), buttonSymbol: "bell.fill")
         nBtn.onClick = { [weak self] in
-            AlertsEngine.shared.primeAuthorization()        // системный prompt, если ещё не спрашивали
-            self?.startPermissionPolling()
+            AlertsEngine.shared.primeAuthorization { [weak self] granted in
+                guard let self, self.window?.isVisible == true else { return }
+                self.setGranted(self.notifButton, self.notifStatus, granted)
+            }
         }
         self.notifButton = nBtn; self.notifStatus = nStatus
 
@@ -231,10 +233,6 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     }
     private func refreshPermissionStatus() {
         setGranted(axButton, axStatus, LangSwitcher.shared.isTrusted)       // Универсальный доступ — синхронно
-        UNUserNotificationCenter.current().getNotificationSettings { s in   // уведомления — асинхронный колбэк
-            let ok = (s.authorizationStatus == .authorized || s.authorizationStatus == .provisional)
-            DispatchQueue.main.async { self.setGranted(self.notifButton, self.notifStatus, ok) }
-        }
     }
     private func setGranted(_ button: GlassButton?, _ status: NSStackView?, _ granted: Bool) {
         button?.isHidden = granted        // NSStackView сам исключает скрытые вьюхи из раскладки
