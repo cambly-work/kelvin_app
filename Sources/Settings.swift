@@ -2737,7 +2737,18 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
     func openLicenseEntry() {
         KelvinSettingsWindowController.shared.open(section: "pro")
     }
-    @objc private func buyPro() { if let u = URL(string: Licensing.checkoutURL) { NSWorkspace.shared.open(u) } }
+    @objc private func buyPro() {
+        if let url = Licensing.checkoutURL(), let realURL = URL(string: url) {
+            NSWorkspace.shared.open(realURL)
+        } else {
+            // Магазин не настроен — показать пользователю нейтральное сообщение
+            let alert = NSAlert()
+            alert.messageText = L("Покупка временно недоступна")
+            alert.informativeText = L("Магазин Lemon Squeezy ещё не подключён. Пожалуйста, активируйте лицензию ключом или попробуйте позже.")
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
     @objc private func activateLicense() {
         activateError?.isHidden = true
         activateButton?.isEnabled = false
@@ -2785,8 +2796,8 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         a.messageText = I18n.proFeatureTitle(f.title)
         a.informativeText = Licensing.shared.licenseKey != nil
             ? L("Лицензия есть, но не подтверждена — проверьте соединение и переактивируйте ключ в разделе Pro.")
-            : L("Мониторинг бесплатен навсегда. Управление и автоматизация — в Kelvin Pro: разовая покупка $19, 2 Mac на лицензию, без подписки.")
-        a.addButton(withTitle: L("Купить за $19"))
+            : String(format: L("Мониторинг бесплатен навсегда. Управление и автоматизация — в Kelvin Pro: разовая покупка %@, %@ на лицензию, без подписки."), AppConfig.proPriceDisplay, L("2 Mac"))
+        a.addButton(withTitle: String(format: L("Купить за %@"), AppConfig.proPriceDisplay))
         a.addButton(withTitle: L("Ввести ключ"))
         a.addButton(withTitle: L("Позже"))
         switch a.runModal() {

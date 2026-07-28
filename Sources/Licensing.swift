@@ -122,14 +122,15 @@ final class Licensing {
     static let shared = Licensing()
     private let d = UserDefaults.standard
 
-    let trialDays = 14
-    let graceDays = 7                       // сколько дней Pro живёт офлайн после успешной проверки
-    static let checkoutURL = "https://trykelvin.com"
-
-    // Заполнить из Lemon Squeezy на релизе. nil → магазин не подключён (активация-заглушка, поведение прежнее).
-    static let storeID: Int? = nil
-    static let productID: Int? = nil
-    static var isStoreConfigured: Bool { storeID != nil && productID != nil }
+    // Коммерческая конфигурация из AppConfig (единый источник истины)
+    var trialDays: Int { AppConfig.trialDays }
+    var graceDays: Int { AppConfig.licenseGraceDays }
+    
+    static var checkoutURL: String? { AppConfig.lemonSqueezyCheckoutURL }
+    static var storeID: Int? { AppConfig.lemonSqueezyStoreID }
+    static var productID: Int? { AppConfig.lemonSqueezyProductID }
+    static var isStoreConfigured: Bool { AppConfig.isStoreConfigured }
+    
     private static let api = "https://api.lemonsqueezy.com/v1/licenses"
 
     // ВАЖНО: демо-оверрайды монетизации доступны ТОЛЬКО в DEBUG-сборке. В релизе (build.sh/release.sh
@@ -197,7 +198,15 @@ final class Licensing {
     }
 
     var licenseKey: String? { state()?.key }
-    private var instanceID: String? { state()?.instance }
+    var instanceID: String? { state()?.instance }  // public for UI
+    
+    /// Вспомогательная функция для склонения (используется в UI)
+    func plural(_ n: Int, _ one: String, _ few: String, _ many: String) -> String {
+        let n10 = n % 10, n100 = n % 100
+        if n10 == 1 && n100 != 11 { return one }
+        if (2...4).contains(n10) && !(12...14).contains(n100) { return few }
+        return many
+    }
 
     /// Лицензия валидна, если есть ПОДПИСАННОЕ состояние (подпись сверена при загрузке — форж/копию отсекли)
     /// и последняя успешная проверка не старше grace-окна. Плюс детект отката системных часов назад.
@@ -210,14 +219,41 @@ final class Licensing {
     }
 
     /// Куплена ли лицензия (для UI: показывать «деактивировать» вместо «купить»).
-    var activated: Bool { forcePro || licenseValid }
+    var activated: Bool {
+        #if DEBUG
+        if forcePro { return true }
+        #endif
+        return licenseValid
+    }
 
-    /// КОММЕРЦИЯ ОТКЛЮЧЕНА (решение владельца, июль 2026): приложение бесплатно, всё разблокировано.
-    /// Один форс `true` пропускает все 11 гейтов requirePro и гасит апселлы. Лицензионный код ниже
-    /// (Lemon Squeezy activate/validate, триал, LicenseVault) жив, но спит — вернуть коммерцию =
-    /// восстановить прежнюю формулу здесь + вернуть лицензионный UI (раздел настроек + пункты меню).
-    var isPro: Bool { true }
-    /// Прежняя формула (сохранена для реактивации): forcePro || (!forceFree && (licenseValid || inTrial) && Hardening.signatureTrusted)
+    /// КОММЕРЧЕСКАЯ МОДЕЛЬ (возвращена после отмены в июле 2026):
+    /// - Monitoring (чтение сенсоров, графики, история ≤24h) — бесплатно навсегда.
+    /// - Control/Automation (запись параметров, вентиляторы, charge limit, firewall, language automation,
+    ///   custom commands, GPU switch, VPN toggle, audio switch, history export >24h) — требуют Pro.
+    ///
+    /// Pro доступен при:
+    /// - DEBUG overrides (BM_PRO) — только в DEBUG сборках;
+    /// - Валидная лицензия (подписанное состояние + grace period не истёк);
+    /// - Активный trial (≤14 дней с первого запуска, ключ не введён).
+    ///
+    /// Production без лицензии/после trial → isPro = false, контроль блокируется на уровне execution gate.
+    var isPro: Bool {
+        #if DEBUG
+        if forcePro { return true }
+        if forceFree { return false }
+        #else
+        // В production всегда проверяем реальное состояние
+        #endif
+        
+        // Подписанная валидная лицензия даёт Pro
+        if licenseValid { return true }
+        
+        // Trial даёт Pro (только если нет лицензии)
+        if inTrial { return true }
+        
+        // Free (без лицензии и после trial) → только мониторинг
+        return false
+    }
 
     /// Триал закончился, лицензии нет, и мы ещё не показывали прощальный экран — момент для оффера.
     var shouldShowTrialEnded: Bool {
@@ -229,36 +265,75 @@ final class Licensing {
     func markTrialEndedShown() { d.set(true, forKey: "lic.endedShown") }
 
     var statusText: String {
+        #if DEBUG
         if forceFree { return L("Бесплатная версия — мониторинг") }
+        if forcePro { return L("Kelvin Pro — активирован (DEBUG override)") }
+        #endif
+        
         if activated { return L("Kelvin Pro — активирован") }
-        if licenseKey != nil { return L("Лицензия — требуется проверка соединения") }   // grace истёк
-        if inTrial { return I18n.trialStatus(trialDaysLeft) }
+        if licenseKey != nil && !licenseValid {
+            return L("Лицензия — требуется проверка соединения")   // grace истёк или офлайн
+        }
+        if inTrial {
+            let daysLeft = trialDaysLeft
+            if daysLeft == 0 {
+                return L("Пробный период закончился")
+            } else {
+                return I18n.trialStatus(daysLeft)
+            }
+        }
         return L("Бесплатная версия — пробный период закончился")
+    }
+    
+    /// Checkout URL для кнопки покупки. Возвращает nil, если магазин не настроен.
+    static func checkoutURL() -> String? {
+        guard let url = AppConfig.lemonSqueezyCheckoutURL else { return nil }
+        // Валидация: HTTPS и не example.com
+        guard url.hasPrefix("https://"), !url.contains("example.com") else { return nil }
+        return url
     }
 
     // MARK: Lemon Squeezy License API
+    
+    /// Активация лицензии через Lemon Squeezy API.
+    /// - rawKey: ключ от пользователя (trimming применяется внутри)
+    /// - completion: (success, message) на main queue
     func activate(_ rawKey: String, completion: @escaping (Bool, String) -> Void) {
         let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return completion(false, L("Введите ключ лицензии.")) }
+        
+        // Проверка конфигурации магазина
         guard Self.isStoreConfigured else {
+            #if DEBUG
+            let diag = AppConfig.storeDiagnosticMessage
+            return completion(false, "Магазин не подключён: \(diag)")
+            #else
             return completion(false, L("Магазин Lemon Squeezy ещё не подключён — активация ключей появится в релизной сборке."))
+            #endif
         }
+        
         post("activate", ["license_key": key, "instance_name": Host.current().localizedName ?? "Mac"]) { [weak self] r in
             guard let self else { return }
             guard case .success(let j) = r else {
-                if case .failure(let e) = r { completion(false, String(format: L("Не удалось связаться с сервером: %@"), e)) }
+                if case .failure(let e) = r { 
+                    completion(false, String(format: L("Не удалось связаться с сервером: %@"), e))
+                }
                 return
             }
+            
+            // Безопасное декодирование ответа
             let meta = j["meta"] as? [String: Any]
             let storeOK = (meta?["store_id"] as? Int) == Self.storeID && (meta?["product_id"] as? Int) == Self.productID
             let instID = (j["instance"] as? [String: Any])?["id"] as? String
+            
             if (j["activated"] as? Bool) == true, storeOK, let instID {
-                self.setState(LicenseState(key: key, instance: instID, validatedAt: Date()))   // подписанный кэш
+                self.setState(LicenseState(key: key, instance: instID, validatedAt: Date()))
                 completion(true, L("Kelvin Pro активирован на этом Mac."))
             } else if !storeOK {
                 completion(false, L("Этот ключ от другого продукта."))
             } else {
-                completion(false, String(format: L("Активация не прошла: %@."), (j["error"] as? String) ?? L("ключ недействителен или достигнут лимит устройств")))
+                let errorMsg = (j["error"] as? String) ?? L("ключ недействителен или достигнут лимит устройств")
+                completion(false, String(format: L("Активация не прошла: %@."), errorMsg))
             }
         }
     }
@@ -271,19 +346,31 @@ final class Licensing {
             if (j["valid"] as? Bool) == true {
                 self.setState(LicenseState(key: key, instance: inst, validatedAt: Date()))   // обновили grace-окно
             } else {
-                self.setState(nil)                                          // сервер: лицензия недействительна
+                // Сервер сообщил о невалидности → очищаем состояние
+                self.setState(nil)
             }
         }
     }
 
+    /// Деактивация лицензии на этом Mac.
+    /// Сначала пытается сообщить серверу (eventual consistency), затем локально очищает состояние.
     func deactivate() {
         if Self.isStoreConfigured, let key = licenseKey, let inst = instanceID {
+            // Асинхронный запрос на деактивацию (не блокируем UI, ошибки игнорируем — eventual consistency)
             post("deactivate", ["license_key": key, "instance_id": inst]) { _ in }
         }
+        // Локальная очистка состояния (немедленно)
         setState(nil)
     }
 
     private enum NetResult { case success([String: Any]); case failure(String) }
+    
+    /// HTTP POST к Lemon Squeezy API с базовой безопасностью:
+    /// - timeout 12s
+    /// - Content-Type: application/x-www-form-urlencoded
+    /// - Accept: application/json
+    /// - response size limit не реализован (NSURLSession без явного лимита)
+    /// - нет кеширования/cookies (ephemeral session можно добавить при необходимости)
     private func post(_ path: String, _ form: [String: String], _ done: @escaping (NetResult) -> Void) {
         guard let url = URL(string: "\(Self.api)/\(path)") else { return done(.failure("bad url")) }
         var req = URLRequest(url: url); req.httpMethod = "POST"; req.timeoutInterval = 12
@@ -292,7 +379,14 @@ final class Licensing {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
         req.httpBody = form.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
             .joined(separator: "&").data(using: .utf8)
-        URLSession.shared.dataTask(with: req) { data, _, err in
+        
+        // Используем ephemeral session без cookies и cache для приватности
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.urlCache = nil
+        sessionConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: sessionConfig)
+        
+        session.dataTask(with: req) { data, _, err in
             DispatchQueue.main.async {
                 if let err = err { return done(.failure(err.localizedDescription)) }
                 guard let data, let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -301,12 +395,5 @@ final class Licensing {
                 done(.success(j))
             }
         }.resume()
-    }
-
-    private func plural(_ n: Int, _ a: String, _ b: String, _ c: String) -> String {
-        let n10 = n % 10, n100 = n % 100
-        if n10 == 1 && n100 != 11 { return a }
-        if (2...4).contains(n10) && !(12...14).contains(n100) { return b }
-        return c
     }
 }

@@ -1557,55 +1557,345 @@ private struct ProSettingsPage: View {
     @State private var key = ""
     @State private var status = ""
     @State private var activating = false
-
+    @State private var showDeactivateConfirm = false
+    @State private var lastCheckDate: Date? = nil
+    
+    private let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+    
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 20) {
+            // MARK: Status Card
             KelvinCard {
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Kelvin Pro", systemImage: Licensing.shared.isPro ? "checkmark.seal.fill" : "sparkles")
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundColor(.accentColor)
-                    Text(Licensing.shared.isPro
-                         ? L("Все функции управления разблокированы на этом Mac.")
-                         : L("Мониторинг бесплатен навсегда. Управление и автоматизация доступны в Kelvin Pro."))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !Licensing.shared.isPro {
-                        Button(L("Купить за $19")) {
-                            if let url = URL(string: Licensing.checkoutURL) { NSWorkspace.shared.open(url) }
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 12) {
+                        Image(systemName: Licensing.shared.isPro ? "checkmark.seal.fill" : "sparkles")
+                            .font(.system(size: 28))
+                            .foregroundColor(Licensing.shared.isPro ? .green : .accentColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Kelvin Pro")
+                                .font(.system(size: 22, weight: .bold))
+                            Text(Licensing.shared.statusText)
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    // MARK: Status Details
+                    VStack(alignment: .leading, spacing: 8) {
+                        if Licensing.shared.activated {
+                            StatusRow(icon: "checkmark.circle.fill", text: L(\"Лицензия активирована\"), color: .green)
+                            if let instance = Licensing.shared.instanceID {
+                                StatusRow(icon: "macbook", text: String(format: L(\"Mac ID: %@\"), String(instance.prefix(8))), color: .secondary)
+                            }
+                            if let lastCheck = lastCheckDate ?? loadLastCheckDate() {
+                                StatusRow(icon: "clock", text: String(format: L(\"Последняя проверка: %@\"), formatter.string(from: lastCheck)), color: .secondary)
+                            }
+                        } else if Licensing.shared.inTrial {
+                            StatusRow(icon: "hourglass", text: String(format: L(\"Осталось дней триала: %@\"), "\(Licensing.shared.trialDaysLeft)"), color: .orange)
+                            StatusRow(icon: "calendar", text: String(format: L(\"До конца: %@\"), "\(Licensing.shared.trialDays) \(Licensing.shared.plural(Licensing.shared.trialDays, L(\"день\"), L(\"дня\"), L(\"дней\")))"), color: .secondary)
+                        } else {
+                            StatusRow(icon: "info.circle.fill", text: L(\"Мониторинг бесплатен навсегда\"), color: .blue)
+                            StatusRow(icon: "lock.fill", text: L(\"Управление требует Pro\"), color: .secondary)
+                        }
+                    }
+                    .font(.system(size: 13))
+                    
+                    // MARK: Purchase Button (only for non-Pro)
+                    if !Licensing.shared.isPro && !Licensing.shared.inTrial {
+                        Divider()
+                        Button(action: openCheckout) {
+                            HStack {
+                                Image(systemName: "bag.fill")
+                                Text(String(format: L(\"Купить за %@ — навсегда\"), AppConfig.proPriceDisplay))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!Licensing.isStoreConfigured)
+                        
+                        if !Licensing.isStoreConfigured {
+                            Text(L(\"Покупка временно недоступна\"))
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        // Trial info
+                        VStack(spacing: 6) {
+                            Text(String(format: L(\"%@ на %@\"), AppConfig.proPriceDisplay, L(\"2 Mac\")))
+                                .font(.system(size: 12, weight: .medium))
+                            Text(L(\"Без подписки • Один платёж\"))
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Text(String(format: L(\"%@ %@\"), L(\"Включает\"), L(\"триал \(Licensing.shared.trialDays) дн.\")))
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
                 .padding(20)
             }
-            if !Licensing.shared.isPro {
-                KelvinCard(L("Активация")) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        TextField(L("Лицензионный ключ"), text: $key)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
+            
+            // MARK: Activation Section (only for non-activated)
+            if !Licensing.shared.activated {
+                // MARK: Activate with Key
+                KelvinCard(L(\"Активация ключом\")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 8) {
+                            SecureField(L(\"Лицензионный ключ\"), text: $key)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .font(.system(size: 13, family: "monospace"))
+                            
+                            Button(action: pasteFromClipboard) {
+                                Image(systemName: "doc.on.doc")
+                                    .frame(width: 32, height: 32)
+                            }
+                            .help(L(\"Вставить из буфера\"))
+                            .disabled(key.isEmpty == false)
+                        }
+                        
                         HStack {
-                            Button(L("Активировать")) {
-                                activating = true
-                                status = ""
-                                Licensing.shared.activate(key) { ok, message in
-                                    activating = false
-                                    status = message
-                                    if ok { KelvinSettingsWindowController.shared.refresh() }
+                            Button(action: activateLicense) {
+                                HStack {
+                                    if activating {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .progressViewStyle(.circular)
+                                    }
+                                    Text(activating ? L(\"Активация...\") : L(\"Активировать\"))
                                 }
+                                .frame(minWidth: 100)
                             }
                             .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || activating)
-                            if activating { ProgressView().controlSize(.small) }
+                            
+                            Spacer()
+                            
+                            if !status.isEmpty {
+                                Text(status)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(status.hasPrefix("✓") ? .green : .red)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.trailing)
+                            }
                         }
-                        if !status.isEmpty {
-                            Text(status)
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
+                        
+                        // Helper text
+                        Text(L(\"Ключ приходит на email после покупки в Lemon Squeezy\"))
+                            .font(.system(size: 10))
+                            .foregroundColor(.tertiary)
+                    }
+                    .padding(16)
+                }
+                
+                // MARK: Restore / Links
+                KelvinCard {
+                    VStack(spacing: 10) {
+                        Button(L(\"Восстановить покупку / Активировать существующую лицензию\")) {
+                            // Same as activate - user enters key
+                            NSApp.sendAction(#selector(NSResponder.selectAll(_:)), to: nil, from: nil)
+                        }
+                        .buttonStyle(.borderless)
+                        
+                        Divider()
+                        
+                        HStack(spacing: 16) {
+                            LinkButton(title: L(\"Privacy\"), url: "https://trykelvin.com/privacy.html")
+                            LinkButton(title: L(\"EULA\"), url: "https://trykelvin.com/eula.html")
+                            LinkButton(title: L(\"Support\"), url: "mailto:support@trykelvin.com")
                         }
                     }
                     .padding(16)
                 }
             }
+            
+            // MARK: Deactivation (only for activated)
+            if Licensing.shared.activated {
+                KelvinCard {
+                    VStack(spacing: 12) {
+                        Text(L(\"Управление лицензией\"))
+                            .font(.system(size: 14, weight: .semibold))
+                        
+                        HStack {
+                            Button(action: { showDeactivateConfirm = true }) {
+                                Text(L(\"Деактивировать этот Mac\"))
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(.borderless)
+                            
+                            Spacer()
+                            
+                            Button(action: manualRevalidate) {
+                                Text(L(\"Проверить сейчас\"))
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        
+                        Text(L(\"Деактивация освободит слот для активации на другом компьютере\"))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(16)
+                }
+            }
         }
+        .sheet(isPresented: $showDeactivateConfirm) {
+            DeactivationConfirmationSheet(
+                onConfirm: {
+                    showDeactivateConfirm = false
+                    performDeactivation()
+                },
+                onCancel: {
+                    showDeactivateConfirm = false
+                }
+            )
+        }
+        .onAppear {
+            lastCheckDate = loadLastCheckDate()
+        }
+    }
+    
+    // MARK: Actions
+    
+    private func openCheckout() {
+        if let url = Licensing.checkoutURL(), let realURL = URL(string: url) {
+            NSWorkspace.shared.open(realURL)
+        }
+    }
+    
+    private func pasteFromClipboard() {
+        if let clipboard = NSPasteboard.general.string(forType: .string) {
+            key = clipboard.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+    
+    private func activateLicense() {
+        activating = true
+        status = ""
+        Licensing.shared.activate(key) { ok, message in
+            DispatchQueue.main.async {
+                activating = false
+                status = ok ? "✓ " + message : message
+                if ok {
+                    key = ""  // Clear sensitive data
+                    lastCheckDate = Date()
+                    saveLastCheckDate(Date())
+                    KelvinSettingsWindowController.shared.refresh()
+                }
+            }
+        }
+    }
+    
+    private func performDeactivation() {
+        Licensing.shared.deactivate()
+        status = L(\"Деактивировано\")
+        lastCheckDate = nil
+        KelvinSettingsWindowController.shared.refresh()
+    }
+    
+    private func manualRevalidate() {
+        status = L(\"Проверка...\")
+        Licensing.shared.revalidate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            lastCheckDate = Date()
+            saveLastCheckDate(lastCheckDate!)
+            status = L(\"Проверено\")
+            KelvinSettingsWindowController.shared.refresh()
+        }
+    }
+    
+    private func loadLastCheckDate() -> Date? {
+        UserDefaults.standard.object(forKey: "lic.lastCheck") as? Date
+    }
+    
+    private func saveLastCheckDate(_ date: Date) {
+        UserDefaults.standard.set(date, forKey: "lic.lastCheck")
+    }
+}
+
+// MARK: Helper Views
+
+private struct StatusRow: View {
+    let icon: String
+    let text: String
+    let color: Color
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundColor(color == .secondary ? .gray : color)
+                .frame(width: 18)
+            Text(text)
+                .foregroundColor(color == .secondary ? .secondary : color)
+        }
+    }
+}
+
+private struct LinkButton: View {
+    let title: String
+    let url: String
+    
+    var body: some View {
+        Button(action: {
+            if let u = URL(string: url) {
+                NSWorkspace.shared.open(u)
+            }
+        }) {
+            Text(title)
+                .foregroundColor(.accentColor)
+        }
+        .buttonStyle(.borderless)
+    }
+}
+
+private struct DeactivationConfirmationSheet: View {
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+    
+    @State private var confirmText = ""
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(L(\"Деактивировать лицензию?\"))
+                .font(.system(size: 16, weight: .semibold))
+            
+            Text(L(\"Это освободит слот активации на этом Mac. Вы сможете активировать снова этим же ключом.\"))
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            HStack {
+                Text(L(\"Введите \"деактивировать\" для подтверждения:\"))
+                    .font(.system(size: 11))
+                SecureField("", text: $confirmText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .frame(width: 150)
+            }
+            
+            HStack(spacing: 12) {
+                Button(action: onCancel) {
+                    Text(L(\"Отмена\"))
+                        .frame(minWidth: 80)
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Button(action: onConfirm) {
+                    Text(L(\"Деактивировать\"))
+                        .foregroundColor(.red)
+                        .frame(minWidth: 80)
+                }
+                .disabled(confirmText.lowercased() != L(\"деактивировать\"))
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
     }
 }
 

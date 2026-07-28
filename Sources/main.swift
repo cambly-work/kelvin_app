@@ -5391,13 +5391,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         Licensing.shared.markTrialEndedShown()
         let a = NSAlert()
         a.messageText = L("Пробный период Kelvin Pro закончился")
-        a.informativeText = L("Мониторинг остаётся бесплатным навсегда. Управление вентиляторами, лимит заряда, фаервол, переключатель языка и другие Pro-функции теперь отключены. Разблокировать — разовая покупка $19, без подписки.")
-        a.addButton(withTitle: L("Купить за $19"))
+        a.informativeText = String(format: L("Мониторинг остаётся бесплатным навсегда. Управление вентиляторами, лимит заряда, фаервол, переключатель языка и другие Pro-функции теперь отключены. Разблокировать — разовая покупка %@, без подписки."), AppConfig.proPriceDisplay)
+        a.addButton(withTitle: String(format: L("Купить за %@"), AppConfig.proPriceDisplay))
         a.addButton(withTitle: L("Ввести ключ"))
         a.addButton(withTitle: L("Продолжить бесплатно"))
         NSApp.activate(ignoringOtherApps: true)
         switch a.runModal() {
-        case .alertFirstButtonReturn:  if let u = URL(string: Licensing.checkoutURL) { NSWorkspace.shared.open(u) }
+        case .alertFirstButtonReturn:
+            if let url = Licensing.checkoutURL(), let realURL = URL(string: url) {
+                NSWorkspace.shared.open(realURL)
+            } else {
+                // Магазин не настроен — fallback на ввод ключа
+                SettingsWindowController.shared.open()
+                SettingsWindowController.shared.openLicenseEntry()
+            }
         case .alertSecondButtonReturn: SettingsWindowController.shared.open(); SettingsWindowController.shared.openLicenseEntry()
         default: break
         }
