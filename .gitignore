@@ -1,46 +1,41 @@
 ```
-# Compiled and binary files
+# Build artifacts
 *.o
 *.obj
-*.out
+*.a
+*.dylib
+*.so
+*.dll
+
+# Swift build artifacts
+.build/
+DerivedData/
 
 # Dependencies
-node_modules/
-venv/
-.venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-target/
-.gradle/
+Package.resolved
+.swiftpm/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+.env.*
 
 # Editor/IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
-*.tmp
-
-# System files
-.DS_Store
-Thumbs.db
-.env
-.env.local
-*.env.*
-
-# Logs
-*.log
 
 # Coverage
+.coverage
 coverage/
 htmlcov/
-.coverage
 
-# Build artifacts
-dist/
-build/
-
-# Sparkle EdDSA Keys - NEVER commit private keys
-update_keys.txt
-*_ed_key.txt
-*.pem
+# OS generated files
+.DS_Store
+Thumbs.db
+```

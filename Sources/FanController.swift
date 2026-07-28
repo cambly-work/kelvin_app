@@ -1,4 +1,5 @@
 import Foundation
+import Darwin   // sysctlbyname
 
 /// Один вентилятор: текущие/мин/макс обороты и режим.
 struct FanInfo {
@@ -119,12 +120,52 @@ enum FanController {
     private static var smc: SMC { EnergyModel.smc }
     /// Сенсоры-защиты по умолчанию (реальная температура кристалла CPU/GPU).
     static let defaultAlertKeys = ["TCXC", "TC0E", "TG0D"]
+    
+    /// Получить hw.model.
+    private static func sysctlStr(_ name: String) -> String {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "unknown" }
+        return String(cString: buf)
+    }
+    
+    /// Определить архитектуру (arm64/x86_64).
+    private static func architecture() -> String {
+        var size = 0
+        guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.machine", &buf, &size, nil, 0) == 0 else { return "unknown" }
+        let machine = String(cString: buf)
+        return machine.hasPrefix("arm") ? "arm64" : "x86_64"
+    }
 
     /// Список вентиляторов с текущими оборотами (чтение без sudo).
     static func fans() -> [FanInfo] {
+        // Использовать resolved sensor set для определения доступных вентиляторов.
+        let model = sysctlStr("hw.model")
+        let arch = architecture()
+        let catalog = SensorCatalog.build()
+        let smc = EnergyModel.smc
+        
+        // Сначала попробовать FNum через resolver
+        if let fnum = smc.read("FNum"), fnum > 0 {
+            let mask = Int(smc.read("FS! ") ?? 0)
+            return (0..<Int(fnum)).compactMap { i in
+                let acKey = "F\(i)Ac"
+                guard let cur = smc.read(acKey), cur > 1 else { return nil }
+                return FanInfo(index: i,
+                               rpm: cur,
+                               min: smc.read("F\(i)Mn") ?? 0,
+                               max: smc.read("F\(i)Mx") ?? 0,
+                               forced: (mask >> i) & 1 == 1)
+            }
+        }
+        
+        // Fallback: legacy-метод для совместимости
         let n = Int(smc.read("FNum") ?? 0)
         guard n > 0, n < 10 else { return [] }
-        let mask = Int(smc.read("FS! ") ?? 0)        // бит i = вентилятор i в ручном режиме
+        let mask = Int(smc.read("FS! ") ?? 0)
         return (0..<n).map { i in
             FanInfo(index: i,
                     rpm: smc.read("F\(i)Ac") ?? 0,
@@ -133,9 +174,62 @@ enum FanController {
                     forced: (mask >> i) & 1 == 1)
         }
     }
+    
+    /// Получить cooling topology для текущей модели.
+    static func coolingTopology() -> CoolingTopology {
+        let model = sysctlStr("hw.model")
+        let arch = architecture()
+        let catalog = SensorCatalog.build()
+        let smc = EnergyModel.smc
+        
+        guard smc.available else { return .unknown }
+        
+        let resolved = SensorResolver.resolve(
+            model: model,
+            architecture: arch,
+            catalog: catalog,
+            readValue: { smc.read($0) }
+        )
+        
+        return resolved.cooling
+    }
+    
+    /// Проверка наличия активного охлаждения.
+    static var hasActiveCooling: Bool {
+        let topology = coolingTopology()
+        if case .active = topology { return true }
+        return false
+    }
+    
+    /// Проверка пассивного охлаждения (fanless).
+    static var isPassiveCooling: Bool {
+        let topology = coolingTopology()
+        if case .passive = topology { return true }
+        return false
+    }
 
     /// Кандидаты-сенсоры температуры (только реально читаемые сейчас).
     static func sensors() -> [TempSensor] {
+        // Использовать resolved sensor set для получения подтверждённых температурных сенсоров.
+        let model = sysctlStr("hw.model")
+        let arch = architecture()
+        let catalog = SensorCatalog.build()
+        
+        guard smc.available else { return [] }
+        
+        let resolved = SensorResolver.resolve(
+            model: model,
+            architecture: arch,
+            catalog: catalog,
+            readValue: { smc.read($0) }
+        )
+        
+        // Собрать все подтверждённые ключи из resolved сенсоров.
+        var confirmedKeys: Set<String> = []
+        for sensor in resolved.sensors.values {
+            confirmedKeys.formUnion(sensor.keys)
+        }
+        
         // «ядра» (кристалл, PECI) — реальная температура, по ней и стоит рулить;
         // «корпус» (TC0P) — сглаженный датчик-близость, прохладнее на ~30°.
         let candidates: [(String, String)] = [
@@ -143,8 +237,13 @@ enum FanController {
             ("TM0P", "Память"), ("TPCD", "Чипсет"), ("Ts0P", "Корпус"), ("TB0T", "Батарея"),
             ("TA0P", "Воздух"), ("TH0P", "Накопитель"),
         ]
+        
         return candidates.compactMap { key, name in
+            // Приоритет: confirmed keys из resolver, иначе fallback на legacy-кандидатов.
+            let isConfirmed = confirmedKeys.contains(key)
             guard let v = smc.read(key), v > 5, v < 130 else { return nil }
+            // Показывать только подтверждённые или явно читаемые ключи.
+            if !isConfirmed && !confirmedKeys.isEmpty { return nil }
             // Отображаемое имя локализуем (B2-косметика); персистится .key, а не имя — матч не затронут.
             return TempSensor(key: key, name: "\(L(name)) (\(key))")
         }
@@ -239,7 +338,47 @@ enum FanController {
     }
     /// Сработал ли алерт (по alertSensorKeys / кристаллу) — форс макс. Едино для constant и curve.
     static func alertActive(_ p: FanProfile) -> Bool {
-        for k in (p.alertSensorKeys.isEmpty ? defaultAlertKeys : p.alertSensorKeys) {
+        // Использовать resolved sensor set для получения подтверждённых CPU/GPU сенсоров.
+        let model = sysctlStr("hw.model")
+        let arch = architecture()
+        let catalog = SensorCatalog.build()
+        
+        guard smc.available else {
+            // Fallback на legacy-ключи если SMC недоступен.
+            for k in (p.alertSensorKeys.isEmpty ? defaultAlertKeys : p.alertSensorKeys) {
+                if let t = temp(k), t >= Double(p.alertTemp) { return true }
+            }
+            return false
+        }
+        
+        let resolved = SensorResolver.resolve(
+            model: model,
+            architecture: arch,
+            catalog: catalog,
+            readValue: { smc.read($0) }
+        )
+        
+        // Построить список ключей для проверки:
+        // 1. Если заданы alertSensorKeys — использовать их.
+        // 2. Иначе использовать подтверждённые CPU/GPU сенсоры из resolver.
+        // 3. Fallback на legacy defaultAlertKeys.
+        var alertKeys: [String] = []
+        
+        if !p.alertSensorKeys.isEmpty {
+            alertKeys = p.alertSensorKeys
+        } else {
+            // Собрать CPU и GPU ключи из resolved set.
+            var confirmedKeys: [String] = []
+            if let cpu = resolved.cpuTemperature {
+                confirmedKeys.append(contentsOf: cpu.keys)
+            }
+            if let gpu = resolved.gpuTemperature {
+                confirmedKeys.append(contentsOf: gpu.keys)
+            }
+            alertKeys = confirmedKeys.isEmpty ? defaultAlertKeys : confirmedKeys
+        }
+        
+        for k in alertKeys {
             if let t = temp(k), t >= Double(p.alertTemp) { return true }
         }
         return false

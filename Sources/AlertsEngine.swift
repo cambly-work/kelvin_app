@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import UserNotifications
+import Darwin   // sysctlbyname
 
 /// Тип порогового уведомления. Free-фича: приложение ВИДИТ и предупреждает
 /// (управление — Pro). Громчайший гэп против iStat/Stats/TG Pro/AlDente — у них
@@ -169,12 +170,28 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
         let needTemp = rules.contains { $0.kind == .cpuTemp || $0.kind == .gpuTemp }
         let needLoad = rules.contains { $0.kind == .cpuLoad }
         var cpuTemp: Double?, gpuTemp: Double?, cpuLoad: Double?
+        
         if needTemp {
             let smc = EnergyModel.smc
             if smc.available {
-                func maxOf(_ ks: [String]) -> Double? { ks.compactMap { smc.read($0) }.filter { $0 > -40 && $0 < 130 }.max() }
-                cpuTemp = maxOf(["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"])
-                gpuTemp = maxOf(["TG0D","TG0P"])
+                // Использовать resolved sensor set для получения подтверждённых ключей.
+                let model = sysctlStr("hw.model")
+                let arch = architecture()
+                let catalog = SensorCatalog.build()
+                let resolved = SensorResolver.resolve(
+                    model: model,
+                    architecture: arch,
+                    catalog: catalog,
+                    readValue: { smc.read($0) }
+                )
+                
+                func maxOf(_ ks: [String]) -> Double? {
+                    ks.compactMap { smc.read($0) }.filter { $0 > -40 && $0 < 130 }.max()
+                }
+                
+                // Брать ключи из resolved set, fallback на legacy-списки.
+                cpuTemp = maxOf(resolved.cpuTemperature?.keys ?? ["TCXC","TC0E","TC1C","TC2C","TC3C","TC4C"])
+                gpuTemp = maxOf(resolved.gpuTemperature?.keys ?? ["TG0D","TG0P"])
             }
         }
         if needLoad {
@@ -308,5 +325,26 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
                 if ok { post() }
             }
         }
+    }
+    
+    // MARK: - Helpers для sysctl
+    
+    /// Хелпер для sysctl-строк.
+    private static func sysctlStr(_ name: String) -> String {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "—" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "—" }
+        return String(cString: buf)
+    }
+    
+    /// Определить архитектуру (arm64/x86_64).
+    private static func architecture() -> String {
+        var size = 0
+        guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.machine", &buf, &size, nil, 0) == 0 else { return "unknown" }
+        let machine = String(cString: buf)
+        return machine.hasPrefix("arm") ? "arm64" : "x86_64"
     }
 }

@@ -1,0 +1,7 @@
+{
+  "model": "MacBookAir10,1",
+  "architecture": "arm64",
+  "macOS": "placeholder",
+  "smcAvailable": true,
+  "keys": []
+}

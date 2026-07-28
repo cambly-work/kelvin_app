@@ -81,7 +81,21 @@ struct ProfileD: Codable {
 }
 
 let gSMC = SMC()
-let gFanCount = Int(gSMC.read("FNum") ?? 0)
+
+// Определить количество вентиляторов с учётом fanless-моделей.
+// FNum может отсутствовать на некоторых моделях — это не ошибка.
+let gFanCount: Int = {
+    guard gSMC.available else { return 0 }
+    // Попробовать прочитать FNum. Если ключ отсутствует или равен 0 — это может быть fanless Mac.
+    if let fnum = gSMC.read("FNum"), fnum > 0 {
+        return Int(fnum)
+    }
+    // Fallback: проверить наличие хотя бы одного F0Ac.
+    if let ac = gSMC.read("F0Ac"), ac > 1 {
+        return 1  // Минимум один вентилятор обнаружен
+    }
+    return 0  // Вентиляторы не обнаружены (fanless или данные недоступны)
+}()
 var gProfilePath = ""
 var gDry = false
 var gSignalSources: [DispatchSourceSignal] = []
