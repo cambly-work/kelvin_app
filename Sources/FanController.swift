@@ -122,7 +122,7 @@ enum FanController {
     static let defaultAlertKeys = ["TCXC", "TC0E", "TG0D"]
     
     /// Получить hw.model.
-    private static func sysctlStr(_ name: String) -> String {
+    static func sysctlStr(_ name: String) -> String {
         var size = 0
         guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
         var buf = [CChar](repeating: 0, count: size)
@@ -131,7 +131,7 @@ enum FanController {
     }
     
     /// Определить архитектуру (arm64/x86_64).
-    private static func architecture() -> String {
+    static func architecture() -> String {
         var size = 0
         guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0, size > 0 else { return "unknown" }
         var buf = [CChar](repeating: 0, count: size)

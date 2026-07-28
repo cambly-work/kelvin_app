@@ -686,9 +686,3 @@ final class LangSwitcher {
         otherKeySinceTrigger = false
     }
 }
-
-// MARK: - Helpers for LangRuntimeStatus
-
-private extension LangSwitcher {
-    var isTrusted: Bool { AXIsProcessTrusted() }
-}

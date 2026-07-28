@@ -41,12 +41,13 @@ enum DiagnosticReport {
 
         // — Оборудование и SMC —
         h(L("Оборудование и SMC"))
-        let smcAvailable = SMCReader.shared.available
+        let smc = EnergyModel.smc
+        let smcAvailable = smc.available
         kv("SMC available", smcAvailable ? L("да") : L("нет"))
         
         if smcAvailable {
             // Получаем каталог ключей (ограниченно, не полный перебор)
-            let catalogKeys = SMCReader.shared.enumerateKeys().prefix(200).map { $0 }
+            let catalogKeys = Array(SensorCatalog.catalog().prefix(200))
             kv(L("Ключей в каталоге"), "\(catalogKeys.count)")
             
             // Resolved sensor set
@@ -54,7 +55,7 @@ enum DiagnosticReport {
                 model: model,
                 architecture: arch,
                 catalog: catalogKeys,
-                values: [:] // значения читаются внутри resolver при необходимости
+                readValue: { smc.read($0) }
             )
             
             // Cooling topology
@@ -68,7 +69,7 @@ enum DiagnosticReport {
             }
             
             // FNum если доступен
-            if let fnum = SMCReader.shared.readDouble("FNum") {
+            if let fnum = smc.read("FNum") {
                 kv("FNum", "\(Int(fnum))")
             }
             
@@ -81,7 +82,7 @@ enum DiagnosticReport {
                     let roleName = roleDisplayName(role)
                     let confidenceName = confidenceDisplayName(sensor.confidence)
                     s += "- **\(roleName)**: `\(sensor.keys.joined(separator: ", "))` · \(confidenceName)\n"
-                    if let value = sensor.keys.compactMap({ SMCReader.shared.readDouble($0) }).first {
+                    if let value = sensor.keys.compactMap({ smc.read($0) }).first {
                         s += "  - " + String(format: "%.1f °C", value) + "\n"
                     }
                 }
@@ -90,8 +91,8 @@ enum DiagnosticReport {
             // Сырой каталог (температурные и fan ключи)
             s += "\n### " + L("Доступные датчики (сырой каталог)") + "\n\n"
             let tempAndFanKeys = catalogKeys.filter { key in
-                let type = String(cString: key.type)
-                return type.hasPrefix("sp") || type.hasPrefix("flt") || key.fourCC.hasPrefix("T") || key.fourCC.hasPrefix("F")
+                key.smcType.hasPrefix("sp") || key.smcType.hasPrefix("flt")
+                    || key.fourCC.hasPrefix("T") || key.fourCC.hasPrefix("F")
             }
             if tempAndFanKeys.isEmpty {
                 s += "_" + L("Температурные и fan ключи не найдены.") + "_\n"
@@ -99,11 +100,11 @@ enum DiagnosticReport {
                 s += "| FourCC | Тип | Размер | Значение |\n"
                 s += "|--------|-----|--------|----------|\n"
                 for key in tempAndFanKeys.prefix(50) { // ограничим 50 для читаемости
-                    let fourCC = String(cString: key.fourCC)
-                    let type = String(cString: key.type)
-                    let size = Int(key.size)
+                    let fourCC = key.fourCC
+                    let type = key.smcType
+                    let size = smc.typeInfo(fourCC)?.size ?? 0
                     let valueStr: String
-                    if let value = SMCReader.shared.readDouble(fourCC) {
+                    if let value = smc.read(fourCC) {
                         if type.hasPrefix("sp78") {
                             valueStr = String(format: "%.1f", value)
                         } else if fourCC.hasPrefix("F") && fourCC.contains("Ac") {

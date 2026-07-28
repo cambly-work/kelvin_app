@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 
 /// Наблюдаемый статус работы автоязыка в runtime.
 /// Потокобезопасен для чтения из UI (main) и записи из background tap thread.
-public enum LangRuntimeStatus: Equatable {
+enum LangRuntimeStatus: Equatable {
     /// Автоязык выключен пользователем
     case off
     /// Нужна лицензия Pro (trial истёк или не активирован)
@@ -22,7 +22,7 @@ public enum LangRuntimeStatus: Equatable {
     /// Event tap создан, но не слушает (paused/blocked)
     case tapFailed
     
-    public var localizedDescription: String {
+    var localizedDescription: String {
         switch self {
         case .off:
             return L("Выключено")
@@ -43,36 +43,36 @@ public enum LangRuntimeStatus: Equatable {
         }
     }
     
-    public var isWorking: Bool {
+    var isWorking: Bool {
         if case .active = self { return true }
         return false
     }
 }
 
 /// Наблюдаемое состояние автоязыка — потокобезопасный snapshot для UI.
-public struct LangSwitcherStatus: Equatable {
+struct LangSwitcherStatus {
     /// Сохранённый режим (off/hotkey/auto)
-    public let savedMode: LangSwitcher.Mode
+    let savedMode: LangSwitcher.Mode
     /// Фактический runtime status
-    public let runtimeStatus: LangRuntimeStatus
+    let runtimeStatus: LangRuntimeStatus
     /// Доступность Pro/trial
-    public let hasProAccess: Bool
+    let hasProAccess: Bool
     /// Разрешение Accessibility
-    public let accessibilityTrusted: Bool
+    let accessibilityTrusted: Bool
     /// Event tap активен
-    public let tapActive: Bool
+    let tapActive: Bool
     /// Количество восстановлений tap
-    public let recoveries: Int
+    let recoveries: Int
     /// Количество неудач создания tap
-    public let creationFailures: Int
+    let creationFailures: Int
     /// Текущий input source ID
-    public let currentSourceID: String?
+    let currentSourceID: String?
     /// Список доступных раскладок (локализованное имя + ID)
-    public let availableLayouts: [(name: String, id: String, language: String?)]
+    let availableLayouts: [(name: String, id: String, language: String?)]
     /// Найденные пары source/target для конвертации
-    public let conversionPairs: [(from: String, to: String)]
+    let conversionPairs: [(from: String, to: String)]
     
-    public init(
+    init(
         savedMode: LangSwitcher.Mode,
         runtimeStatus: LangRuntimeStatus,
         hasProAccess: Bool,
@@ -97,7 +97,7 @@ public struct LangSwitcherStatus: Equatable {
     }
     
     /// Сформировать текущий статус из LangSwitcher и Licensing.
-    public static func current() -> LangSwitcherStatus {
+    static func current() -> LangSwitcherStatus {
         let switcher = LangSwitcher.shared
         let savedMode = switcher.mode
         
@@ -149,12 +149,12 @@ public struct LangSwitcherStatus: Equatable {
                   let name = source[kTISPropertyLocalizedName as String] as? String else {
                 return nil
             }
-            let language = source[kTISPropertyPrimaryLanguage as String] as? String
+            let language = source["language"] as? String
             return (name: name, id: id, language: language)
         }
         
         // Conversion pairs (из LayoutMap)
-        let conversionPairs = LayoutMap.shared.knownPairs.map { (from: $0.key, to: $0.value) }
+        let conversionPairs = LayoutMap.knownPairs.map { (from: $0.key, to: $0.value) }
         
         return LangSwitcherStatus(
             savedMode: savedMode,

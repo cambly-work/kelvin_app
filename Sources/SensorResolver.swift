@@ -89,26 +89,6 @@ struct ResolvedSensorSet: Equatable {
     }
 }
 
-/// Абстракция каталога SMC для тестируемости resolver.
-protocol SMCInventory {
-    var available: Bool { get }
-    func keys() -> [CatalogKey]
-    func read(_ key: String) -> Double?
-}
-
-/// Расширение SMC для соответствия SMCInventory.
-extension SMC: SMCInventory {
-    func keys() -> [CatalogKey] {
-        // SMCReader не возвращает CatalogKey напрямую — это ограничение.
-        // Для продакшена используем статический метод resolve с сырыми данными.
-        return []
-    }
-    
-    func read(_ key: String) -> Double? {
-        return self.read(key)
-    }
-}
-
 /// SensorResolver: многоуровневый маппинг моделей → физические роли.
 ///
 /// Порядок разрешения:
@@ -270,7 +250,7 @@ enum SensorResolver {
     }
     
     /// Найти маппинг для модели.
-    private static func findMapping(for model: String, _ architecture: String) -> SensorMapping? {
+    private static func findMapping(for model: String, architecture: String) -> SensorMapping? {
         for m in modelMappings {
             // Проверка архитектуры.
             if let arch = m.architecture, arch != architecture {

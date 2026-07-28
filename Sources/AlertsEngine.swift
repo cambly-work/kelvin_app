@@ -175,8 +175,8 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
             let smc = EnergyModel.smc
             if smc.available {
                 // Использовать resolved sensor set для получения подтверждённых ключей.
-                let model = sysctlStr("hw.model")
-                let arch = architecture()
+                let model = Self.sysctlStr("hw.model")
+                let arch = Self.architecture()
                 let catalog = SensorCatalog.build()
                 let resolved = SensorResolver.resolve(
                     model: model,

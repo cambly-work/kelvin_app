@@ -53,7 +53,7 @@ enum InputSources {
             var dict: [String: Any] = [:]
             if let id = str(source, kTISPropertyInputSourceID) { dict[kTISPropertyInputSourceID as String] = id }
             if let name = str(source, kTISPropertyLocalizedName) { dict[kTISPropertyLocalizedName as String] = name }
-            if let lang = str(source, kTISPropertyPrimaryLanguage) { dict[kTISPropertyPrimaryLanguage as String] = lang }
+            if let lang = strings(source, kTISPropertyInputSourceLanguages)?.first { dict["language"] = lang }
             if let enabled = bool(source, kTISPropertyInputSourceIsEnabled) { dict["enabled"] = enabled }
             return dict.isEmpty ? nil : dict
         }
@@ -79,5 +79,9 @@ enum InputSources {
     private static func bool(_ s: TISInputSource, _ key: CFString) -> Bool? {
         guard let p = TISGetInputSourceProperty(s, key) else { return nil }
         return CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque(p).takeUnretainedValue())
+    }
+    private static func strings(_ s: TISInputSource, _ key: CFString) -> [String]? {
+        guard let p = TISGetInputSourceProperty(s, key) else { return nil }
+        return Unmanaged<CFArray>.fromOpaque(p).takeUnretainedValue() as? [String]
     }
 }

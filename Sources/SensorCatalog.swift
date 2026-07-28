@@ -183,6 +183,11 @@ enum SensorCatalog {
         return out
     }
 
+    /// Совместимое имя для потребителей resolver, добавленных отдельной веткой.
+    static func build() -> [CatalogKey] {
+        catalog()
+    }
+
     private static func classOrder(_ c: SensorClass) -> Int {
         switch c {
         case .temp: return 0; case .volt: return 1; case .curr: return 2
