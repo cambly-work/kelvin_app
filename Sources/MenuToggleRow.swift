@@ -48,6 +48,7 @@ final class MenuToggleRow: NSView {
         addSubview(icon)
 
         label.stringValue = title
+        label.toolTip = title
         label.font = .menuFont(ofSize: 13)
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false

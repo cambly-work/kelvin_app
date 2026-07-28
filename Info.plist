@@ -25,8 +25,8 @@
     <!-- Sparkle updater settings -->
     <key>SUFeedURL</key>
     <string>https://trykelvin.com/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string><!-- INSERT_PUBLIC_ED_KEY_HERE --></string>
+    <!-- Before a production release, add SUPublicEDKey generated for the release channel.
+         Keeping a placeholder inside a <string> makes this plist invalid. -->
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUHasLaunchedBefore</key>

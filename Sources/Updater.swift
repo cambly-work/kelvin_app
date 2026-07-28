@@ -38,7 +38,7 @@ final class SparkleUpdater: UpdateProviding {
     }
     
     var canCheckForUpdates: Bool {
-        return controller.canCheckForUpdates
+        return controller.updater.canCheckForUpdates
     }
     
     func checkInBackground() {
@@ -93,7 +93,8 @@ enum Updater {
         }
         set { 
             d.set(newValue, forKey: "updates.auto")
-            getSparkle().automaticallyChecksForUpdates = newValue
+            if sparkle == nil { sparkle = SparkleUpdater() }
+            sparkle!.automaticallyChecksForUpdates = newValue
         }
     }
     

@@ -139,6 +139,30 @@ enum Connections {
                 return (ra.icon, ra.localizedName ?? proc)
             }
         }
+        // Helper/WebContent-процессы и сгруппированные названия должны сохранять настоящую иконку
+        // родительского .app. Сначала мягко сопоставляем с уже запущенным приложением.
+        let family = needle
+            .replacingOccurrences(of: " helper", with: "")
+            .replacingOccurrences(of: " web content", with: "")
+        for ra in NSWorkspace.shared.runningApplications {
+            guard let ln = ra.localizedName?.lowercased() else { continue }
+            if ln.hasPrefix(family) || family.hasPrefix(ln) {
+                return (ra.icon, ra.localizedName ?? proc)
+            }
+        }
+        // Известные Electron/browser family могут иметь бинарь, не совпадающий с display name.
+        let knownBundles: [(prefixes: [String], id: String)] = [
+            (["visual studio code", "code"], "com.microsoft.VSCode"),
+            (["firefox"], "org.mozilla.firefox"),
+            (["google chrome", "chrome"], "com.google.Chrome"),
+            (["chatgpt"], "com.openai.chat"),
+            (["safari"], "com.apple.Safari"),
+        ]
+        if let hit = knownBundles.first(where: { entry in entry.prefixes.contains { needle.hasPrefix($0) } }),
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: hit.id) {
+            return (NSWorkspace.shared.icon(forFile: url.path),
+                    FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: ""))
+        }
         return (nil, proc)
     }
 

@@ -114,16 +114,18 @@ final class CorrectionChoiceHUD {
     static let shared = CorrectionChoiceHUD()
 
     private let panel: NSPanel
+    private let statusIcon = NSImageView()
+    private let statusLabel = NSTextField(labelWithString: L("Исправлено"))
     private let correctedLabel = NSTextField(labelWithString: "")
     private let originalLabel = NSTextField(labelWithString: "")
-    private let restoreButton = GlassButton(title: L("Вернуть"), symbol: "arrow.uturn.backward", accentText: true)
+    private let restoreButton = GlassButton(title: "", symbol: "arrow.uturn.backward", accentText: true)
     private let closeButton = GlassButton(title: "", symbol: "xmark")
     private var hideWork: DispatchWorkItem?
     private var correctionID: UUID?
 
     private init() {
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 82),
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 60),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
@@ -146,20 +148,34 @@ final class CorrectionChoiceHUD {
         blur.layer?.masksToBounds = true
         blur.translatesAutoresizingMaskIntoConstraints = false
 
+        statusIcon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
+        statusIcon.contentTintColor = .systemTeal
+        statusIcon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
+        statusIcon.translatesAutoresizingMaskIntoConstraints = false
+
+        statusLabel.font = Design.Font.microStat
+        statusLabel.textColor = .secondaryLabelColor
+
         correctedLabel.font = Design.Font.calloutEmph
         correctedLabel.textColor = .labelColor
         correctedLabel.lineBreakMode = .byTruncatingMiddle
         originalLabel.font = Design.Font.callout
-        originalLabel.textColor = .secondaryLabelColor
+        originalLabel.textColor = .tertiaryLabelColor
         originalLabel.lineBreakMode = .byTruncatingMiddle
 
         let arrow = NSTextField(labelWithString: "→")
         arrow.font = Design.Font.callout
         arrow.textColor = .tertiaryLabelColor
-        let words = NSStackView(views: [correctedLabel, arrow, originalLabel])
+        // Нативное направление чтения: было → стало. Исходное слово тихое и зачёркнуто,
+        // исправленное — единственный акцент.
+        let words = NSStackView(views: [originalLabel, arrow, correctedLabel])
         words.orientation = .horizontal
         words.alignment = .centerY
-        words.spacing = 6
+        words.spacing = 5
+        let caption = NSStackView(views: [statusLabel, words])
+        caption.orientation = .vertical
+        caption.alignment = .leading
+        caption.spacing = 1
 
         restoreButton.onClick = { [weak self] in
             guard let self, let id = self.correctionID else { return }
@@ -173,48 +189,54 @@ final class CorrectionChoiceHUD {
         }
         // Accessibility: the close button needs a label since title is ""
         closeButton.setAccessibilityLabel(L("Закрыть"))
+        restoreButton.setAccessibilityLabel(L("Вернуть"))
+        restoreButton.toolTip = L("Вернуть")
+        closeButton.toolTip = L("Оставить исправление")
 
-        let topRow = NSStackView(views: [words, NSView(), closeButton])
-        topRow.orientation = .horizontal
-        topRow.alignment = .centerY
-        topRow.spacing = 8
-
-        let column = NSStackView(views: [topRow, restoreButton])
-        column.orientation = .vertical
-        column.alignment = .trailing
-        column.spacing = 6
+        let row = NSStackView(views: [statusIcon, caption, NSView(), restoreButton, closeButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
 
         let root = NSView()
         root.addSubview(blur)
-        blur.addSubview(column)
+        blur.addSubview(row)
         panel.contentView = root
         NSLayoutConstraint.activate([
             blur.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             blur.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             blur.topAnchor.constraint(equalTo: root.topAnchor),
             blur.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            column.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 12),
-            column.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -12),
-            column.topAnchor.constraint(equalTo: blur.topAnchor, constant: 10),
-            column.bottomAnchor.constraint(equalTo: blur.bottomAnchor, constant: -10),
-            restoreButton.heightAnchor.constraint(equalToConstant: 28),
-            closeButton.widthAnchor.constraint(equalToConstant: 28),
-            closeButton.heightAnchor.constraint(equalToConstant: 28),
+            row.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -10),
+            row.centerYAnchor.constraint(equalTo: blur.centerYAnchor),
+            statusIcon.widthAnchor.constraint(equalToConstant: 18),
+            statusIcon.heightAnchor.constraint(equalToConstant: 18),
+            restoreButton.widthAnchor.constraint(equalToConstant: 30),
+            restoreButton.heightAnchor.constraint(equalToConstant: 30),
+            closeButton.widthAnchor.constraint(equalToConstant: 26),
+            closeButton.heightAnchor.constraint(equalToConstant: 26),
         ])
     }
 
     func show(original: String, corrected: String, id: UUID) {
         correctionID = id
         correctedLabel.stringValue = corrected
-        originalLabel.stringValue = original
+        originalLabel.attributedStringValue = NSAttributedString(
+            string: original,
+            attributes: [
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            ]
+        )
 
         let wordsWidth = min(
-            190,
+            220,
             correctedLabel.intrinsicContentSize.width
                 + originalLabel.intrinsicContentSize.width + 22
         )
-        let width = max(260, min(420, wordsWidth + 130))
-        let size = NSSize(width: width, height: 70)
+        let width = max(270, min(430, wordsWidth + 122))
+        let size = NSSize(width: width, height: 60)
         let origin = positionForHUD()
         let screen = NSScreen.screens.first(where: { $0.frame.contains(origin) }) ?? NSScreen.main
         guard let screen else { return }
@@ -238,6 +260,23 @@ final class CorrectionChoiceHUD {
         }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: work)
+    }
+
+    /// Офскрин-снимок состояния исправления для визуального QA.
+    @discardableResult
+    func renderSnapshot(to directory: String, light: Bool) -> Bool {
+        show(original: "превет", corrected: "привет", id: UUID())
+        if light { panel.appearance = NSAppearance(named: .aqua) }
+        guard let view = panel.contentView else { dismiss(); return false }
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            dismiss(); return false
+        }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let data = rep.representation(using: .png, properties: [:])
+        dismiss()
+        guard let data else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: directory + "/Z_correction_hud.png"))) != nil
     }
 
     private func dismiss() {

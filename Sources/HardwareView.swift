@@ -971,11 +971,11 @@ private final class EngineRowView: NSView {
 /// documentView с сотнями постоянных строк. Это уменьшает layer tree, tracking areas и стоимость
 /// скролла, при этом внешний API HardwareView сохранён.
 final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    static let panelH: CGFloat = 340
+    static let panelH: CGFloat = 232
 
     private enum Layout {
         static let intrinsicWidth: CGFloat = 272
-        static let minimumPanelHeight: CGFloat = 176
+        static let minimumPanelHeight: CGFloat = 198
         static let headerHeight: CGFloat = 72
         static let searchHeight: CGFloat = 24
         static let searchGap: CGFloat = 7
@@ -1002,12 +1002,12 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
     }
 
     private static let sectionDefinitions: [SectionDefinition] = [
-        .init(key: "temp", title: L("Температуры"), sensorClass: .temp, rawOnly: false, defaultExpanded: true),
-        .init(key: "volt", title: L("Вольтажи"), sensorClass: .volt, rawOnly: false, defaultExpanded: true),
-        .init(key: "curr", title: L("Токи"), sensorClass: .curr, rawOnly: false, defaultExpanded: true),
-        .init(key: "power", title: L("Питание"), sensorClass: .power, rawOnly: false, defaultExpanded: true),
-        .init(key: "fan", title: L("Вентиляторы"), sensorClass: .fan, rawOnly: false, defaultExpanded: true),
-        .init(key: "batt", title: L("Нагрузка"), sensorClass: .batt, rawOnly: false, defaultExpanded: true),
+        .init(key: "temp", title: L("Температуры"), sensorClass: .temp, rawOnly: false, defaultExpanded: false),
+        .init(key: "fan", title: L("Вентиляторы"), sensorClass: .fan, rawOnly: false, defaultExpanded: false),
+        .init(key: "power", title: L("Питание"), sensorClass: .power, rawOnly: false, defaultExpanded: false),
+        .init(key: "volt", title: L("Вольтажи"), sensorClass: .volt, rawOnly: false, defaultExpanded: false),
+        .init(key: "curr", title: L("Токи"), sensorClass: .curr, rawOnly: false, defaultExpanded: false),
+        .init(key: "batt", title: L("Нагрузка"), sensorClass: .batt, rawOnly: false, defaultExpanded: false),
         .init(key: "raw", title: L("Сырые ключи"), sensorClass: nil, rawOnly: true, defaultExpanded: false),
     ]
 
@@ -1137,17 +1137,17 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
     }
 
     private func buildHeader() {
-        let heroRow = NSStackView(views: [gauges[0], gauges[1]])
-        heroRow.orientation = .horizontal
-        heroRow.distribution = .fillEqually
-        heroRow.spacing = 6
+        let firstRow = NSStackView(views: [gauges[0], gauges[1]])
+        firstRow.orientation = .horizontal
+        firstRow.distribution = .fillEqually
+        firstRow.spacing = 6
 
-        let chipRow = NSStackView(views: [gauges[2], gauges[3], gauges[4]])
-        chipRow.orientation = .horizontal
-        chipRow.distribution = .fillEqually
-        chipRow.spacing = 5
+        let secondRow = NSStackView(views: [gauges[3], gauges[4]])
+        secondRow.orientation = .horizontal
+        secondRow.distribution = .fillEqually
+        secondRow.spacing = 6
 
-        let header = NSStackView(views: [heroRow, chipRow])
+        let header = NSStackView(views: [firstRow, secondRow])
         header.orientation = .vertical
         header.distribution = .fill
         header.spacing = 5
@@ -1159,8 +1159,8 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
             header.leadingAnchor.constraint(equalTo: leadingAnchor),
             header.trailingAnchor.constraint(equalTo: trailingAnchor),
             header.heightAnchor.constraint(equalToConstant: Layout.headerHeight),
-            heroRow.heightAnchor.constraint(equalToConstant: 43),
-            chipRow.heightAnchor.constraint(equalToConstant: 24),
+            firstRow.heightAnchor.constraint(equalToConstant: 43),
+            secondRow.heightAnchor.constraint(equalToConstant: 24),
         ])
     }
 
@@ -1583,18 +1583,14 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
             kind: .watt
         )
 
-        let frequencyFraction = lastComponents.fresh ? lastComponents.freqFraction : nil
-        let load = SystemUsage.shared.cpu()
-        let throttling = (frequencyFraction ?? 1) < 0.90 && load > 0.75
+        let fanRPM = lastSnapshot.fans.map(\.value).max()
         gauges[4].set(
-            value: frequencyFraction,
-            text: frequencyFraction.map { String(format: "%.0f%%", $0 * 100) } ?? "—",
-            cap: throttling ? L("Троттлинг") : L("Частота"),
-            kind: throttling ? .turboWarn : .turbo
+            value: fanRPM.map { min($0 / 6_000, 1) },
+            text: fanRPM.map { String(format: "%.0f", $0) } ?? "—",
+            cap: L("Кулер, об/мин"),
+            kind: .turbo
         )
-        gauges[4].toolTip = throttling
-            ? L("Частота ниже базовой при высокой нагрузке — вероятен троттлинг.")
-            : L("Частота относительно базовой; значение выше 100% означает турбо-буст.")
+        gauges[4].toolTip = L("Максимальная скорость среди активных вентиляторов.")
     }
 
     func animateIn() {

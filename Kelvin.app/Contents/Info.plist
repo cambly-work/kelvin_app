@@ -22,22 +22,20 @@
     <key>NSAppleEventsUsageDescription</key>
     <string>Kelvin использует системные команды для переключателей (тёмная тема, Night Shift и др.).</string>
     
-    <!-- Sparkle Update Framework -->
+    <!-- Sparkle updater settings -->
     <key>SUFeedURL</key>
     <string>https://trykelvin.com/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>HAPOoVYrVY0BjcK3UXKi8ydp9kG/M2+DvM6HckfJ6n8=</string>
+    <!-- Before a production release, add SUPublicEDKey generated for the release channel.
+         Keeping a placeholder inside a <string> makes this plist invalid. -->
     <key>SUEnableAutomaticChecks</key>
     <true/>
-    <key>SUAutomaticallyUpdate</key>
-    <false/>
-    <key>SUVerifyUpdateBeforeExtraction</key>
+    <key>SUHasLaunchedBefore</key>
     <true/>
-    <key>SURequireSignedFeed</key>
-    <true/>
-    <key>SUEnableSystemProfiling</key>
-    <false/>
     <key>SUSendProfileInfo</key>
     <false/>
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>

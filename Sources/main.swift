@@ -526,6 +526,8 @@ final class DossierRowView: NSView {
     /// Принудительно снести ховер-оверлей (O6): строка выпадает из топа под курсором — иначе панель
     /// осиротела бы над лидербордом до следующего ховера. Зовётся из эвикт-цикла renderAppRows.
     func dismissOverlay() { hideExpand() }
+    /// Визуальный QA использует тот же путь построения, что и настоящее наведение.
+    func showPreviewForSnapshot() { showExpand() }
 
     /// Ховер-раскрытие ОВЕРЛЕЕМ (не в стеке): показывает CPU/MEM/потоки/страны под самой строкой,
     /// поверх соседей. Не меняет высоту appsStack/поповера (fittingSize-инвариант держится).
@@ -534,7 +536,12 @@ final class DossierRowView: NSView {
         expanded = true
         let panel = NSView()
         panel.wantsLayer = true
-        panel.layer?.backgroundColor = Design.Color.surfaceFill(isDark).cgColor
+        // Оверлей находится поверх соседних строк. Непрозрачная локальная поверхность
+        // не даёт тексту быстрого просмотра смешиваться с показателями под ним.
+        panel.layer?.backgroundColor = NSColor(
+            calibratedWhite: isDark ? 0.17 : 0.96,
+            alpha: 1
+        ).cgColor
         panel.layer?.cornerRadius = Design.Radius.chip
         panel.layer?.cornerCurve = .continuous
         panel.layer?.borderWidth = 1
@@ -549,9 +556,13 @@ final class DossierRowView: NSView {
             content.topAnchor.constraint(equalTo: panel.topAnchor, constant: 7),
             content.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -7),
         ])
-        // Кладём в верхний host (обёртка appsStack) с z поверх соседей; якорим под строкой.
-        guard let host = superview else { return }
-        host.addSubview(panel, positioned: .above, relativeTo: self)
+        // Кладём в самый верх host, а не просто «над текущей строкой». Иначе строки,
+        // расположенные после неё в NSStackView, остаются выше панели и рисуют текст
+        // поверх её фона — это выглядит как полупрозрачность, хотя заливка непрозрачна.
+        // Host списка не включает нижнюю сводку CPU/памяти. Берём поверхность всей
+        // apps-плитки, чтобы и эта соседняя секция гарантированно оставалась под карточкой.
+        guard let host = owner?.appsPreviewOverlayHost() ?? superview else { return }
+        host.addSubview(panel, positioned: .above, relativeTo: nil)
         NSLayoutConstraint.activate([
             panel.leadingAnchor.constraint(equalTo: leadingAnchor),
             panel.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -559,11 +570,11 @@ final class DossierRowView: NSView {
         ])
         overlay = panel
         if !Motion.reduced {
-            panel.alphaValue = 0
+            // Только геометрическое появление: fade здесь недопустим, поскольку панель
+            // перекрывает числовые строки и в промежуточных кадрах смешивает два текста.
             panel.layer?.setAffineTransform(CGAffineTransform(translationX: 0, y: 4))
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = Design.Motion.durFast
-                panel.animator().alphaValue = 1
                 panel.layer?.setAffineTransform(.identity)
             }
         }
@@ -571,11 +582,8 @@ final class DossierRowView: NSView {
     private func hideExpand() {
         guard let panel = overlay else { return }
         overlay = nil; expanded = false
-        if Motion.reduced { panel.removeFromSuperview(); return }
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = Design.Motion.durFast
-            panel.animator().alphaValue = 0
-        }, completionHandler: { panel.removeFromSuperview() })
+        // Удаляем сразу: fade-out снова проявил бы список сквозь текст карточки.
+        panel.removeFromSuperview()
     }
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
@@ -712,6 +720,7 @@ final class PopoverController: NSViewController {
     private let appsFootProcs = NSTextField(labelWithString: "—")
     private let appsFootCPU = NSTextField(labelWithString: "—")
     private let appsFootMem = NSTextField(labelWithString: "—")
+    private let hardwareStatus = NSTextField(labelWithString: "")
     private let appsTotalSpark = MiniSpark()
     private let appsUpdatedLabel = NSTextField(labelWithString: "")
     private var appsUpdatedAt: Date?
@@ -853,6 +862,12 @@ final class PopoverController: NSViewController {
         }
         col.widthAnchor.constraint(equalToConstant: IW - 20).isActive = true
         return col
+    }
+
+    /// Верхняя поверхность всей apps-плитки: список + шов + системная сводка.
+    /// Нужна hover-карточке, чтобы её z-порядок был выше всех этих соседей.
+    func appsPreviewOverlayHost() -> NSView? {
+        appsFlipHost?.superview ?? appsFlipHost
     }
 
     override func loadView() {
@@ -1091,10 +1106,8 @@ final class PopoverController: NSViewController {
             container.translatesAutoresizingMaskIntoConstraints = false
             container.widthAnchor.constraint(equalToConstant: CW).isActive = true
             tabContainer = container
-            // Замер: временно добавляем все плитки (top+бока), меряем; maxH (без «Железа») ужимает панель «Железа»,
-            // чтобы она не была монстром. Затем убираем все и показываем только выбранную (showTab пинует и низ).
-            var maxH: CGFloat = 0
-            var hardwareTile: NSView?
+            // Временно строим плитки для кэша. Каждая вкладка сохраняет собственную естественную
+            // высоту: короткие «Приложения» и «Железо» больше не растягиваются по самому высокому соседу.
             for (i, item) in tabs.enumerated() {
                 if let tile = buildModule(item.id) {
                     tile.translatesAutoresizingMaskIntoConstraints = false
@@ -1106,20 +1119,7 @@ final class PopoverController: NSViewController {
                     ])
                     tabTiles[i] = tile
                     tile.layoutSubtreeIfNeeded()
-                    if item.id == "hardware" { hardwareTile = tile }
-                    else { maxH = max(maxH, tile.fittingSize.height) }
                 }
-            }
-            if let hw = hardwareTile {
-                // «хром» = всё в плитке, КРОМЕ панели. Считаем от ЖИВОЙ высоты панели (currentPanelHeight),
-                // а НЕ от статической panelH — иначе дрейф panelHeight осциллировал высоту (баг «растяжения»).
-                let chrome = hw.fittingSize.height - sensorsView.currentPanelHeight
-                if maxH > 0 { sensorsView.setPanelHeight(maxH - chrome); hw.layoutSubtreeIfNeeded() }
-            }
-            // «Приложения» короче остальных → поповер «урезался» при переключении. Пол = maxH:
-            // glassTile(fill:true) пинует контент top, bottom «не ниже» — плитка тянется, контент сверху.
-            if maxH > 0, let idx = tabs.firstIndex(where: { $0.id == "apps" }), let t = tabTiles[idx] {
-                t.heightAnchor.constraint(greaterThanOrEqualToConstant: maxH).isActive = true
             }
             // Оставляем в контейнере ТОЛЬКО показанную вкладку → контейнер = её высоте (адаптивно).
             for (_, t) in tabTiles { t.removeFromSuperview() }
@@ -1190,6 +1190,10 @@ final class PopoverController: NSViewController {
             for (i, tid) in order.enumerated() {
                 currentTab = i
                 showTab(i)                               // в контейнере только показанная вкладка (адаптивная высота)
+                // Snapshot должен проходить тот же путь визуального состояния, что и живой selectTab:
+                // иначе на всех PNG оставались заголовок и подсветка первой вкладки «Питание».
+                tabTitleLabel.stringValue = Self.tabLabel(tid)
+                tabBar?.select(i, animated: false)
                 if tid == "hardware" { sensorsView.animateIn() }
                 if tid == "apps" { refreshApps() }
                 if tid == "history" { refreshHistory() }
@@ -1205,6 +1209,12 @@ final class PopoverController: NSViewController {
                 updatePreferredSize()
                 pumpRunLoop(2.5)                        // тик данных этой вкладки (apps-лидерборд/flow медленнее)
                 shot(tid)
+                if tid == "apps", let row = appRows.values.first {
+                    row.showPreviewForSnapshot()
+                    self.view.layoutSubtreeIfNeeded()
+                    shot("apps_hover")
+                    row.dismissOverlay()
+                }
             }
         }
         return n
@@ -1269,8 +1279,14 @@ final class PopoverController: NSViewController {
         // Высоту берём от НАТУРАЛЬНОГО контента (root), а не от раздутого view.fittingSize (скролл его не отражает).
         // Кап по видимой высоте экрана: выше кэпа контент ЛИСТАЕТСЯ, ниже — поповер ровно по контенту (адаптивно).
         let sz = root.fittingSize
-        let screenH = (view.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
-        let cap = max(320, screenH - 40)
+        // До появления окна `view.window?.screen` nil. В мультимониторной конфигурации берём экран
+        // под курсором, иначе вторичный небольшой дисплей наследовал высоту основного.
+        let mouse = NSEvent.mouseLocation
+        let targetScreen = view.window?.screen
+            ?? NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+            ?? NSScreen.main
+        let screenH = targetScreen?.visibleFrame.height ?? 900
+        let cap = max(300, screenH - 72)
         preferredContentSize = NSSize(width: sz.width, height: min(sz.height, cap))
     }
     private func buildModule(_ id: String) -> NSView? {
@@ -2139,8 +2155,20 @@ final class PopoverController: NSViewController {
     private func buildHardwareTile() -> NSView {
         // ватты CPU/GPU/DRAM приходят из хелпера; температуры/вентиляторы/нагрузка — без него.
         comp = [:]
-        let hw: [NSView] = [Self.sectionLabel(L("Видеокарта")), gpuStatusView(),
-                            Self.sectionLabel(L("Сенсоры")), sensorsView, sensorDetail, compStatus, installBtn]
+        hardwareStatus.font = Design.Font.caption
+        hardwareStatus.textColor = .secondaryLabelColor
+        hardwareStatus.alignment = .right
+        hardwareStatus.lineBreakMode = .byTruncatingTail
+        hardwareStatus.translatesAutoresizingMaskIntoConstraints = false
+        let title = Self.sectionLabel(L("Обзор"))
+        let titleRow = NSStackView(views: [title, spacer(), hardwareStatus])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        titleRow.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        let sensorsTitle = Self.sectionLabel(L("Датчики"))
+        let hw: [NSView] = [titleRow, gpuStatusView(), sensorsTitle, sensorsView,
+                            compStatus, installBtn]
         return glassTile(vstack(hw, 8), fill: true)
     }
 
@@ -2237,37 +2265,25 @@ final class PopoverController: NSViewController {
         appsStack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             appsStack.topAnchor.constraint(equalTo: host.topAnchor),
-            appsStack.bottomAnchor.constraint(lessThanOrEqualTo: host.bottomAnchor),
+            appsStack.bottomAnchor.constraint(equalTo: host.bottomAnchor),
             appsStack.leadingAnchor.constraint(equalTo: host.leadingAnchor),
             appsStack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
         ])
         appsFlipHost = host
-        // Резерв высоты под ГЕРОЙ+лидерборд: maxH считается по fittingSize при построении, когда
-        // appsStack ещё пуст (плейсхолдер). Без пола вкладка «Приложения» могла бы обрезать герой,
-        // если другая вкладка ниже. Пол на host = герой 72 + шапка 24 + 5 строк×28 + промежутки ≈ 266.
-        // appsStack пришпилен top + bottom≤host: контент садится сверху, мёртвое место — снизу.
-        host.heightAnchor.constraint(greaterThanOrEqualToConstant: 266).isActive = true
-
-        // — футер-сводка (честные уже-собранные данные): процессов всего / CPU / память + спарк суммарной
-        //   нагрузки за сессию + «обновлено N с назад». Заполняет высоту вкладки и даёт контекст. —
+        // Компактная системная сводка завершает рейтинг и не конкурирует с ним отдельным графиком.
         let statsRow = NSStackView(views: [miniStat(appsFootProcs, NSTextField(labelWithString: L("Процессов"))),
                                            miniStat(appsFootCPU, NSTextField(labelWithString: L("CPU всего"))),
                                            miniStat(appsFootMem, NSTextField(labelWithString: L("Память")))])
         statsRow.distribution = .fillEqually; statsRow.spacing = 8
         statsRow.translatesAutoresizingMaskIntoConstraints = false
         statsRow.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        appsTotalSpark.translatesAutoresizingMaskIntoConstraints = false
-        appsTotalSpark.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        appsTotalSpark.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        appsTotalSpark.toolTip = L("Суммарная нагрузка топ-приложений за сессию")
         appsUpdatedLabel.font = Design.Font.sys(10, .regular)
         appsUpdatedLabel.textColor = .tertiaryLabelColor
         let seam = RimLightView()
         seam.translatesAutoresizingMaskIntoConstraints = false
         seam.widthAnchor.constraint(equalToConstant: IW).isActive = true
         seam.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        return glassTile(vstack([Self.sectionLabel(L("Приложения")), host,
-                                 seam, statsRow, appsTotalSpark, appsUpdatedLabel], 7), fill: true)
+        return glassTile(vstack([host, seam, statsRow, appsUpdatedLabel], 7))
     }
 
     // MARK: плитка быстрых переключателей (Control Center) — встроенные + свои кнопки, по раскладке
@@ -2635,6 +2651,39 @@ final class PopoverController: NSViewController {
 
         // сенсоры уже сняты выше (единый снимок за тик) — просто отдаём во вкладку «Железо»
         sensorsView.update(sensors)
+        let hardwareSignal = worstTempSignal(sensors.temps)
+        switch hardwareSignal.level {
+        case .ok:
+            if let hottest = hardwareSignal.sensor {
+                hardwareStatus.stringValue = String(format: L("Макс. %@"), hottest.text)
+                hardwareStatus.toolTip = String(
+                    format: L("Самый горячий датчик: %@ · %@"),
+                    hottest.name,
+                    hottest.text
+                )
+                hardwareStatus.textColor = .secondaryLabelColor
+            } else {
+                hardwareStatus.stringValue = L("Нет данных температур")
+                hardwareStatus.toolTip = nil
+                hardwareStatus.textColor = .tertiaryLabelColor
+            }
+        case .warn:
+            hardwareStatus.stringValue = hardwareSignal.sensor.map {
+                String(format: L("Высокая: %@"), $0.text)
+            } ?? L("Высокая температура")
+            hardwareStatus.toolTip = hardwareSignal.sensor.map {
+                String(format: L("Высокая температура: %@ · %@"), $0.name, $0.text)
+            }
+            hardwareStatus.textColor = Design.Color.levelWarn
+        case .crit:
+            hardwareStatus.stringValue = hardwareSignal.sensor.map {
+                String(format: L("Перегрев: %@"), $0.text)
+            } ?? L("Перегрев")
+            hardwareStatus.toolTip = hardwareSignal.sensor.map {
+                String(format: L("Перегрев: %@ · %@"), $0.name, $0.text)
+            }
+            hardwareStatus.textColor = Design.Color.levelCrit
+        }
         // живая смена GPU (дискретная↔встроенная) — перекрашиваем строку, пока видна вкладка «Железо»
         if currentTab < tabOrder.count, tabOrder[currentTab] == "hardware" { paintGPU() }
         refreshAppsUpdatedLabel()      // «обновлено N с назад» в футере Приложений тикает каждую секунду
@@ -2804,10 +2853,11 @@ final class PopoverController: NSViewController {
     }
 
     func updateApps(_ apps: [AppEnergy]) {
-        appsLast = apps
         AppSession.pushImpacts(apps)         // сессионная история impact (спарклайн) — из уже-собранного снимка
+        let grouped = groupedApps(apps)
+        appsLast = grouped
         refreshAppFlags()                    // освежаем гео-флаги в фоне (lsof не на main)
-        renderAppRows(apps, animateReorder: true)
+        renderAppRows(grouped, animateReorder: true)
         // футер-сводка (все данные уже собраны этим же снимком/тиком — ноль новых системных чтений)
         AppSession.pushTopTotal(apps.reduce(0) { $0 + $1.impact })
         appsUpdatedAt = Date()
@@ -2817,6 +2867,43 @@ final class PopoverController: NSViewController {
         appsFootMem.stringValue = SystemUsage.shared.ramHistory.last.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
         appsTotalSpark.setHistory(AppSession.topTotalHistory(), tint: Design.Color.accent(isDark))
         refreshAppsUpdatedLabel()
+        // Число сгруппированных строк меняется от снимка к снимку — высота вкладки следует
+        // фактическому списку, а не старому фиксированному резерву.
+        updatePreferredSize()
+    }
+
+    /// `top` возвращает отдельные helper/web-content процессы. Для быстрого рейтинга это шум:
+    /// объединяем их по имени приложения, суммируя расход, CPU, память и потоки.
+    private func groupedApps(_ apps: [AppEnergy]) -> [AppEnergy] {
+        var result: [String: AppEnergy] = [:]
+        for app in apps {
+            let resolved = Connections.resolveByName(app.name).name
+            let display: String = {
+                let candidates = [resolved, app.name]
+                for candidate in candidates {
+                    let lower = candidate.lowercased()
+                    if lower == "code" || lower.hasPrefix("code ")
+                        || lower.hasPrefix("code…") || lower.hasPrefix("visual studio code") {
+                        return "Visual Studio Code"
+                    }
+                    if lower.hasPrefix("firefox") { return "Firefox" }
+                    if lower.hasPrefix("google chrome helper") { return "Google Chrome" }
+                    if lower.hasPrefix("safari web content") { return "Safari" }
+                }
+                return resolved.isEmpty ? app.name : resolved
+            }()
+            if var current = result[display] {
+                current.impact += app.impact
+                current.cpu = (current.cpu ?? 0) + (app.cpu ?? 0)
+                current.memMB = (current.memMB ?? 0) + (app.memMB ?? 0)
+                current.threads = (current.threads ?? 0) + (app.threads ?? 0)
+                result[display] = current
+            } else {
+                result[display] = AppEnergy(name: display, impact: app.impact, cpu: app.cpu,
+                                            memMB: app.memMB, threads: app.threads)
+            }
+        }
+        return Array(result.values)
     }
     /// «обновлено только что / N с назад» — живёт на 1Гц-тике (данные приложений едут раз в ~5с).
     func refreshAppsUpdatedLabel() {
@@ -2976,8 +3063,8 @@ final class PopoverController: NSViewController {
 
         // Создать/обновить карточки НА МЕСТЕ и выставить целевой порядок в стеке.
         var newCardNames: [String] = []
-        for (idx, a) in ordered.enumerated() {
-            let isHero = (idx == 0)
+        for (_, a) in ordered.enumerated() {
+            let isHero = false
             let card: DossierRowView
             if let existing = appRows[a.name], (existing.isHero == isHero) {
                 card = existing
@@ -2989,7 +3076,7 @@ final class PopoverController: NSViewController {
             }
             configureCard(card, a: a, fraction: appSortMetric(a) / maxMetric, isHero: isHero, animateValue: animateReorder)
         }
-        appHeroName = ordered.first?.name
+        appHeroName = nil
 
         // Целевой порядок arrangedSubviews: вердикт, header, затем карточки в порядке ordered.
         var order: [NSView] = []
@@ -3058,46 +3145,26 @@ final class PopoverController: NSViewController {
     /// по тому же критерию, что и лидерборд; ничего не выдумываем — только называем вывод словами).
     private func appsVerdictText(_ a: AppEnergy) -> String {
         switch appsSort {
-        case .impact: return String(format: L("«%@» больше всех расходует энергию"), a.name)
-        case .cpu:    return String(format: L("«%@» сильнее всех грузит процессор"), a.name)
-        case .net:    return String(format: L("«%@» активнее всех в сети"), a.name)
+        case .impact: return String(format: L("%@ расходует больше всего · %@"), a.name, fmtImpact(a.impact))
+        case .cpu:    return String(format: L("%@ сильнее грузит CPU · %@"), a.name, a.cpu.map(fmtCPU) ?? "—")
+        case .net:    return String(format: L("%@ активнее всех в сети · %d"), a.name, appNetCount(a))
         }
     }
 
     private func appsColumnHeader() -> NSView {
         let seg = makeAppsSortSegment()
 
-        let eyebrow = NSTextField(labelWithString: "")
-        eyebrow.font = Design.Font.microStat
-        eyebrow.textColor = .tertiaryLabelColor
-        eyebrow.alignment = .right
-        eyebrow.identifier = NSUserInterfaceItemIdentifier("appsEyebrow")
-        capsText(eyebrow, (appsSort == .cpu ? L("CPU") : (appsSort == .net ? L("Сеть") : L("Нагрузка"))))
-        eyebrow.translatesAutoresizingMaskIntoConstraints = false
-        // Ж10: ширина = ровно колонке значения (right-align) → правый край эйброу встаёт над правым краем val.
-        eyebrow.widthAnchor.constraint(equalToConstant: appsValW).isActive = true
-        let flagPad = NSView()
-        flagPad.translatesAutoresizingMaskIntoConstraints = false
-        flagPad.widthAnchor.constraint(equalToConstant: appsFlagW).isActive = true
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let row = NSStackView(views: [seg, spacer, eyebrow, flagPad])
+        let row = NSStackView(views: [seg])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 8
-        row.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 3, right: 8)
+        row.spacing = 0
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 3, right: 0)
         row.translatesAutoresizingMaskIntoConstraints = false
         row.widthAnchor.constraint(equalToConstant: IW).isActive = true
         return row
     }
     private func updateColumnHeaderEyebrow() {
-        guard let h = appsHeader,
-              let eb = h.subviews.compactMap({ ($0 as? NSStackView) }).first?.arrangedSubviews
-                .compactMap({ $0 as? NSTextField }).first(where: { $0.identifier?.rawValue == "appsEyebrow" })
-                ?? findField(in: h, id: "appsEyebrow") else { return }
-        capsText(eb, (appsSort == .cpu ? L("CPU") : (appsSort == .net ? L("Сеть") : L("Нагрузка"))))
+        // Полноширинный сегмент сам объясняет активную метрику; отдельный обрезаемый эйброу больше не нужен.
     }
     private func findField(in v: NSView, id: String) -> NSTextField? {
         if let f = v as? NSTextField, f.identifier?.rawValue == id { return f }
@@ -3111,8 +3178,8 @@ final class PopoverController: NSViewController {
         let sel: Int = appsSort == .impact ? 0 : (appsSort == .cpu ? 1 : 2)
         let bar = PillTabBar(labels: labels, selected: sel)
         bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.widthAnchor.constraint(equalToConstant: 150).isActive = true
-        bar.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        bar.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        bar.heightAnchor.constraint(equalToConstant: 26).isActive = true
         bar.setAccessibilityLabel(L("Сортировка расхода приложений"))
         bar.onSelect = { [weak self] i in
             guard let self = self else { return }
@@ -5608,6 +5675,7 @@ if let snapDir = ProcessInfo.processInfo.environment["BM_SNAP"] {
     // окно Настроек — все секции (офскрин, без показа). Поповер-PNG уже на диске, даже если тут упадёт.
     let sset = KelvinSettingsWindowController.shared.renderSectionsSnapshot(to: snapDir, light: light, prefix: "S")
     OnboardingWindowController.shared.renderSnapshot(to: snapDir, light: light)   // стартовое окно разрешений
+    CorrectionChoiceHUD.shared.renderSnapshot(to: snapDir, light: light)
     // PDF-отчёт «здоровье Mac» — визуальная проверка самого документа (из живой истории).
     let rbatt = BatteryReader.read()
     let rhs = History.shared.series(.health, since: Int64(Date().timeIntervalSince1970) - Int64(30 * 86_400))
