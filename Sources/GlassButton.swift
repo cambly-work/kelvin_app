@@ -57,16 +57,28 @@ final class GlassButton: NSView {
         label.translatesAutoresizingMaskIntoConstraints = false
 
         let hasIcon = symbol != nil
+        let isIconOnly = hasIcon && title.isEmpty
         addSubview(iconView); addSubview(label)
-        NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hasIcon ? 10 : 0),
+        var layoutConstraints = [
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: hasIcon ? 15 : 0),
             iconView.heightAnchor.constraint(equalToConstant: 15),
-            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: hasIcon ? 6 : 10),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+        ]
+        if isIconOnly {
+            layoutConstraints += [
+                iconView.centerXAnchor.constraint(equalTo: centerXAnchor),
+                label.widthAnchor.constraint(equalToConstant: 0),
+                label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor),
+            ]
+        } else {
+            layoutConstraints += [
+                iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hasIcon ? 10 : 0),
+                label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: hasIcon ? 6 : 10),
+                label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            ]
+        }
+        NSLayoutConstraint.activate(layoutConstraints)
         restyle()
     }
     required init?(coder: NSCoder) { fatalError() }

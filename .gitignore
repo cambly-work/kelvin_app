@@ -24,7 +24,7 @@ Package.resolved
 .env.local
 .env.*
 
-# Editors
+# Editor/IDE files
 .vscode/
 .idea/
 *.swp

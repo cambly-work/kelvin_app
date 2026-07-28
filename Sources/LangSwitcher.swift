@@ -40,7 +40,7 @@ final class LangSwitcher {
 
     enum Feedback {
         case layout(toRU: Bool)
-        case spell(original: String, corrected: String)
+        case spell(original: String, corrected: String, id: UUID)
         case undo
     }
     var onFeedback: ((Feedback) -> Void)?
@@ -85,6 +85,7 @@ final class LangSwitcher {
     private var tokenBuffer = ""
     private var lastConversion: LastConversion?
     private var userTypedSinceConversion = true
+    private var pendingCorrection: PendingCorrection?
 
     // CGEventTap must not share Kelvin's busy main run loop (battery/SMC/UI work).
     // All captured-key state below is owned by this dedicated thread.
@@ -284,7 +285,10 @@ final class LangSwitcher {
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             Log.lang.warning("Keyboard event tap recovered after disable; count=\(recoveries)")
         case .leftMouseDown, .rightMouseDown:
-            resetAll()
+            invalidatePendingSpellRequest()
+            resetTypingState(keepingLastConversion: true)
+            triggerDown = false
+            otherKeySinceTrigger = false
         case .flagsChanged:
             handleFlags(event)
         case .keyDown:
@@ -328,6 +332,7 @@ final class LangSwitcher {
         if code == CGKeyCode(kVK_Delete) {
             userTypedSinceConversion = true
             lastConversion = nil
+            invalidatePendingCorrection()
             if !currentKeys.isEmpty {
                 currentKeys.removeLast()
                 if !tokenBuffer.isEmpty { tokenBuffer.removeLast() }
@@ -352,6 +357,7 @@ final class LangSwitcher {
             resetTypingState()
             lastConversion = nil
             userTypedSinceConversion = true
+            invalidatePendingCorrection()
             return pass
         }
 
@@ -367,6 +373,7 @@ final class LangSwitcher {
 
         userTypedSinceConversion = true
         lastConversion = nil
+        invalidatePendingCorrection()
         previousWord = nil
         if currentKeys.isEmpty { currentBundleID = frontmostBundleID }
 
@@ -423,6 +430,7 @@ final class LangSwitcher {
         tokenBuffer.removeAll()
         userTypedSinceConversion = true
         lastConversion = nil
+        invalidatePendingCorrection()
         return pass
     }
 
@@ -434,6 +442,7 @@ final class LangSwitcher {
         spellRequestLock.lock()
         let generation = spellRequestGeneration
         spellRequestLock.unlock()
+        let correctionID = UUID()
         DispatchQueue.main.async { [weak self] in
             guard let self, let correction = SpellFix.correction(for: word) else { return }
             self.spellRequestLock.lock()
@@ -442,46 +451,53 @@ final class LangSwitcher {
             guard isCurrent, self.frontmostBundleID == bundleID else { return }
             self.replace(count: word.count + 1, with: correction + " ")
             self.performOnTapThread {
-                self.lastConversion = LastConversion(
+                self.pendingCorrection = PendingCorrection(
+                    id: correctionID,
                     original: word + " ",
-                    converted: correction + " ",
-                    sourceID: nil,
-                    targetID: nil
+                    corrected: correction + " ",
+                    bundleID: bundleID,
+                    createdAt: Date(),
+                    status: .pending
                 )
-                self.userTypedSinceConversion = false
             }
-            self.onFeedback?(.spell(original: word, corrected: correction))
+            self.onFeedback?(.spell(original: word, corrected: correction, id: correctionID))
         }
     }
 
     /// Кнопка «Вернуть» в подсказке автокоррекции. Выполняется на том же
     /// event-tap run loop, которому принадлежит состояние набора, и ничего не
     /// меняет, если пользователь уже продолжил печатать или сменил контекст.
-    func undoLastSpellCorrection() {
+    func undoLastSpellCorrection(id: UUID) {
         performOnTapThread { [weak self] in
             guard let self,
-                  !self.userTypedSinceConversion,
-                  let last = self.lastConversion,
-                  last.sourceID == nil,
-                  last.targetID == nil
+                  let pending = self.pendingCorrection,
+                  pending.id == id,
+                  pending.isActive
             else { return }
-            self.replace(count: last.converted.count, with: last.original)
-            self.lastConversion = nil
-            self.userTypedSinceConversion = true
+            self.replace(count: pending.corrected.count, with: pending.original)
+            self.pendingCorrection?.status = .restored
             DispatchQueue.main.async { self.onFeedback?(.undo) }
         }
     }
 
     /// Явное подтверждение варианта из подсказки: после «Оставить» повторная
     /// горячая клавиша уже не должна неожиданно откатывать слово.
-    func acceptLastSpellCorrection() {
+    func acceptLastSpellCorrection(id: UUID) {
         performOnTapThread { [weak self] in
             guard let self,
-                  self.lastConversion?.sourceID == nil,
-                  self.lastConversion?.targetID == nil
+                  let pending = self.pendingCorrection,
+                  pending.id == id,
+                  pending.isActive
             else { return }
-            self.lastConversion = nil
-            self.userTypedSinceConversion = true
+            self.pendingCorrection?.status = .accepted
+        }
+    }
+
+    /// Invalidates the current pending spell correction so that undo/accept
+    /// become no-ops. Called when the user continues typing, switches apps, etc.
+    private func invalidatePendingCorrection() {
+        if let pending = pendingCorrection, pending.isActive {
+            pendingCorrection?.status = .invalidated
         }
     }
 
@@ -538,6 +554,15 @@ final class LangSwitcher {
     }
 
     private func convertOrUndo() {
+        // Spell correction undo via hotkey: one-shot restore, no toggle.
+        if let pending = pendingCorrection, pending.isActive {
+            replace(count: pending.corrected.count, with: pending.original)
+            pendingCorrection?.status = .restored
+            DispatchQueue.main.async { self.onFeedback?(.undo) }
+            return
+        }
+
+        // Layout conversion toggle (original ↔ converted).
         if !userTypedSinceConversion, let last = lastConversion {
             replace(count: last.converted.count, with: last.original, switchTo: last.sourceID)
             lastConversion = LastConversion(

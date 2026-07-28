@@ -302,18 +302,16 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
 
     /// Спросить разрешение заранее (из настроек) — чтобы prompt появился осознанно,
     /// а не «из ниоткуда» при первом перегреве.
-    func primeAuthorization() {
+    func primeAuthorization(completion: ((Bool) -> Void)? = nil) {
         let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { s in
-            // UN-колбэки приходят на произвольной очереди — запись authorized маршалим на main
-            // (читается withAuthorization на main), чтобы снять data-race.
-            if s.authorizationStatus == .notDetermined {
-                center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
-                    DispatchQueue.main.async { self.authorized = ok }
-                }
-            } else {
-                let ok = (s.authorizationStatus == .authorized || s.authorizationStatus == .provisional)
-                DispatchQueue.main.async { self.authorized = ok }
+        // requestAuthorization безопасно вызывать повторно: после первого выбора
+        // macOS сразу возвращает сохранённый результат и больше не показывает prompt.
+        // Не используем getNotificationSettings здесь: на части поддерживаемых macOS
+        // его Swift callback падал внутри UserNotifications при раннем запуске app.
+        center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
+            DispatchQueue.main.async {
+                self.authorized = ok
+                completion?(ok)
             }
         }
     }
@@ -321,15 +319,10 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
     private func withAuthorization(_ post: @escaping () -> Void) {
         if authorized { post(); return }
         let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { s in
-            switch s.authorizationStatus {
-            case .authorized, .provisional:
-                DispatchQueue.main.async { self.authorized = true; post() }
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
-                    DispatchQueue.main.async { self.authorized = ok; if ok { post() } }
-                }
-            default: break   // запрещено пользователем — молча не шлём
+        center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
+            DispatchQueue.main.async {
+                self.authorized = ok
+                if ok { post() }
             }
         }
     }

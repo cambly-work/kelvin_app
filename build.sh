@@ -3,12 +3,15 @@
 set -e
 cd "$(dirname "$0")"
 
-APP="Kelvin.app"
+FINAL_APP="$PWD/Kelvin.app"
 BIN="Kelvin"
+STAGE_ROOT=$(mktemp -d)
+APP="$STAGE_ROOT/Kelvin.app"
+cleanup() { rm -rf "$STAGE_ROOT"; }
+trap cleanup EXIT
 
 echo "→ Компиляция…"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 
 # main.swift должен идти последним (в нём top-level код)
 SRCS=$(ls Sources/*.swift | grep -v '/main.swift$')
@@ -16,13 +19,27 @@ SRCS=$(ls Sources/*.swift | grep -v '/main.swift$')
 ARCHS="x86_64 arm64"
 TMPDIR_BUILD=$(mktemp -d)
 for arch in $ARCHS; do
-    xcrun swiftc -O -target "$arch-apple-macos11" $SRCS Sources/main.swift -o "$TMPDIR_BUILD/$BIN-$arch" || { echo "✗ бинарь не собрался для $arch"; rm -rf "$TMPDIR_BUILD"; exit 1; }
+    xcrun swiftc -O -target "$arch-apple-macos11" -F "$PWD" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks $SRCS Sources/main.swift -o "$TMPDIR_BUILD/$BIN-$arch" || { echo "✗ бинарь не собрался для $arch"; rm -rf "$TMPDIR_BUILD"; exit 1; }
 done
 lipo -create -output "$APP/Contents/MacOS/$BIN" $TMPDIR_BUILD/$BIN-x86_64 $TMPDIR_BUILD/$BIN-arm64
 rm -rf "$TMPDIR_BUILD"
 # страховка от «тихой» неудачи: swiftc, убитый по OOM (SIGKILL), может оставить пустой бандл при exit 0
 [ -x "$APP/Contents/MacOS/$BIN" ] || { echo "✗ бинарь не собрался (пустой бандл — вероятно OOM)"; exit 1; }
 strip -x "$APP/Contents/MacOS/$BIN" 2>/dev/null || true   # снять локальные символы: `nm` больше не выдаёт локатор гейта (isPro)
+
+echo "→ Копирование Sparkle.framework…"
+# Копируем Sparkle.framework в бандл (Universal Binary уже внутри)
+cp -R "Sparkle.framework" "$APP/Contents/Frameworks/"
+# Sparkle содержит вложенные исполняемые компоненты. Подписываем изнутри наружу:
+# один --deep не переподписывает уже подписанные upstream-компоненты после копирования.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+SPARKLE_CURRENT="$SPARKLE/Versions/Current"
+codesign --force --sign - "$SPARKLE_CURRENT/Autoupdate"
+codesign --force --deep --sign - "$SPARKLE_CURRENT/XPCServices/Downloader.xpc"
+codesign --force --deep --sign - "$SPARKLE_CURRENT/XPCServices/Installer.xpc"
+codesign --force --deep --sign - "$SPARKLE_CURRENT/Updater.app"
+codesign --force --sign - "$SPARKLE"
+echo "  ✓ Sparkle.framework скопирован"
 
 echo "→ Демон вентиляторов (fand)…"
 # Universal Binary для fand
@@ -50,8 +67,11 @@ echo "→ Ad-hoc подпись…"
 # That cdhash changes on every build, so TCC treats each local Kelvin build as a
 # different app and repeatedly drops Accessibility permission. An explicit,
 # stable requirement keeps local development builds tied to the bundle ID.
-codesign --force --deep --sign - \
+codesign --force --sign - \
     --requirements '=designated => identifier "com.trykelvin.kelvin"' \
-    "$APP" 2>/dev/null || echo "  (подпись пропущена)"
+    "$APP"
+codesign --verify --deep --strict "$APP"
 
-echo "✓ Готово: $(pwd)/$APP"
+rm -rf "$FINAL_APP"
+mv "$APP" "$FINAL_APP"
+echo "✓ Готово: $FINAL_APP"

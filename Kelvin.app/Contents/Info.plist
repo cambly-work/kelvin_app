@@ -21,5 +21,21 @@
     <string>Kelvin показывает статус Bluetooth и позволяет включать/выключать его из строки меню.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Kelvin использует системные команды для переключателей (тёмная тема, Night Shift и др.).</string>
+    
+    <!-- Sparkle updater settings -->
+    <key>SUFeedURL</key>
+    <string>https://trykelvin.com/appcast.xml</string>
+    <!-- Before a production release, add SUPublicEDKey generated for the release channel.
+         Keeping a placeholder inside a <string> makes this plist invalid. -->
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUHasLaunchedBefore</key>
+    <true/>
+    <key>SUSendProfileInfo</key>
+    <false/>
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>
