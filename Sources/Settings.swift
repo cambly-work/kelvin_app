@@ -2738,7 +2738,7 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
         KelvinSettingsWindowController.shared.open(section: "pro")
     }
     @objc private func buyPro() {
-        if let url = Licensing.checkoutURL(), let realURL = URL(string: url) {
+        if let url = Licensing.checkoutURL, let realURL = URL(string: url) {
             NSWorkspace.shared.open(realURL)
         } else {
             // Магазин не настроен — показать пользователю нейтральное сообщение

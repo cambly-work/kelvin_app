@@ -126,7 +126,9 @@ final class Licensing {
     var trialDays: Int { AppConfig.trialDays }
     var graceDays: Int { AppConfig.licenseGraceDays }
     
-    static var checkoutURL: String? { AppConfig.lemonSqueezyCheckoutURL }
+    static var checkoutURL: String? {
+        AppConfig.isCheckoutURLValid ? AppConfig.lemonSqueezyCheckoutURL : nil
+    }
     static var storeID: Int? { AppConfig.lemonSqueezyStoreID }
     static var productID: Int? { AppConfig.lemonSqueezyProductID }
     static var isStoreConfigured: Bool { AppConfig.isStoreConfigured }
@@ -199,6 +201,7 @@ final class Licensing {
 
     var licenseKey: String? { state()?.key }
     var instanceID: String? { state()?.instance }  // public for UI
+    var lastValidatedAt: Date? { state()?.validatedAt }
     
     /// Вспомогательная функция для склонения (используется в UI)
     func plural(_ n: Int, _ one: String, _ few: String, _ many: String) -> String {
@@ -245,14 +248,11 @@ final class Licensing {
         // В production всегда проверяем реальное состояние
         #endif
         
-        // Подписанная валидная лицензия даёт Pro
-        if licenseValid { return true }
-        
-        // Trial даёт Pro (только если нет лицензии)
-        if inTrial { return true }
-        
-        // Free (без лицензии и после trial) → только мониторинг
-        return false
+        // Не блокируем существующих пользователей неполной коммерческой конфигурацией.
+        guard AppConfig.isCommerceEnabled else { return true }
+
+        // В production Pro разрешён только доверенной подписанной сборке.
+        return Hardening.signatureTrusted && (licenseValid || inTrial)
     }
 
     /// Триал закончился, лицензии нет, и мы ещё не показывали прощальный экран — момент для оффера.
@@ -269,6 +269,10 @@ final class Licensing {
         if forceFree { return L("Бесплатная версия — мониторинг") }
         if forcePro { return L("Kelvin Pro — активирован (DEBUG override)") }
         #endif
+
+        if !AppConfig.isCommerceEnabled {
+            return L("Kelvin Pro доступен — магазин ещё не настроен")
+        }
         
         if activated { return L("Kelvin Pro — активирован") }
         if licenseKey != nil && !licenseValid {
@@ -285,14 +289,6 @@ final class Licensing {
         return L("Бесплатная версия — пробный период закончился")
     }
     
-    /// Checkout URL для кнопки покупки. Возвращает nil, если магазин не настроен.
-    static func checkoutURL() -> String? {
-        guard let url = AppConfig.lemonSqueezyCheckoutURL else { return nil }
-        // Валидация: HTTPS и не example.com
-        guard url.hasPrefix("https://"), !url.contains("example.com") else { return nil }
-        return url
-    }
-
     // MARK: Lemon Squeezy License API
     
     /// Активация лицензии через Lemon Squeezy API.
@@ -339,15 +335,23 @@ final class Licensing {
     }
 
     /// Тихая перепроверка при запуске — обновляет grace-окно (переподписывает кэш). Сетевая ошибка ничего не ломает.
-    func revalidate() {
-        guard Self.isStoreConfigured, let key = licenseKey, let inst = instanceID else { return }
+    func revalidate(completion: ((Bool) -> Void)? = nil) {
+        guard Self.isStoreConfigured, let key = licenseKey, let inst = instanceID else {
+            completion?(false)
+            return
+        }
         post("validate", ["license_key": key, "instance_id": inst]) { [weak self] r in
-            guard let self, case .success(let j) = r else { return }        // сеть упала — кэш не трогаем (офлайн-grace)
+            guard let self, case .success(let j) = r else {
+                completion?(false)                                        // сеть упала — кэш не трогаем
+                return
+            }
             if (j["valid"] as? Bool) == true {
                 self.setState(LicenseState(key: key, instance: inst, validatedAt: Date()))   // обновили grace-окно
+                completion?(true)
             } else {
                 // Сервер сообщил о невалидности → очищаем состояние
                 self.setState(nil)
+                completion?(false)
             }
         }
     }
@@ -386,10 +390,16 @@ final class Licensing {
         sessionConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
         let session = URLSession(configuration: sessionConfig)
         
-        session.dataTask(with: req) { data, _, err in
+        session.dataTask(with: req) { data, response, err in
             DispatchQueue.main.async {
                 if let err = err { return done(.failure(err.localizedDescription)) }
-                guard let data, let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                    return done(.failure(L("сервер вернул ошибку")))
+                }
+                guard let data, data.count <= 1_048_576 else {
+                    return done(.failure(L("слишком большой ответ сервера")))
+                }
+                guard let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
                     return done(.failure(L("неожиданный ответ сервера")))
                 }
                 done(.success(j))

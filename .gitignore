@@ -1,5 +1,6 @@
-```
 # Build artifacts
+build/
+dist/
 *.o
 *.obj
 *.a
@@ -51,4 +52,3 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
-```

@@ -20,7 +20,7 @@ enum Hardening {
     /// ПРИ НОТАРИЗАЦИИ вписать реальный Team ID (Developer ID): тогда пропатченная и переподписанная
     /// ad-hoc-копия перестанет давать Pro — `signatureTrusted` вернёт false, `isPro` форсится в false
     /// БЕЗ краша (не наказываем легитимного пользователя падением). Сейчас — no-op.
-    static let expectedTeamID: String? = nil
+    static var expectedTeamID: String? { AppConfig.expectedDeveloperTeamID }
 
     /// Доверенная ли кодподпись у нашего же процесса. Кэшируем — проверка кодподписи недёшева, а isPro частый.
     static let signatureTrusted: Bool = {
