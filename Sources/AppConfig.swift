@@ -11,6 +11,31 @@ import AppKit
 // ════════════════════════════════════════════════════════════════════════════
 enum AppConfig {
 
+    // ─── КОММЕРЧЕСКАЯ КОНФИГУРАЦИЯ (Lemon Squeezy) ───────────────────────────
+    // Вписать store_id и product_id из настроек продукта Lemon Squeezy.
+    // nil → магазин не подключён, кнопка покупки disabled, активация ключей недоступна.
+    static let lemonSqueezyStoreID: Int? = nil              // ← store_id из Lemon Squeezy
+    static let lemonSqueezyProductID: Int? = nil            // ← product_id из Lemon Squeezy
+    static let lemonSqueezyCheckoutURL: String? = nil       // ← checkout URL (https://*.lemonsqueezy.com/checkout/...)
+    
+    /// Цена Kelvin Pro для отображения в UI.
+    static let proPriceDisplay: String = "$19"
+    
+    /// Лимит активаций на одну лицензию (для отображения).
+    static let activationLimitDisplay: Int = 2
+    
+    /// Длительность trial периода в днях.
+    static let trialDays: Int = 14
+    
+    /// Grace period для офлайн-валидации лицензии (дней после последней успешной проверки).
+    static let licenseGraceDays: Int = 7
+    
+    // ─── TEAM ID для self-validation (hardened runtime / notarization) ────────
+    // Вписать Team ID из сертификата Developer ID Application (скобки из строки подписи).
+    // Пример: "ABCDE12345" из "Developer ID Application: Artem Balabanov (ABCDE12345)"
+    // nil → self-validation выключена (ad-hoc сборка).
+    static let expectedDeveloperTeamID: String? = nil       // ← Team ID из Apple Developer
+    
     // ─── ССЫЛКА ДОНАТА («Поддержать автора») ──────────────────────────────────
     // Сюда вставь свою ссылку: Boosty / Patreon / PayPal / Ko-fi / крипто-кошелёк…
     // Пока стоит заглушка — кнопки доната откроют её. Замени на реальную.
@@ -26,6 +51,50 @@ enum AppConfig {
     // ─── ИМЯ И КОПИРАЙТ ───────────────────────────────────────────────────────
     static let appName   = "Kelvin"                                      // имя в письмах/заголовках
     static let copyright = "© 2026 Kelvin · Artem Balabanov"             // строка в «О программе»
+
+    // ─── ВАЛИДАЦИЯ КОНФИГУРАЦИИ (fail-closed для release) ────────────────────
+    /// Магазин Lemon Squeezy реально настроен?
+    static var isStoreConfigured: Bool {
+        guard let store = lemonSqueezyStoreID, let product = lemonSqueezyProductID else { return false }
+        if store <= 0 || product <= 0 { return false }
+        // checkout URL должен быть HTTPS и не example.com
+        if let url = lemonSqueezyCheckoutURL {
+            guard url.hasPrefix("https://"), !url.contains("example.com") else { return false }
+        }
+        return true
+    }
+    
+    /// Team ID настроен для production validation?
+    static var isTeamIDConfigured: Bool {
+        guard let team = expectedDeveloperTeamID else { return false }
+        return !team.isEmpty && team.count >= 10
+    }
+    
+    /// Checkout URL валиден (HTTPS, не заглушка)?
+    static var isCheckoutURLValid: Bool {
+        guard let url = lemonSqueezyCheckoutURL else { return false }
+        return url.hasPrefix("https://") && !url.contains("example.com")
+    }
+    
+    /// Diagnostic message для DEBUG (почему магазин не готов).
+    static var storeDiagnosticMessage: String {
+        var issues: [String] = []
+        if lemonSqueezyStoreID == nil || lemonSqueezyStoreID! <= 0 {
+            issues.append("storeID не задан или ≤ 0")
+        }
+        if lemonSqueezyProductID == nil || lemonSqueezyProductID! <= 0 {
+            issues.append("productID не задан или ≤ 0")
+        }
+        if lemonSqueezyCheckoutURL == nil {
+            issues.append("checkoutURL не задан")
+        } else if !lemonSqueezyCheckoutURL!.hasPrefix("https://") {
+            issues.append("checkoutURL должен начинаться с https://")
+        } else if lemonSqueezyCheckoutURL!.contains("example.com") {
+            issues.append("checkoutURL содержит example.com (заглушка)")
+        }
+        if issues.isEmpty { return "OK" }
+        return issues.joined(separator: "; ")
+    }
 
     // ─── (служебное, менять не нужно) ─────────────────────────────────────────
     /// Донат реально настроен (ссылка не заглушка)?

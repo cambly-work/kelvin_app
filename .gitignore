@@ -1,44 +1,54 @@
 ```
 # Build artifacts
-build/
-dist/
 *.o
 *.obj
+*.a
+*.lib
+*.dylib
+*.so
+*.dll
+*.exe
 *.out
 
-# Dependencies
-node_modules/
-venv/
-.venv/
-__pycache__/
-*.egg-info/
+# Swift-specific
+.build/
+.swift-version
+Packages/
+xcuserdata/
+DerivedData/
 
-# Logs and temporary files
+# Dependencies
+vendor/
+node_modules/
+package-lock.json
+Pods/
+Carthage/
+.swiftlint.yml
+.swiftpm/
+
+# Logs and temp files
 *.log
 *.tmp
 *.swp
-
-# Environment variables
-.env
-.env.local
-*.env.*
+*.swo
 
 # Environment
 .env
 .env.local
 .env.*
 
-# Editor/IDE files
+# Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Coverage reports
+# Coverage
+.coverage
 coverage/
 htmlcov/
 
-# OS specific
+# OS
 .DS_Store
 Thumbs.db
 ```
