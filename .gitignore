@@ -3,52 +3,33 @@ build/
 dist/
 *.o
 *.obj
-*.a
-*.lib
-*.dylib
-*.so
-*.dll
-*.exe
 *.out
 
-# Swift-specific
-.build/
-.swift-version
-Packages/
-xcuserdata/
-DerivedData/
-
 # Dependencies
-vendor/
-node_modules/
-package-lock.json
-Pods/
-Carthage/
-.swiftlint.yml
-.swiftpm/
+Packages/
+.build/
 
 # Logs and temp files
 *.log
 *.tmp
-*.swp
-*.swo
 
 # Environment
 .env
 .env.local
-.env.*
+*.env.*
 
 # Editors
 .vscode/
 .idea/
-*.swp
-*.swo
 
 # Coverage
 .coverage
 coverage/
 htmlcov/
 
-# OS
-.DS_Store
-Thumbs.db
+# Xcode/Swift specific
+*.swiftdoc
+*.swiftmodule
+*.dSYM/
+DerivedData/
+```
