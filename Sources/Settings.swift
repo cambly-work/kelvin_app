@@ -666,12 +666,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         case power = "Питание и охлаждение"
         case input = "Ввод и текст"
         case netsec = "Сеть и защита"
+        case privacy = "Приватность"
         case hub = "Поповер и уведомления"
         case about = "О программе"
         // Скрытые (спящий код — лицензия):
         case license = "Kelvin Pro"
-        /// Разделы в сайдбаре (7): «Поддержать» сверху, «О программе» — снизу.
-        static let visible: [Section] = [.support, .basics, .power, .input, .netsec, .hub, .about]
+        /// Разделы в сайдбаре (8): «Поддержать» сверху, «О программе» — снизу.
+        static let visible: [Section] = [.support, .basics, .power, .input, .netsec, .privacy, .hub, .about]
         var icon: String {
             switch self {
             case .support:  return "heart.fill"
@@ -679,6 +680,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             case .power:    return "bolt.fill"
             case .input:    return "keyboard"
             case .netsec:   return "lock.shield"
+            case .privacy:  return "hand.raised"
             case .hub:      return "square.grid.2x2"
             case .about:    return "info.circle"
             case .license:  return "creditcard"
@@ -1021,6 +1023,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         case .power:   return buildPower()
         case .input:   return buildInput()
         case .netsec:  return buildNetSec()
+        case .privacy: return buildPrivacySettings()
         case .hub:     return buildHub()
         case .about:   return buildAbout()
         case .license: return buildLicense()
@@ -2857,6 +2860,78 @@ private func netLogRow(_ e: AppSession.LedgerEntry, _ df: DateFormatter) -> NSVi
             ]),
             SK.customRow(footer, minHeight: 40, fill: true),
         ])
+    }
+
+    /// Раздел «Приватность»: настройки crash reporting, описание собираемых данных, endpoint, retention.
+    private func buildPrivacySettings() -> NSView {
+        var items: [NSView] = []
+
+        // — Отчёты о сбоях —
+        let autoSendCrashReports = SettingsStore.autoSendCrashReports
+        let hasPendingReports = !CrashReportStore.shared.reports(state: .discovered).isEmpty
+        let sentCount = CrashReportStore.shared.reports(state: .sent).count
+
+        items.append(SK.card([
+            SK.toggleRow(icon: "doc.text.brokenheart",
+                         title: L("Автоматически отправлять обезличенные отчёты о сбоях"),
+                         subtitle: hasPendingReports ? L("Есть необработанные отчёты") : (sentCount > 0 ? String(format: L("Отправлено отчётов: %d"), sentCount) : nil),
+                         isOn: autoSendCrashReports) { newValue in
+                SettingsStore.autoSendCrashReports = newValue
+                if newValue {
+                    CrashReportUploader.shared.startProcessingQueue()
+                }
+            },
+            SK.infoRow(icon: "shield.checkered",
+                       text: L("Отчёты содержат только техническую информацию: версию приложения, модель Mac, тип сбоя и стек вызовов. Персональные данные удаляются.")),
+        ]))
+
+        if hasPendingReports {
+            let reviewButton = GlassButton(title: L("Просмотреть отчёты"), symbol: "doc.badge.gearshape", cornerRadius: Design.Radius.chip)
+            reviewButton.onClick = { [weak self] in
+                self?.showCrashReportsReview()
+            }
+            items.append(groupHeader(L("Необработанные отчёты")))
+            items.append(SK.card([
+                SK.controlRow(icon: "doc.badge.gearshape",
+                              title: L("Просмотреть и отправить"),
+                              subtitle: L("Выберите отчёты для отправки"),
+                              control: reviewButton),
+            ]))
+        }
+
+        // — Политика приватности —
+        items.append(groupHeader(L("Приватность")))
+        items.append(SK.card([
+            SK.infoRow(icon: "hand.raised",
+                       text: L("Kelvin не собирает телеметрию, не передаёт содержимое документов, буфер обмена, набранный текст или историю посещений.")),
+            SK.infoRow(icon: "network",
+                       text: L("Сетевые запросы выполняются только для проверки обновлений и (опционально) отправки crash reports.")),
+            SK.infoRow(icon: "lock.shield",
+                       text: L("IP-адрес виден серверу при отправке отчёта, но не сохраняется.")),
+        ]))
+
+        // — Ссылки —
+        let privacyPolicyBtn = GlassButton(title: L("Политика приватности"), symbol: "doc.text", cornerRadius: Design.Radius.chip)
+        privacyPolicyBtn.onClick = { [weak self] in
+            if let url = URL(string: "https://github.com/serhii-liverpool/Kelvin/blob/main/docs/privacy.html") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+
+        let crashPolicyBtn = GlassButton(title: L("Crash reporting policy"), symbol: "doc.text", cornerRadius: Design.Radius.chip)
+        crashPolicyBtn.onClick = { [weak self] in
+            if let url = URL(string: "https://github.com/serhii-liverpool/Kelvin/blob/main/docs/crash-reporting-policy.md") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+
+        items.append(groupHeader(L("Документация")))
+        items.append(SK.card([
+            SK.controlRow(icon: "doc.text", title: L("Политика приватности"), control: privacyPolicyBtn),
+            SK.controlRow(icon: "doc.text", title: L("Crash reporting policy"), control: crashPolicyBtn),
+        ]))
+
+        return SK.scaffold(L("Приватность"), L("Настройки приватности и отчётов о сбоях."), items)
     }
 
     /// Консолидированная секция «Основные»: автозапуск, строка меню (режим/иконка/мощность/объединённый вид/
