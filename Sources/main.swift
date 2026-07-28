@@ -5707,7 +5707,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // — ниже: спящие коммерческие обработчики (лицензирование отключено; сохранены для реактивации) —
     @objc private func buyProFromMenu() {                      // гейт: только не-Pro
-        if let u = URL(string: Licensing.checkoutURL) { NSWorkspace.shared.open(u) }
+        if let url = Licensing.checkoutURL, let u = URL(string: url) { NSWorkspace.shared.open(u) }
     }
 
     @objc private func restorePurchaseFromMenu() {             // честно: почта восстановления
@@ -5720,7 +5720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func openHelpFromMenu() {                    // trykelvin.com
-        if let u = URL(string: Licensing.checkoutURL) { NSWorkspace.shared.open(u) }
+        AppConfig.openWebsite()
     }
 
     @objc private func deactivateMacFromMenu() {               // гейт: только activated; с подтверждением
@@ -5755,7 +5755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.activate(ignoringOtherApps: true)
         switch a.runModal() {
         case .alertFirstButtonReturn:
-            if let url = Licensing.checkoutURL(), let realURL = URL(string: url) {
+            if let url = Licensing.checkoutURL, let realURL = URL(string: url) {
                 NSWorkspace.shared.open(realURL)
             } else {
                 // Магазин не настроен — fallback на ввод ключа

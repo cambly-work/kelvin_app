@@ -1589,20 +1589,23 @@ private struct ProSettingsPage: View {
                     
                     // MARK: Status Details
                     VStack(alignment: .leading, spacing: 8) {
-                        if Licensing.shared.activated {
-                            StatusRow(icon: "checkmark.circle.fill", text: L(\"Лицензия активирована\"), color: .green)
+                        if !AppConfig.isCommerceEnabled {
+                            StatusRow(icon: "checkmark.circle.fill", text: L("Все Pro-функции доступны"), color: .green)
+                            StatusRow(icon: "wrench.and.screwdriver", text: L("Покупки включатся после настройки магазина"), color: .secondary)
+                        } else if Licensing.shared.activated {
+                            StatusRow(icon: "checkmark.circle.fill", text: L("Лицензия активирована"), color: .green)
                             if let instance = Licensing.shared.instanceID {
-                                StatusRow(icon: "macbook", text: String(format: L(\"Mac ID: %@\"), String(instance.prefix(8))), color: .secondary)
+                                StatusRow(icon: "macbook", text: String(format: L("Mac ID: %@"), String(instance.prefix(8))), color: .secondary)
                             }
                             if let lastCheck = lastCheckDate ?? loadLastCheckDate() {
-                                StatusRow(icon: "clock", text: String(format: L(\"Последняя проверка: %@\"), formatter.string(from: lastCheck)), color: .secondary)
+                                StatusRow(icon: "clock", text: String(format: L("Последняя проверка: %@"), formatter.string(from: lastCheck)), color: .secondary)
                             }
                         } else if Licensing.shared.inTrial {
-                            StatusRow(icon: "hourglass", text: String(format: L(\"Осталось дней триала: %@\"), "\(Licensing.shared.trialDaysLeft)"), color: .orange)
-                            StatusRow(icon: "calendar", text: String(format: L(\"До конца: %@\"), "\(Licensing.shared.trialDays) \(Licensing.shared.plural(Licensing.shared.trialDays, L(\"день\"), L(\"дня\"), L(\"дней\")))"), color: .secondary)
+                            StatusRow(icon: "hourglass", text: String(format: L("Осталось дней триала: %@"), "\(Licensing.shared.trialDaysLeft)"), color: .orange)
+                            StatusRow(icon: "calendar", text: String(format: L("До конца: %@"), "\(Licensing.shared.trialDays) \(Licensing.shared.plural(Licensing.shared.trialDays, L("день"), L("дня"), L("дней")))"), color: .secondary)
                         } else {
-                            StatusRow(icon: "info.circle.fill", text: L(\"Мониторинг бесплатен навсегда\"), color: .blue)
-                            StatusRow(icon: "lock.fill", text: L(\"Управление требует Pro\"), color: .secondary)
+                            StatusRow(icon: "info.circle.fill", text: L("Мониторинг бесплатен навсегда"), color: .blue)
+                            StatusRow(icon: "lock.fill", text: L("Управление требует Pro"), color: .secondary)
                         }
                     }
                     .font(.system(size: 13))
@@ -1613,28 +1616,28 @@ private struct ProSettingsPage: View {
                         Button(action: openCheckout) {
                             HStack {
                                 Image(systemName: "bag.fill")
-                                Text(String(format: L(\"Купить за %@ — навсегда\"), AppConfig.proPriceDisplay))
+                                Text(String(format: L("Купить за %@ — навсегда"), AppConfig.proPriceDisplay))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!Licensing.isStoreConfigured)
+                        .buttonStyle(DefaultButtonStyle())
+                        .disabled(!AppConfig.isCheckoutURLValid)
                         
-                        if !Licensing.isStoreConfigured {
-                            Text(L(\"Покупка временно недоступна\"))
+                        if !AppConfig.isCheckoutURLValid {
+                            Text(L("Покупка временно недоступна"))
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
                         }
                         
                         // Trial info
                         VStack(spacing: 6) {
-                            Text(String(format: L(\"%@ на %@\"), AppConfig.proPriceDisplay, L(\"2 Mac\")))
+                            Text(String(format: L("%@ на %@"), AppConfig.proPriceDisplay, L("2 Mac")))
                                 .font(.system(size: 12, weight: .medium))
-                            Text(L(\"Без подписки • Один платёж\"))
+                            Text(L("Без подписки • Один платёж"))
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
-                            Text(String(format: L(\"%@ %@\"), L(\"Включает\"), L(\"триал \(Licensing.shared.trialDays) дн.\")))
+                            Text(String(format: L("%@ %@"), L("Включает"), L("триал \(Licensing.shared.trialDays) дн.")))
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
                         }
@@ -1646,18 +1649,18 @@ private struct ProSettingsPage: View {
             // MARK: Activation Section (only for non-activated)
             if !Licensing.shared.activated {
                 // MARK: Activate with Key
-                KelvinCard(L(\"Активация ключом\")) {
+                KelvinCard(L("Активация ключом")) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 8) {
-                            SecureField(L(\"Лицензионный ключ\"), text: $key)
+                            SecureField(L("Лицензионный ключ"), text: $key)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
-                                .font(.system(size: 13, family: "monospace"))
+                                .font(.system(size: 13, design: .monospaced))
                             
                             Button(action: pasteFromClipboard) {
                                 Image(systemName: "doc.on.doc")
                                     .frame(width: 32, height: 32)
                             }
-                            .help(L(\"Вставить из буфера\"))
+                            .help(L("Вставить из буфера"))
                             .disabled(key.isEmpty == false)
                         }
                         
@@ -1669,11 +1672,11 @@ private struct ProSettingsPage: View {
                                             .controlSize(.small)
                                             .progressViewStyle(.circular)
                                     }
-                                    Text(activating ? L(\"Активация...\") : L(\"Активировать\"))
+                                    Text(activating ? L("Активация...") : L("Активировать"))
                                 }
                                 .frame(minWidth: 100)
                             }
-                            .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || activating)
+                            .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || activating || !Licensing.isStoreConfigured)
                             
                             Spacer()
                             
@@ -1687,9 +1690,9 @@ private struct ProSettingsPage: View {
                         }
                         
                         // Helper text
-                        Text(L(\"Ключ приходит на email после покупки в Lemon Squeezy\"))
+                        Text(L("Ключ приходит на email после покупки в Lemon Squeezy"))
                             .font(.system(size: 10))
-                            .foregroundColor(.tertiary)
+                            .foregroundColor(.secondary.opacity(0.7))
                     }
                     .padding(16)
                 }
@@ -1697,7 +1700,7 @@ private struct ProSettingsPage: View {
                 // MARK: Restore / Links
                 KelvinCard {
                     VStack(spacing: 10) {
-                        Button(L(\"Восстановить покупку / Активировать существующую лицензию\")) {
+                        Button(L("Восстановить покупку / Активировать существующую лицензию")) {
                             // Same as activate - user enters key
                             NSApp.sendAction(#selector(NSResponder.selectAll(_:)), to: nil, from: nil)
                         }
@@ -1706,9 +1709,9 @@ private struct ProSettingsPage: View {
                         Divider()
                         
                         HStack(spacing: 16) {
-                            LinkButton(title: L(\"Privacy\"), url: "https://trykelvin.com/privacy.html")
-                            LinkButton(title: L(\"EULA\"), url: "https://trykelvin.com/eula.html")
-                            LinkButton(title: L(\"Support\"), url: "mailto:support@trykelvin.com")
+                            LinkButton(title: L("Privacy"), url: "https://trykelvin.com/privacy.html")
+                            LinkButton(title: L("EULA"), url: "https://trykelvin.com/eula.html")
+                            LinkButton(title: L("Support"), url: "mailto:support@trykelvin.com")
                         }
                     }
                     .padding(16)
@@ -1719,12 +1722,12 @@ private struct ProSettingsPage: View {
             if Licensing.shared.activated {
                 KelvinCard {
                     VStack(spacing: 12) {
-                        Text(L(\"Управление лицензией\"))
+                        Text(L("Управление лицензией"))
                             .font(.system(size: 14, weight: .semibold))
                         
                         HStack {
                             Button(action: { showDeactivateConfirm = true }) {
-                                Text(L(\"Деактивировать этот Mac\"))
+                                Text(L("Деактивировать этот Mac"))
                                     .foregroundColor(.red)
                             }
                             .buttonStyle(.borderless)
@@ -1732,12 +1735,12 @@ private struct ProSettingsPage: View {
                             Spacer()
                             
                             Button(action: manualRevalidate) {
-                                Text(L(\"Проверить сейчас\"))
+                                Text(L("Проверить сейчас"))
                             }
                             .buttonStyle(.borderless)
                         }
                         
-                        Text(L(\"Деактивация освободит слот для активации на другом компьютере\"))
+                        Text(L("Деактивация освободит слот для активации на другом компьютере"))
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
@@ -1764,7 +1767,7 @@ private struct ProSettingsPage: View {
     // MARK: Actions
     
     private func openCheckout() {
-        if let url = Licensing.checkoutURL(), let realURL = URL(string: url) {
+        if let url = Licensing.checkoutURL, let realURL = URL(string: url) {
             NSWorkspace.shared.open(realURL)
         }
     }
@@ -1784,8 +1787,7 @@ private struct ProSettingsPage: View {
                 status = ok ? "✓ " + message : message
                 if ok {
                     key = ""  // Clear sensitive data
-                    lastCheckDate = Date()
-                    saveLastCheckDate(Date())
+                    lastCheckDate = Licensing.shared.lastValidatedAt
                     KelvinSettingsWindowController.shared.refresh()
                 }
             }
@@ -1794,28 +1796,22 @@ private struct ProSettingsPage: View {
     
     private func performDeactivation() {
         Licensing.shared.deactivate()
-        status = L(\"Деактивировано\")
+        status = L("Деактивировано")
         lastCheckDate = nil
         KelvinSettingsWindowController.shared.refresh()
     }
     
     private func manualRevalidate() {
-        status = L(\"Проверка...\")
-        Licensing.shared.revalidate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            lastCheckDate = Date()
-            saveLastCheckDate(lastCheckDate!)
-            status = L(\"Проверено\")
+        status = L("Проверка...")
+        Licensing.shared.revalidate { ok in
+            lastCheckDate = Licensing.shared.lastValidatedAt
+            status = ok ? L("Проверено") : L("Не удалось проверить лицензию")
             KelvinSettingsWindowController.shared.refresh()
         }
     }
     
     private func loadLastCheckDate() -> Date? {
-        UserDefaults.standard.object(forKey: "lic.lastCheck") as? Date
-    }
-    
-    private func saveLastCheckDate(_ date: Date) {
-        UserDefaults.standard.set(date, forKey: "lic.lastCheck")
+        Licensing.shared.lastValidatedAt
     }
 }
 
@@ -1862,16 +1858,16 @@ private struct DeactivationConfirmationSheet: View {
     
     var body: some View {
         VStack(spacing: 20) {
-            Text(L(\"Деактивировать лицензию?\"))
+            Text(L("Деактивировать лицензию?"))
                 .font(.system(size: 16, weight: .semibold))
             
-            Text(L(\"Это освободит слот активации на этом Mac. Вы сможете активировать снова этим же ключом.\"))
+            Text(L("Это освободит слот активации на этом Mac. Вы сможете активировать снова этим же ключом."))
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             
             HStack {
-                Text(L(\"Введите \"деактивировать\" для подтверждения:\"))
+                Text(L("Введите «деактивировать» для подтверждения:"))
                     .font(.system(size: 11))
                 SecureField("", text: $confirmText)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
@@ -1880,17 +1876,17 @@ private struct DeactivationConfirmationSheet: View {
             
             HStack(spacing: 12) {
                 Button(action: onCancel) {
-                    Text(L(\"Отмена\"))
+                    Text(L("Отмена"))
                         .frame(minWidth: 80)
                 }
                 .keyboardShortcut(.cancelAction)
                 
                 Button(action: onConfirm) {
-                    Text(L(\"Деактивировать\"))
+                    Text(L("Деактивировать"))
                         .foregroundColor(.red)
                         .frame(minWidth: 80)
                 }
-                .disabled(confirmText.lowercased() != L(\"деактивировать\"))
+                .disabled(confirmText.lowercased() != L("деактивировать"))
                 .keyboardShortcut(.defaultAction)
             }
         }

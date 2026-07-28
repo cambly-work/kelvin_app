@@ -56,12 +56,7 @@ enum AppConfig {
     /// Магазин Lemon Squeezy реально настроен?
     static var isStoreConfigured: Bool {
         guard let store = lemonSqueezyStoreID, let product = lemonSqueezyProductID else { return false }
-        if store <= 0 || product <= 0 { return false }
-        // checkout URL должен быть HTTPS и не example.com
-        if let url = lemonSqueezyCheckoutURL {
-            guard url.hasPrefix("https://"), !url.contains("example.com") else { return false }
-        }
-        return true
+        return store > 0 && product > 0
     }
     
     /// Team ID настроен для production validation?
@@ -75,6 +70,10 @@ enum AppConfig {
         guard let url = lemonSqueezyCheckoutURL else { return false }
         return url.hasPrefix("https://") && !url.contains("example.com")
     }
+
+    /// Paywall включается только когда одновременно готовы покупка и активация.
+    /// Это не даёт случайно заблокировать Pro-функции релизом с незаполненными nil.
+    static var isCommerceEnabled: Bool { isStoreConfigured && isCheckoutURLValid }
     
     /// Diagnostic message для DEBUG (почему магазин не готов).
     static var storeDiagnosticMessage: String {
