@@ -2270,6 +2270,9 @@ final class PopoverController: NSViewController {
             appsStack.trailingAnchor.constraint(equalTo: host.trailingAnchor),
         ])
         appsFlipHost = host
+        // Рейтинг не должен «дышать» по высоте, когда top временно вернул меньше
+        // процессов или helper-процессы объединились в одно приложение.
+        host.heightAnchor.constraint(greaterThanOrEqualToConstant: 226).isActive = true
         // Компактная системная сводка завершает рейтинг и не конкурирует с ним отдельным графиком.
         let statsRow = NSStackView(views: [miniStat(appsFootProcs, NSTextField(labelWithString: L("Процессов"))),
                                            miniStat(appsFootCPU, NSTextField(labelWithString: L("CPU всего"))),
@@ -2447,6 +2450,16 @@ final class PopoverController: NSViewController {
         }
         lastAuraColor = resolved
         auraView.setColor(resolved, animated: animated, intensity: 0.72, duration: 0.72)
+    }
+
+    /// Цвет системной стрелки/рамки NSPopover. Контент рисует AuraView, но стрелка
+    /// принадлежит отдельному окну AppKit и сама ауру не наследует.
+    func popoverChromeColor() -> NSColor {
+        let base = isDark
+            ? NSColor(calibratedWhite: 0.13, alpha: 1)
+            : NSColor(calibratedWhite: 0.96, alpha: 1)
+        let aura = Design.Color.stateColor(lastVerdictLevel, isDark)
+        return base.blended(withFraction: isDark ? 0.14 : 0.08, of: aura) ?? base
     }
     /// Консоль-включение (power-up): СЕКВЕНЦИЯ вместо одновременного всплытия —
     /// (1) шов прорисовывается сверху вниз, (2) ряды-плитки оседают со стаггером 0.045
@@ -4111,7 +4124,9 @@ final class PopoverController: NSViewController {
     }
 
     @objc private func refreshApps() {
-        PowerInfo.topApps { [weak self] in self?.updateApps($0) }
+        // Берём расширенный сырой пул: после объединения helper/web-content процессов
+        // всё равно остаётся полноценный топ из шести самостоятельных приложений.
+        PowerInfo.topApps(limit: 18) { [weak self] in self?.updateApps($0) }
     }
 
     @objc private func openSettings() {
@@ -4358,9 +4373,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Template (монохром): узнаётся формой, система тинтует под свет/тьму/подсветку.
     /// Главная иконка строки меню по выбранному стилю (термометр / батарея) — обе charge-aware.
     func menuBarIcon(charge: Int, charging: Bool) -> NSImage {
-        SettingsStore.mainIconStyle == "battery"
+        if SettingsStore.menuBarIconStyle == "system",
+           let image = systemMenuBarIcon(charge: charge, charging: charging) {
+            return image
+        }
+        return SettingsStore.mainIconStyle == "battery"
             ? menuBarBatteryIcon(charge: charge, charging: charging)
             : menuBarThermometerIcon(charge: charge, charging: charging)
+    }
+
+    /// Нативная ветка использует только SF Symbols и системный template-тинт.
+    /// Уровни кратны 25%, как у стандартных индикаторов macOS; точный процент остаётся рядом.
+    private func systemMenuBarIcon(charge: Int, charging: Bool) -> NSImage? {
+        let symbol: String
+        if SettingsStore.mainIconStyle == "thermometer" {
+            symbol = "thermometer.medium"
+        } else {
+            let level: Int
+            switch charge {
+            case ..<13: level = 0
+            case ..<38: level = 25
+            case ..<63: level = 50
+            case ..<88: level = 75
+            default: level = 100
+            }
+            symbol = "battery.\(level)"
+        }
+        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: charging ? L("Зарядка") : nil)?
+            .withSymbolConfiguration(config) else { return nil }
+        image.isTemplate = true
+        return image
     }
 
     /// Charge-aware батарея (горизонтальная): уровень заливки = заряд, молния-вырез при зарядке.
@@ -4831,7 +4874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func refreshApps() {
         guard popover.isShown else { return }             // /usr/bin/top незачем спавнить при закрытом поповере
-        PowerInfo.topApps { [weak self] in self?.controller.updateApps($0) }
+        PowerInfo.topApps(limit: 18) { [weak self] in self?.controller.updateApps($0) }
     }
 
     func checkIdleBacklight() {
@@ -5512,6 +5555,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             pwin.collectionBehavior.insert(.canJoinAllSpaces)
             pwin.collectionBehavior.insert(.fullScreenAuxiliary)
             if overFullscreen { pwin.level = .statusBar }
+            // Нативная стрелка NSPopover — часть window chrome, не AuraView. Без явного
+            // цвета при прозрачном контенте AppKit оставлял её почти чёрной.
+            pwin.isOpaque = false
+            pwin.backgroundColor = controller.popoverChromeColor()
         }
         tick()                                        // isShown уже true → первый полный апдейт сразу
         refreshApps()

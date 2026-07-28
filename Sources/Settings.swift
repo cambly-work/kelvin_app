@@ -172,7 +172,7 @@ enum SettingsStore {
         set { d.set(newValue, forKey: "menubar.extraIcons") }
     }
     static var menuBarIconStyle: String {    // стиль глифов показателей: kelvin (фирменные) | system (SF Symbols)
-        get { d.string(forKey: "menubar.iconStyle") ?? "kelvin" }
+        get { d.string(forKey: "menubar.iconStyle") ?? "system" }
         set { d.set(newValue, forKey: "menubar.iconStyle") }
     }
     static var mainIconStyle: String {       // главная иконка строки меню (режим «Батарея»): thermometer | battery
@@ -726,6 +726,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func open() {
         KelvinSettingsWindowController.shared.open()
+    }
+
+    /// Полный инженерный редактор охлаждения пока остаётся AppKit-канвасом:
+    /// multi-sensor max-of, отдельные вентиляторы, точки кривой, ramp и idle handoff.
+    /// Новый SwiftUI overview открывает его адресно этой точкой входа.
+    func openAdvancedCoolingEditor() {
+        WindowChrome.becomeRegular()
+        NSApp.activate(ignoringOtherApps: true)
+        select(.power)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
     }
 
     /// Пересобрать раздел «Питание и охлаждение», ЕСЛИ окно открыто и показывает именно его — чтобы после

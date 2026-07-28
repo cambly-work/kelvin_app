@@ -971,7 +971,7 @@ private final class EngineRowView: NSView {
 /// documentView с сотнями постоянных строк. Это уменьшает layer tree, tracking areas и стоимость
 /// скролла, при этом внешний API HardwareView сохранён.
 final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    static let panelH: CGFloat = 232
+    static let panelH: CGFloat = 280
 
     private enum Layout {
         static let intrinsicWidth: CGFloat = 272
@@ -1142,7 +1142,7 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
         firstRow.distribution = .fillEqually
         firstRow.spacing = 6
 
-        let secondRow = NSStackView(views: [gauges[3], gauges[4]])
+        let secondRow = NSStackView(views: [gauges[2], gauges[3], gauges[4]])
         secondRow.orientation = .horizontal
         secondRow.distribution = .fillEqually
         secondRow.spacing = 6
@@ -1545,11 +1545,6 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
         let cpu = temperatures.first { $0.id == "cpu" }
         let gpu = temperatures.first { $0.id == "gpu" }
 
-        let representedIDs: Set<String> = ["cpu", "cpupkg", "gpu"]
-        let hottestOther = temperatures
-            .filter { !representedIDs.contains($0.id) }
-            .max { $0.value < $1.value }
-
         let partialPower = !(lastEnergy.systemWatts > 0.1)
         let watts = partialPower
             ? (lastComponents.cpu ?? 0) + (lastComponents.gpu ?? 0)
@@ -1569,13 +1564,27 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
             kind: .temp,
             level: gpu.map { Design.sensorLevel(id: "gpu", $0.value) }
         )
+        let frequencyFraction = lastComponents.freqFraction
+        let frequencyText: String = {
+            guard let mhz = lastComponents.freqMHz else { return "—" }
+            return mhz >= 1_000 ? String(format: "%.2f", mhz / 1_000) : String(format: "%.0f", mhz)
+        }()
         gauges[2].set(
-            value: hottestOther?.value,
-            text: hottestOther.map { String(format: "%.0f°", $0.value) } ?? "—",
-            cap: hottestOther?.name ?? L("Прочее"),
-            kind: .temp,
-            level: hottestOther.map { Design.sensorLevel(id: $0.id, $0.value) }
+            value: frequencyFraction.map { min(max($0, 0), 1.25) / 1.25 },
+            text: frequencyText,
+            cap: lastComponents.freqMHz.map { $0 >= 1_000 ? L("CPU, ГГц") : L("CPU, МГц") } ?? L("Частота CPU"),
+            kind: .turbo,
+            level: nil
         )
+        if let fraction = frequencyFraction, let mhz = lastComponents.freqMHz {
+            gauges[2].toolTip = String(
+                format: L("Средняя частота CPU: %.0f МГц · %.0f%% от номинальной. Устойчивая частота ниже номинальной при высокой загрузке может указывать на троттлинг."),
+                mhz,
+                fraction * 100
+            )
+        } else {
+            gauges[2].toolTip = L("Частота доступна после установки системного помощника powermetrics.")
+        }
         gauges[3].set(
             value: watts > 0 ? watts : nil,
             text: watts > 0 ? String(format: "%.0f", watts) : "—",

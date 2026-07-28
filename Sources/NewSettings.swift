@@ -557,6 +557,19 @@ private struct GeneralSettingsPage: View {
                     }
                 }
                 CardDivider()
+                SettingsRow("paintpalette", L("Стиль иконок"),
+                            detail: L("Системные используют оригинальные SF Symbols macOS; Kelvin — фирменные векторные глифы.")) {
+                    Picker("", selection: settingBinding(
+                        get: { SettingsStore.menuBarIconStyle },
+                        set: { SettingsStore.menuBarIconStyle = $0; model.changed(menuBar: true) }
+                    )) {
+                        Text(L("Системные macOS")).tag("system")
+                        Text("Kelvin").tag("kelvin")
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
+                CardDivider()
                 SettingsRow("bolt", L("Показывать потребление")) {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.menuBarShowWatts },
@@ -571,18 +584,6 @@ private struct GeneralSettingsPage: View {
                     )).labelsHidden()
                 }
                 if SettingsStore.menuBarCombined {
-                    CardDivider()
-                    SettingsRow("paintpalette", L("Стиль иконок")) {
-                        Picker("", selection: settingBinding(
-                            get: { SettingsStore.menuBarIconStyle },
-                            set: { SettingsStore.menuBarIconStyle = $0; model.changed(menuBar: true) }
-                        )) {
-                            Text("Kelvin").tag("kelvin")
-                            Text(L("Системный")).tag("system")
-                        }
-                        .labelsHidden()
-                        .frame(width: 130)
-                    }
                     ForEach(Array(Self.menuExtraDefs.enumerated()), id: \.element.id) { index, def in
                         CardDivider()
                         SettingsRow("circle", def.label) {
@@ -811,6 +812,7 @@ private struct CoolingSettingsPage: View {
     private let coolingTopology = FanController.coolingTopology()
     private let isPassive = FanController.isPassiveCooling
     private let hasFans = FanController.hasActiveCooling
+    private var fans: [FanInfo] { FanController.fans() }
     
     var body: some View {
         VStack(spacing: 18) {
@@ -855,6 +857,26 @@ private struct CoolingSettingsPage: View {
                         get: { SettingsStore.fanAutoBySource },
                         set: { SettingsStore.fanAutoBySource = $0; model.changed(popover: true) }
                     )).labelsHidden()
+                }
+                CardDivider()
+                SettingsRow("slider.horizontal.3", L("Профессиональный редактор"),
+                            detail: L("Кривые по нескольким датчикам, отдельная настройка каждого вентилятора, время разгона, передача управления macOS в простое и аварийный порог.")) {
+                    Button(L("Открыть…")) {
+                        SettingsWindowController.shared.openAdvancedCoolingEditor()
+                    }
+                }
+            }
+
+            KelvinCard(L("Текущее охлаждение")) {
+                ForEach(Array(fans.enumerated()), id: \.offset) { index, fan in
+                    SettingsRow("fanblades",
+                                fans.count > 1 ? String(format: L("Вентилятор %d"), index + 1) : L("Вентилятор"),
+                                detail: String(format: L("Сейчас %.0f об/мин · диапазон %.0f–%.0f об/мин%@"),
+                                               fan.rpm, fan.min, fan.max,
+                                               fan.forced ? " · " + L("принудительный режим") : "")) {
+                        EmptyView()
+                    }
+                    if index < fans.count - 1 { CardDivider() }
                 }
             }
             }
