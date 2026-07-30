@@ -20,6 +20,12 @@
    - fan/charge/powermetrics/firewall/hosts/GPU;
    - однократное системное одобрение;
    - миграция и удаление старых демонов.
+5. `IMPLEMENTATION_PLAN_GPU_SWITCHING.md`
+   - сфокусированный GPU MVP;
+   - переключение из Settings и popover;
+   - одноразовая установка привилегированного сервиса;
+   - автоматика по питанию от сети/батареи;
+   - security и hardware QA.
 
 ## Рекомендуемый порядок проектов
 

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trykelvin.kelvin.privileged</string>
+
+    <key>MachServices</key>
+    <dict>
+        <key>com.trykelvin.kelvin.privileged</key>
+        <true/>
+    </dict>
+
+    <!--
+        Путь к бинарю внутри bundle.
+        SMAppService (macOS 13+) запускает daemon относительно бандла приложения.
+        SMJobBless (macOS 11-12) копирует бинарь в /Library/PrivilegedHelperTools/,
+        но plist также валидируется из Contents/Library/LaunchDaemons/.
+    -->
+    <key>Program</key>
+    <string>Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged</string>
+    </array>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/kelvin-privileged.log</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/kelvin-privileged.log</string>
+</dict>
+</plist>

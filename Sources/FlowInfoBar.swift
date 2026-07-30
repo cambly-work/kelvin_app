@@ -46,16 +46,26 @@ final class FlowInfoBar: NSView {
             // одноранговые элементы вкладки набраны ОДНОЙ парой, а не двумя
             cap.contentsScale = scale; cap.alignmentMode = .center; cap.truncationMode = .end
             cap.font = NSFont.systemFont(ofSize: 9, weight: .regular); cap.fontSize = 9
-            cap.foregroundColor = NSColor.secondaryLabelColor.cgColor   // один ранг серого на все подписи
             val.contentsScale = scale; val.alignmentMode = .center; val.truncationMode = .end
             val.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold); val.fontSize = 12
-            val.foregroundColor = NSColor.labelColor.cgColor
             layer?.addSublayer(cap); layer?.addSublayer(val)
             focusRingType = .default
+            applyResolvedColors()
         }
         required init?(coder: NSCoder) { fatalError() }
         override var isFlipped: Bool { true }
         private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+        private func resolved(_ color: NSColor) -> NSColor {
+            Design.Color.resolved(color, dark: isDark)
+        }
+        private func applyResolvedColors() {
+            cap.foregroundColor = resolved(.secondaryLabelColor).cgColor
+            val.foregroundColor = resolved(.labelColor).cgColor
+        }
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            applyResolvedColors()
+        }
         override func layout() {
             super.layout()
             let w = bounds.width, h = bounds.height
@@ -68,8 +78,9 @@ final class FlowInfoBar: NSView {
             // (закон «подписи обычным регистром»); ранг серого = secondaryLabel (один на все подписи).
             cap.string = NSAttributedString(string: c,
                 attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                             .foregroundColor: pinned ? tint : NSColor.secondaryLabelColor])
+                             .foregroundColor: pinned ? tint : resolved(.secondaryLabelColor)])
             CATransaction.begin(); CATransaction.setDisableActions(true)
+            val.foregroundColor = resolved(.labelColor).cgColor
             val.string = v
             CATransaction.commit()
         }

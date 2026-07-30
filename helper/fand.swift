@@ -97,6 +97,7 @@ let gFanCount: Int = {
     return 0  // Вентиляторы не обнаружены (fanless или данные недоступны)
 }()
 var gProfilePath = ""
+var gFollowConsoleUser = false
 var gDry = false
 var gSignalSources: [DispatchSourceSignal] = []
 
@@ -105,6 +106,29 @@ func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(max(v, lo), 
 
 func restoreFansAuto() { gSMC.write("FS! ", 0) }            // снять ручной режим вентиляторов
 func restoreAll() { gSMC.write("FS! ", 0); gSMC.write("BCLM", 100) }   // + снять лимит заряда
+
+/// LaunchDaemon один на систему, а конфигурация принадлежит активному пользователю.
+/// Не фиксируем home того, кто установил helper: при Fast User Switching безопасно
+/// переключаемся на профиль текущего console-user.
+func refreshConsoleUserProfile() -> Bool {
+    guard gFollowConsoleUser else { return !gProfilePath.isEmpty }
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: "/dev/console"),
+          let user = attrs[.ownerAccountName] as? String,
+          !user.isEmpty,
+          !["root", "loginwindow", "_mbsetupuser"].contains(user),
+          let home = NSHomeDirectoryForUser(user)
+    else {
+        gProfilePath = ""
+        return false
+    }
+    let next = (home as NSString)
+        .appendingPathComponent("Library/Application Support/Kelvin/fan-profile.json")
+    if next != gProfilePath {
+        gProfilePath = next
+        log("активный пользователь: \(user); profile=\(next)")
+    }
+    return true
+}
 
 // ── charge config (обратно совместима с {"limit":N}) ─────────────────────────
 // Расширенная конфигурация лимита заряда. Демон пишет ТОЛЬКО ключ BCLM [50,100].
@@ -406,6 +430,7 @@ struct Fand {
         while i < a.count {
             switch a[i] {
             case "--profile": if i + 1 < a.count { gProfilePath = a[i + 1]; i += 1 }
+            case "--follow-console-user": gFollowConsoleUser = true
             case "--dry-run": gDry = true
             default: break
             }
@@ -413,7 +438,9 @@ struct Fand {
         }
 
         guard gSMC.available else { log("SMC недоступен"); exit(1) }
-        guard gFanCount > 0 else { log("Вентиляторы не найдены"); exit(1) }
+        // На fanless Mac этот service всё равно нужен для BCLM. Отсутствие
+        // вентиляторов отключает только fan-policy, но не charge-policy.
+        if gFanCount == 0 { log("Вентиляторов нет; работает только управление зарядом") }
 
         // восстановление системного режима при остановке (launchctl unload шлёт SIGTERM; SIGHUP — на всякий)
         for sig in [SIGTERM, SIGINT, SIGHUP] {
@@ -426,6 +453,11 @@ struct Fand {
 
         log("fand старт: fans=\(gFanCount) dry=\(gDry) profile=\(gProfilePath)")
         while true {
+            guard refreshConsoleUserProfile() else {
+                if !gDry { restoreAll() }
+                Thread.sleep(forTimeInterval: 2)
+                continue
+            }
             // лимит заряда: если конфиг «протух» (приложение исчезло) — снимаем лимит (100 = безопасно)
             let chargePath = (gProfilePath as NSString).deletingLastPathComponent + "/charge-limit.json"
             let limit = fileFresh(chargePath) ? computeBCLM(loadChargeCfg()) : 100   // протухшая аренда ⇒ 100

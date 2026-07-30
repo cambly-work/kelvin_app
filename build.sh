@@ -52,6 +52,19 @@ lipo -create -output "$APP/Contents/Resources/kelvin-fand" $TMPDIR_FAND/fand-x86
 rm -rf "$TMPDIR_FAND"
 strip -x "$APP/Contents/Resources/kelvin-fand" 2>/dev/null || true
 
+echo "→ Privileged XPC-сервис (GPU switching)…"
+# Universal Binary для privileged helper
+TMPDIR_PRIV=$(mktemp -d)
+for arch in $ARCHS; do
+    xcrun swiftc -O -target "$arch-apple-macos11" helper/privileged/main.swift -o "$TMPDIR_PRIV/privileged-$arch" \
+        && echo "  ✓ privileged ($arch)" || { echo "  ✗ privileged-сервис не собрался для $arch"; rm -rf "$TMPDIR_PRIV"; exit 1; }
+done
+lipo -create -output "$APP/Contents/Resources/kelvin-privileged" $TMPDIR_PRIV/privileged-x86_64 $TMPDIR_PRIV/privileged-arm64
+rm -rf "$TMPDIR_PRIV"
+strip -x "$APP/Contents/Resources/kelvin-privileged" 2>/dev/null || true
+# Версия протокола — для update detection
+echo "1" > "$APP/Contents/Resources/kelvin-privileged.version"
+
 cp Info.plist "$APP/Contents/Info.plist"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 # офлайн-гео (DB-IP country-lite, скомпактировано): флаг страны для подключений без сетевых запросов
@@ -61,6 +74,15 @@ cp Info.plist "$APP/Contents/Info.plist"
 cp helper/*.sh "$APP/Contents/Resources/" 2>/dev/null || true
 [ -f helper/com.trykelvin.kelvin.powerd.plist ] && cp helper/com.trykelvin.kelvin.powerd.plist "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/"*.sh 2>/dev/null || true
+
+# Privileged GPU daemon: plist + binary в Contents/Library/LaunchDaemons/
+# SMAppService.daemon(plistName:) ищет plist именно там (macOS 13+).
+# SMJobBless (macOS 11-12) тоже читает plist из этого locations.
+echo "→ Privileged daemon plist в LaunchDaemons…"
+mkdir -p "$APP/Contents/Library/LaunchDaemons"
+cp helper/privileged/com.trykelvin.kelvin.privileged.plist "$APP/Contents/Library/LaunchDaemons/"
+# Копируем бинарь в LaunchDaemons (SMAppService запускает daemon из бандла)
+cp "$APP/Contents/Resources/kelvin-privileged" "$APP/Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged"
 
 echo "→ Ad-hoc подпись…"
 # A plain ad-hoc signature gets an implicit cdhash-based designated requirement.

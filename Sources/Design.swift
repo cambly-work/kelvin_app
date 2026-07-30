@@ -14,6 +14,11 @@ enum Design {
     enum Color {
         // Бренд-бирюза «термокамеры», полная шкала состояний (тема-зависимая)
         static func accent(_ dark: Bool) -> NSColor { dark ? srgb(0.20, 0.78, 0.82) : srgb(0.0, 0.55, 0.60) }     // #33C7D1 / #008C99 — канон
+        /// Динамическая версия акцента для AppKit-контролов. В отличие от `.controlAccentColor`
+        /// не зависит от выбранного пользователем системного accent macOS.
+        static let accentAdaptive = NSColor(name: NSColor.Name("KelvinAccent")) { appearance in
+            accent(appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        }
         static func accentBright(_ dark: Bool) -> NSColor { dark ? hex(0x4DEAEA) : hex(0x1AA8B3) }                  // hover/active, кольцо при charging
         static func accentDeep(_ dark: Bool) -> NSColor { dark ? hex(0x198C9E) : hex(0x006B78) }                   // pressed
         static func accentInk(_ dark: Bool) -> NSColor { dark ? hex(0x0A3342) : srgb(0.0, 0.42, 0.47) }            // тень акцентных слоёв (НЕ грязный accent-ореол)
@@ -62,6 +67,18 @@ enum Design {
         static func glassTint(_ accent: NSColor, _ dark: Bool) -> NSColor { accent.withAlphaComponent(dark ? 0.13 : 0.16) }
         /// Accent-кант героя лидерборда (топ-1): единый токен, чтобы app↔web-контракт не разъехался.
         static func accentRim(_ dark: Bool) -> NSColor { accent(dark).withAlphaComponent(0.35) }
+
+        /// `NSColor.labelColor` и другие semantic colors динамические. AppKit-контролы
+        /// разрешают их сами, но после преобразования в `CGColor` для CALayer тема теряется.
+        /// Этот мост фиксирует цвет в явно заданной appearance перед передачей Core Animation.
+        static func resolved(_ color: NSColor, dark: Bool) -> NSColor {
+            guard let appearance = NSAppearance(named: dark ? .darkAqua : .aqua) else { return color }
+            var resolved = color
+            appearance.performAsCurrentDrawingAppearance {
+                resolved = color.usingColorSpace(.deviceRGB) ?? color
+            }
+            return resolved
+        }
     }
 
     /// Канонический порог температуры (°C → уровень): ~70° warn / ~85° crit.

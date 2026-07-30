@@ -1,6 +1,44 @@
 import AppKit
 import UserNotifications
 
+/// Главный CTA онбординга. Нативный `NSButton` сохраняет Enter/VoiceOver,
+/// а цвет берёт из Kelvin, а не из пользовательского системного accent macOS.
+private final class OnboardingPrimaryButton: NSButton {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        wantsLayer = true
+        layer?.cornerRadius = Design.Radius.control
+        layer?.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer?.backgroundColor = Design.Color.accent(dark).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = Design.Color.accentBright(dark).withAlphaComponent(0.55).cgColor
+        attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: Design.Font.calloutEmph,
+                .foregroundColor: dark ? Design.Color.accentInk(true) : NSColor.white,
+            ]
+        )
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
+
 /// Welcome-экран при первом запуске: иконка, что умеет Kelvin, кнопка «Начать».
 /// Показывается один раз (флаг в UserDefaults); живёт в стекле, как остальной UI.
 final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
@@ -78,25 +116,25 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         icon.heightAnchor.constraint(equalToConstant: 84).isActive = true
 
         let title = NSTextField(labelWithString: L("Добро пожаловать в Kelvin"))
-        title.font = .systemFont(ofSize: 22, weight: .bold)
+        title.font = Design.Font.title
         let sub = NSTextField(labelWithString: L("Мониторинг и управление вашим Mac — из строки меню"))
         sub.font = Design.Font.body; sub.textColor = .secondaryLabelColor
 
         let features = NSStackView(views: [
-            feature("bolt.fill", .systemOrange, L("Энергия и питание"),
+            feature("bolt.fill", Design.Color.accentAdaptive, L("Энергия и питание"),
                     L("Живая схема расхода, ватты, состояние батареи и лимит заряда.")),
-            feature("thermometer.medium", .systemRed, L("Температуры и вентиляторы"),
+            feature("thermometer.medium", Design.Color.accentAdaptive, L("Температуры и вентиляторы"),
                     L("Сенсоры всего железа и управление оборотами кулеров.")),
-            feature("globe", .systemTeal, L("Переключение языка"),
+            feature("globe", Design.Color.accentAdaptive, L("Переключение языка"),
                     L("Авто-исправление раскладки и опечаток — как Punto, локально.")),
-            feature("lock.shield.fill", .systemGreen, L("Локально и безопасно"),
+            feature("lock.shield.fill", Design.Color.accentAdaptive, L("Локально и безопасно"),
                     L("Всё считается на вашем Mac. Без телеметрии и облака.")),
         ])
         features.orientation = .vertical; features.alignment = .leading; features.spacing = 16
 
         // MARK: — секция «Разрешения» (кнопки реально запрашивают доступы)
         let permHeader = NSTextField(labelWithString: L("Разрешения"))
-        permHeader.font = .systemFont(ofSize: 15, weight: .bold)
+        permHeader.font = Design.Font.headline
         let permIntro = NSTextField(wrappingLabelWithString:
             L("Kelvin работает и без них — но с ними раскрывается полностью. Можно пропустить и включить позже в Настройках."))
         permIntro.font = Design.Font.caption; permIntro.textColor = .secondaryLabelColor
@@ -106,12 +144,12 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         permHead.orientation = .vertical; permHead.alignment = .leading; permHead.spacing = 4
 
         let (notifRow, nBtn, nStatus) = permissionRow(
-            symbol: "bell.badge.fill", tint: .systemOrange,
+            symbol: "bell.badge.fill", tint: Design.Color.accentAdaptive,
             title: L("Уведомления"),
             desc: L("Пороги температуры и заряда, новые сетевые подключения."),
             buttonTitle: L("Разрешить"), buttonSymbol: "bell.fill")
         nBtn.onClick = { [weak self] in
-            AlertsEngine.shared.primeAuthorization { [weak self] granted in
+            AlertsEngine.shared.requestOrOpenSettings { [weak self] granted in
                 guard let self, self.window?.isVisible == true else { return }
                 self.setGranted(self.notifButton, self.notifStatus, granted)
             }
@@ -119,7 +157,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         self.notifButton = nBtn; self.notifStatus = nStatus
 
         let (axRow, aBtn, aStatus) = permissionRow(
-            symbol: "accessibility", tint: .systemBlue,
+            symbol: "accessibility", tint: Design.Color.accentAdaptive,
             title: L("Доступ к системе"),
             desc: L("Переключение раскладки, сниппеты и горячие клавиши. Клавиши читаются только для автозамены — локально."),
             buttonTitle: L("Разрешить"), buttonSymbol: "hand.raised.fill")
@@ -132,10 +170,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         let permSection = NSStackView(views: [permHead, notifRow, axRow])
         permSection.orientation = .vertical; permSection.alignment = .leading; permSection.spacing = 12
 
-        let start = NSButton(title: L("Начать"), target: self, action: #selector(finish))
-        start.bezelStyle = .rounded; start.controlSize = .large; start.keyEquivalent = "\r"
+        let start = OnboardingPrimaryButton(title: L("Начать"), target: self, action: #selector(finish))
+        start.keyEquivalent = "\r"
         start.translatesAutoresizingMaskIntoConstraints = false
         start.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        start.heightAnchor.constraint(equalToConstant: 38).isActive = true
 
         let note = NSTextField(labelWithString: L("Живёт в строке меню — без иконки в Dock"))
         note.font = Design.Font.caption; note.textColor = .tertiaryLabelColor
@@ -169,7 +208,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         icon.widthAnchor.constraint(equalToConstant: 36).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 30).isActive = true
 
-        let t = NSTextField(labelWithString: title); t.font = .systemFont(ofSize: 13.5, weight: .semibold)
+        let t = NSTextField(labelWithString: title); t.font = Design.Font.calloutEmph
         let d = NSTextField(wrappingLabelWithString: desc)
         d.font = Design.Font.callout; d.textColor = .secondaryLabelColor
         d.translatesAutoresizingMaskIntoConstraints = false
@@ -193,7 +232,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         icon.widthAnchor.constraint(equalToConstant: 32).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
-        let t = NSTextField(labelWithString: title); t.font = .systemFont(ofSize: 13, weight: .semibold)
+        let t = NSTextField(labelWithString: title); t.font = Design.Font.calloutEmph
         let d = NSTextField(wrappingLabelWithString: desc)
         d.font = Design.Font.caption; d.textColor = .secondaryLabelColor
         d.translatesAutoresizingMaskIntoConstraints = false
@@ -233,6 +272,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     }
     private func refreshPermissionStatus() {
         setGranted(axButton, axStatus, LangSwitcher.shared.isTrusted)       // Универсальный доступ — синхронно
+        // Только кэш последнего явного выбора: getNotificationSettings на этом
+        // экране приводил к SIGSEGV на старых macOS.
+        let state = AlertsEngine.shared.authorizationState
+        notifButton?.title = state == .denied ? L("Открыть настройки") : L("Разрешить")
+        setGranted(notifButton, notifStatus, state.canPost)
     }
     private func setGranted(_ button: GlassButton?, _ status: NSStackView?, _ granted: Bool) {
         button?.isHidden = granted        // NSStackView сам исключает скрытые вьюхи из раскладки

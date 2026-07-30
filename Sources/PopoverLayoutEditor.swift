@@ -140,7 +140,7 @@ final class PopoverMiniPreview: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = Design.Radius.group
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
     }
@@ -148,15 +148,13 @@ final class PopoverMiniPreview: NSView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        layer?.backgroundColor = NSColor(white: isDark ? 0.16 : 0.92, alpha: 1).cgColor
-        layer?.borderColor = NSColor(white: 1, alpha: isDark ? 0.10 : 0.0).cgColor
+        restyle()
     }
     private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
 
     func render(_ items: [PopoverItem]) {
         subviews.forEach { $0.removeFromSuperview() }
-        layer?.backgroundColor = NSColor(white: isDark ? 0.16 : 0.92, alpha: 1).cgColor
-        layer?.borderColor = NSColor(white: 1, alpha: isDark ? 0.10 : 0.0).cgColor
+        restyle()
 
         let enabled = items.filter { $0.on }
         let tops = enabled.filter { !PopoverLayoutEditor.tabIDs.contains($0.id) }
@@ -191,6 +189,12 @@ final class PopoverMiniPreview: NSView {
     private func heightFor(_ id: String) -> CGFloat {
         switch id { case "battery": return 34; case "toggles": return 30; default: return 22 }
     }
+
+    private func restyle() {
+        layer?.backgroundColor = Design.Color.controlFill(isDark).cgColor
+        layer?.borderColor = Design.Color.surfaceRim(isDark).cgColor
+    }
+
     /// SF-иконки вкладок — ЗЕРКАЛО реального таб-бара поповера (6 вкладок = иконки). Прежний shortName
     /// врал: «apps»→«Прогр.» и не переводил privacy/maintenance/history (показывал сырой id). Превью,
     /// которое врёт, учит не доверять настройкам — теперь 1:1 с живым баром (иконки + имя во всплывашке).
@@ -209,9 +213,9 @@ final class PopoverMiniPreview: NSView {
     private func block(_ text: String, h: CGFloat, accent: Bool) -> NSView {
         let v = NSView()
         v.wantsLayer = true
-        v.layer?.cornerRadius = 6
+        v.layer?.cornerRadius = Design.Radius.hwTile
         v.layer?.cornerCurve = .continuous
-        let base = accent ? NSColor.systemTeal : NSColor(white: isDark ? 1 : 0, alpha: 1)
+        let base = accent ? Design.Color.accent(isDark) : Design.Color.neutralNode(isDark)
         v.layer?.backgroundColor = base.withAlphaComponent(accent ? (isDark ? 0.22 : 0.18) : (isDark ? 0.12 : 0.07)).cgColor
         v.translatesAutoresizingMaskIntoConstraints = false
         let l = label(text)
@@ -237,7 +241,9 @@ final class PopoverMiniPreview: NSView {
             pill.wantsLayer = true
             pill.layer?.cornerRadius = 4
             let on = i == 0
-            pill.layer?.backgroundColor = NSColor(white: isDark ? 1 : 0, alpha: on ? (isDark ? 0.20 : 0.12) : (isDark ? 0.08 : 0.05)).cgColor
+            pill.layer?.backgroundColor = (on
+                ? Design.Color.accentMuted(isDark)
+                : Design.Color.tabTrack(isDark)).cgColor
             pill.translatesAutoresizingMaskIntoConstraints = false
             let iv = NSImageView()
             iv.image = NSImage(systemSymbolName: Self.tabIcon(id), accessibilityDescription: PopoverModules.title(id))
@@ -260,8 +266,8 @@ final class PopoverMiniPreview: NSView {
 
     private func label(_ text: String) -> NSTextField {
         let l = NSTextField(labelWithString: text)
-        l.font = .systemFont(ofSize: 8, weight: .medium)
-        l.textColor = isDark ? .secondaryLabelColor : NSColor(white: 0.3, alpha: 1)
+        l.font = Design.Font.microStat
+        l.textColor = .secondaryLabelColor
         l.translatesAutoresizingMaskIntoConstraints = false
         l.lineBreakMode = .byTruncatingTail
         return l

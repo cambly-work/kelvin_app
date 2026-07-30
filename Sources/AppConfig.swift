@@ -34,6 +34,17 @@ enum AppConfig {
     // Вписать Team ID из сертификата Developer ID Application (скобки из строки подписи).
     // Пример: "ABCDE12345" из "Developer ID Application: Artem Balabanov (ABCDE12345)"
     // nil → self-validation выключена (ad-hoc сборка).
+    //
+    // ВАЖНО для Privileged GPU Service: Team ID является release blocker.
+    // Привилегированный XPC-сервис (KelvinPrivilegedService) проверяет подпись
+    // и bundle ID подключающегося приложения. Без настроенного Team ID:
+    //   - сервис принимает ad-hoc подпись (небезопасно для production)
+    //   - validation в клиенте не может проверить identity сервиса
+    // Для production необходимо:
+    //   1. Настроить Developer ID Application подпись
+    //   2. Вписать Team ID сюда
+    //   3. Включить проверку Team ID в helper/privileged/main.swift
+    //   4. Notarize итоговый bundle
     static let expectedDeveloperTeamID: String? = nil       // ← Team ID из Apple Developer
     
     // ─── ССЫЛКА ДОНАТА («Поддержать автора») ──────────────────────────────────

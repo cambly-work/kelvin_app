@@ -360,7 +360,7 @@ final class AdvisorEngine {
         }
 
         return AdvisorFinding(
-            id: "battery.overheat.\(Int(temp))",
+            id: "battery.overheat",
             category: .battery,
             severity: severity,
             title: L("Батарея нагревается"),
@@ -391,7 +391,7 @@ final class AdvisorEngine {
         }
 
         return AdvisorFinding(
-            id: "battery.health.\(Int(health))",
+            id: "battery.health",
             category: .battery,
             severity: severity,
             title: health < 80.0 ? L("Значительный износ батареи") : L("Заметный износ батареи"),
@@ -447,11 +447,11 @@ final class AdvisorEngine {
 
         var action: AdvisorAction? = nil
         if s.fanHelperInstalled {
-            action = .activateFanProfile("cool")
+            action = .activateFanProfile("balance")
         }
 
         return AdvisorFinding(
-            id: "thermal.cpu.high.\(Int(temp))",
+            id: "thermal.cpu.high",
             category: .thermal,
             severity: severity,
             title: L("Высокая температура CPU"),
@@ -473,11 +473,11 @@ final class AdvisorEngine {
 
         var action: AdvisorAction? = nil
         if s.fanHelperInstalled {
-            action = .activateFanProfile("cool")
+            action = .activateFanProfile("balance")
         }
 
         return AdvisorFinding(
-            id: "thermal.gpu.high.\(Int(temp))",
+            id: "thermal.gpu.high",
             category: .thermal,
             severity: severity,
             title: L("Высокая температура GPU"),
@@ -506,7 +506,7 @@ final class AdvisorEngine {
         }
 
         return AdvisorFinding(
-            id: "storage.low.\(Int(freeGB))",
+            id: "storage.low",
             category: .storage,
             severity: severity,
             title: L("Мало места на диске"),
@@ -537,7 +537,7 @@ final class AdvisorEngine {
         }
 
         return AdvisorFinding(
-            id: "memory.pressure.\(s.memoryPressure.rawValue)",
+            id: "memory.pressure",
             category: .memory,
             severity: severity,
             title: L("Давление памяти"),
@@ -556,7 +556,7 @@ final class AdvisorEngine {
         let severity: AdvisorSeverity = s.recentCrashesCount >= 5 ? .warning : .notice
 
         return AdvisorFinding(
-            id: "maintenance.crashes.\(s.recentCrashesCount)",
+            id: "maintenance.crashes",
             category: .maintenance,
             severity: severity,
             title: L("Повторяющиеся сбои"),
@@ -570,7 +570,7 @@ final class AdvisorEngine {
 
 // MARK: - Helper extensions
 
-extension Array where Element: Hashable {
+extension Array {
     /// Уникализация по ключу.
     func uniqued(by key: (Element) -> String) -> [Element] {
         var seen: Set<String> = []

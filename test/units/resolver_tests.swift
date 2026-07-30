@@ -66,42 +66,42 @@ func runAllTests() {
     var failures = 0
     
     // Test 1: Known Intel model selects correct CPU/GPU keys
-    if case .failed = runTest("Intel model resolves CPU/GPU keys") {
+    if case .failed = runTest("Intel model resolves CPU/GPU keys", testIntelModelResolvesCPUKeys) {
         failures += 1
     }
     
     // Test 2: MacBook Air M1 fixture returns passive cooling
-    if case .failed = runTest("MBA M1 returns passive cooling") {
+    if case .failed = runTest("MBA M1 returns passive cooling", testMBAM1PassiveCooling) {
         failures += 1
     }
     
     // Test 3: Unknown model does not assign fake CPU/GPU roles
-    if case .failed = runTest("Unknown model has no confirmed CPU/GPU") {
+    if case .failed = runTest("Unknown model has no confirmed CPU/GPU", testUnknownModelNoFakeRoles) {
         failures += 1
     }
     
     // Test 4: Invalid temperature values are filtered out
-    if case .failed = runTest("Invalid temps (NaN/out-of-range) are filtered") {
+    if case .failed = runTest("Invalid temps (NaN/out-of-range) are filtered", testInvalidTempsFiltered) {
         failures += 1
     }
     
     // Test 5: Unavailable SMC returns empty resolved set
-    if case .failed = runTest("Unavailable SMC returns empty set") {
+    if case .failed = runTest("Unavailable SMC returns empty set", testUnavailableSMC) {
         failures += 1
     }
     
     // Test 6: FNum missing → unknown cooling
-    if case .failed = runTest("Missing FNum → unknown cooling") {
+    if case .failed = runTest("Missing FNum → unknown cooling", testMissingFNumUnknownCooling) {
         failures += 1
     }
     
     // Test 7: FNum == 0 on known fanless → passive
-    if case .failed = runTest("FNum==0 on fanless model → passive") {
+    if case .failed = runTest("FNum==0 on fanless model → passive", testFNumZeroOnFanlessPassive) {
         failures += 1
     }
     
     // Test 8: Wildcard pattern matches family
-    if case .failed = runTest("Wildcard pattern matches family") {
+    if case .failed = runTest("Wildcard pattern matches family", testWildcardPatternMatch) {
         failures += 1
     }
     
@@ -116,7 +116,7 @@ func runAllTests() {
 
 // MARK: - Individual Tests
 
-func testIntelModelResolvesCPUKeys() {
+func testIntelModelResolvesCPUKeys() throws {
     let catalog: [CatalogKey] = [
         .mock("TCXC"), .mock("TC0E"), .mock("TC0P"),
         .mock("TG0D"), .mock("TB0T"), .mock("FNum"), .mock("F0Ac")
@@ -144,7 +144,7 @@ func testIntelModelResolvesCPUKeys() {
     try assertEquals(result.hasActiveCooling, true)
 }
 
-func testMBAM1PassiveCooling() {
+func testMBAM1PassiveCooling() throws {
     let catalog: [CatalogKey] = [
         .mock("TC0P"), .mock("TB0T")
         // No FNum, no fans on MBA M1
@@ -169,7 +169,7 @@ func testMBAM1PassiveCooling() {
     try assertEquals(result.cpuTemperature?.keys.contains("TC0P"), true)
 }
 
-func testUnknownModelNoFakeRoles() {
+func testUnknownModelNoFakeRoles() throws {
     let catalog: [CatalogKey] = [
         .mock("TXYZ"), .mock("TZ01")  // Unknown temp keys
     ]
@@ -193,7 +193,7 @@ func testUnknownModelNoFakeRoles() {
     try assertEquals(result.gpuTemperature, nil, message: "Should not assign GPU role to unknown keys")
 }
 
-func testInvalidTempsFiltered() {
+func testInvalidTempsFiltered() throws {
     let catalog: [CatalogKey] = [
         .mock("TCXC"), .mock("TC0E"), .mock("TC0P")
     ]
@@ -212,14 +212,15 @@ func testInvalidTempsFiltered() {
         }
     )
     
-    // TCXC and TC0E should be filtered out, TC0P remains
+    // TCXC and TC0E should be filtered out; valid TC0P remains in its package role.
     let cpuKeys = result.cpuTemperature?.keys ?? []
+    let packageKeys = result.sensors[.cpuPackageTemperature]?.keys ?? []
     try assertEquals(cpuKeys.contains("TCXC"), false, message: "NaN should be filtered")
     try assertEquals(cpuKeys.contains("TC0E"), false, message: "Out-of-range should be filtered")
-    try assertEquals(cpuKeys.contains("TC0P"), true, message: "Valid temp should remain")
+    try assertEquals(packageKeys.contains("TC0P"), true, message: "Valid package temp should remain")
 }
 
-func testUnavailableSMC() {
+func testUnavailableSMC() throws {
     let catalog: [CatalogKey] = []  // Empty catalog
     
     let result = SensorResolver.resolve(
@@ -233,7 +234,7 @@ func testUnavailableSMC() {
     try assertEquals(result.cooling, .unknown, message: "No FNum → unknown cooling")
 }
 
-func testMissingFNumUnknownCooling() {
+func testMissingFNumUnknownCooling() throws {
     let catalog: [CatalogKey] = [
         .mock("TC0P"), .mock("TB0T")
         // No FNum
@@ -256,7 +257,7 @@ func testMissingFNumUnknownCooling() {
     try assertEquals(result.cooling, .unknown, message: "Missing FNum on unknown model → unknown")
 }
 
-func testFNumZeroOnFanlessPassive() {
+func testFNumZeroOnFanlessPassive() throws {
     let catalog: [CatalogKey] = [
         .mock("FNum"), .mock("TC0P")
     ]
@@ -277,7 +278,7 @@ func testFNumZeroOnFanlessPassive() {
     try assertEquals(result.isPassive, true, message: "FNum==0 on known fanless → passive")
 }
 
-func testWildcardPatternMatch() {
+func testWildcardPatternMatch() throws {
     let catalog: [CatalogKey] = [
         .mock("TCXC"), .mock("TC0P"), .mock("TG0D")
     ]

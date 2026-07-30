@@ -39,7 +39,10 @@ final class AuraView: NSView {
     /// Более яркое ядро у верхней кромки.
     private let bloomLayer = CAGradientLayer()
 
-    /// Узкий отражённый свет вдоль верхней границы.
+    /// Вторичный отблеск: даёт ауре глубину, не превращая фон в ровную цветную заливку.
+    private let shoulderLayer = CAGradientLayer()
+
+    /// Узкий отражённый свет под стрелкой поповера.
     private let edgeLayer = CAGradientLayer()
 
     // MARK: - State storage
@@ -85,39 +88,41 @@ final class AuraView: NSView {
             return
         }
 
-        let ambientHeight = min(
-            bounds.height,
-            max(260, bounds.width * 0.95)
-        )
+        let ambientHeight = min(bounds.height, max(220, bounds.width * 0.78))
 
-        let bloomHeight = min(
-            bounds.height,
-            max(170, bounds.width * 0.58)
-        )
+        let bloomHeight = min(bounds.height, max(142, bounds.width * 0.48))
+        let shoulderHeight = min(bounds.height, max(126, bounds.width * 0.42))
 
-        let edgeHeight = min(96, bounds.height)
+        let edgeHeight = min(58, bounds.height)
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
         ambientLayer.frame = CGRect(
-            x: -bounds.width * 0.10,
+            x: -bounds.width * 0.22,
             y: bounds.maxY - ambientHeight,
-            width: bounds.width * 1.20,
+            width: bounds.width * 1.30,
             height: ambientHeight
         )
 
         bloomLayer.frame = CGRect(
-            x: bounds.width * 0.08,
+            x: bounds.width * 0.22,
             y: bounds.maxY - bloomHeight,
-            width: bounds.width * 0.84,
+            width: bounds.width * 0.74,
             height: bloomHeight
         )
 
+        shoulderLayer.frame = CGRect(
+            x: -bounds.width * 0.12,
+            y: bounds.maxY - shoulderHeight,
+            width: bounds.width * 0.58,
+            height: shoulderHeight
+        )
+
         edgeLayer.frame = CGRect(
-            x: 0,
+            x: bounds.width * 0.20,
             y: bounds.maxY - edgeHeight,
-            width: bounds.width,
+            width: bounds.width * 0.60,
             height: edgeHeight
         )
 
@@ -142,9 +147,11 @@ final class AuraView: NSView {
 
         configureAmbientLayer()
         configureBloomLayer()
+        configureShoulderLayer()
         configureEdgeLayer()
 
         layer.addSublayer(ambientLayer)
+        layer.addSublayer(shoulderLayer)
         layer.addSublayer(bloomLayer)
         layer.addSublayer(edgeLayer)
 
@@ -154,25 +161,33 @@ final class AuraView: NSView {
 
     private func configureAmbientLayer() {
         ambientLayer.type = .radial
-        ambientLayer.startPoint = CGPoint(x: 0.50, y: 1.00)
-        ambientLayer.endPoint = CGPoint(x: 1.02, y: 0.05)
+        ambientLayer.startPoint = CGPoint(x: 0.48, y: 1.00)
+        ambientLayer.endPoint = CGPoint(x: 1.00, y: 0.02)
         ambientLayer.locations = [0.00, 0.30, 0.68, 1.00]
         disableImplicitAnimations(on: ambientLayer)
     }
 
     private func configureBloomLayer() {
         bloomLayer.type = .radial
-        bloomLayer.startPoint = CGPoint(x: 0.50, y: 1.00)
-        bloomLayer.endPoint = CGPoint(x: 0.92, y: 0.16)
-        bloomLayer.locations = [0.00, 0.24, 0.64, 1.00]
+        bloomLayer.startPoint = CGPoint(x: 0.48, y: 1.00)
+        bloomLayer.endPoint = CGPoint(x: 0.94, y: 0.08)
+        bloomLayer.locations = [0.00, 0.20, 0.58, 1.00]
         disableImplicitAnimations(on: bloomLayer)
     }
 
+    private func configureShoulderLayer() {
+        shoulderLayer.type = .radial
+        shoulderLayer.startPoint = CGPoint(x: 0.44, y: 1.00)
+        shoulderLayer.endPoint = CGPoint(x: 0.98, y: 0.04)
+        shoulderLayer.locations = [0.00, 0.28, 0.72, 1.00]
+        disableImplicitAnimations(on: shoulderLayer)
+    }
+
     private func configureEdgeLayer() {
-        edgeLayer.type = .axial
+        edgeLayer.type = .radial
         edgeLayer.startPoint = CGPoint(x: 0.50, y: 1.00)
-        edgeLayer.endPoint = CGPoint(x: 0.50, y: 0.00)
-        edgeLayer.locations = [0.00, 0.22, 1.00]
+        edgeLayer.endPoint = CGPoint(x: 0.98, y: 0.02)
+        edgeLayer.locations = [0.00, 0.18, 0.62, 1.00]
         disableImplicitAnimations(on: edgeLayer)
     }
 
@@ -192,6 +207,7 @@ final class AuraView: NSView {
 
         ambientLayer.contentsScale = scale
         bloomLayer.contentsScale = scale
+        shoulderLayer.contentsScale = scale
         edgeLayer.contentsScale = scale
     }
 
@@ -484,6 +500,16 @@ final class AuraView: NSView {
         )
 
         transitionGradient(
+            shoulderLayer,
+            to: shoulderColors(
+                color: resolvedColor,
+                intensity: resolvedIntensity
+            ),
+            animated: animated,
+            duration: duration * 1.12
+        )
+
+        transitionGradient(
             edgeLayer,
             to: edgeColors(
                 color: resolvedColor,
@@ -499,9 +525,9 @@ final class AuraView: NSView {
         intensity: CGFloat
     ) -> [CGColor] {
         [
-            color.withAlphaComponent(alpha(0.28, intensity)).cgColor,
-            color.withAlphaComponent(alpha(0.13, intensity)).cgColor,
-            color.withAlphaComponent(alpha(0.035, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.20, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.085, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.018, intensity)).cgColor,
             color.withAlphaComponent(0).cgColor
         ]
     }
@@ -511,9 +537,21 @@ final class AuraView: NSView {
         intensity: CGFloat
     ) -> [CGColor] {
         [
-            color.withAlphaComponent(alpha(0.42, intensity)).cgColor,
-            color.withAlphaComponent(alpha(0.19, intensity)).cgColor,
-            color.withAlphaComponent(alpha(0.045, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.34, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.15, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.028, intensity)).cgColor,
+            color.withAlphaComponent(0).cgColor
+        ]
+    }
+
+    private func shoulderColors(
+        color: NSColor,
+        intensity: CGFloat
+    ) -> [CGColor] {
+        [
+            color.withAlphaComponent(alpha(0.12, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.052, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.012, intensity)).cgColor,
             color.withAlphaComponent(0).cgColor
         ]
     }
@@ -523,8 +561,9 @@ final class AuraView: NSView {
         intensity: CGFloat
     ) -> [CGColor] {
         [
-            color.withAlphaComponent(alpha(0.19, intensity)).cgColor,
-            color.withAlphaComponent(alpha(0.055, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.25, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.10, intensity)).cgColor,
+            color.withAlphaComponent(alpha(0.018, intensity)).cgColor,
             color.withAlphaComponent(0).cgColor
         ]
     }
@@ -547,9 +586,7 @@ final class AuraView: NSView {
         let reduceMotion = NSWorkspace.shared
             .accessibilityDisplayShouldReduceMotion
 
-        let visibleColors =
-            (gradient.presentation() as? CAGradientLayer)?.colors
-            ?? gradient.colors
+        let visibleColors = gradient.presentation()?.colors ?? gradient.colors
 
         gradient.removeAnimation(forKey: "AuraView.colors")
 

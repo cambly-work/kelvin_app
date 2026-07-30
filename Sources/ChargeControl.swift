@@ -5,14 +5,14 @@ import AppKit
 ///
 /// Инкапсулирует: (1) чтение текущего состояния (лимит/режим/парусные пороги/top-up);
 /// (2) применение изменений (лимит, режим, парусные границы, top-up). Каждое изменение
-/// Pro-гейтится через канонический requirePro(.charge) на SettingsWindowController.shared
+/// Pro-гейтится через канонический `SettingsCoordinator.requirePro(.charge)`
 /// и пишет полный charge-limit.json (тот же JSON, что и старый writeChargeConfigJSON).
 ///
 /// Демон BCLM НЕ трогаем напрямую — пишем только конфиг, демон применяет его сам (честность).
 /// Доступен из поповера (PopoverController) и из настроек: оба маршрутят через один путь.
 enum ChargeControl {
-    private static let helperRequestLock = NSLock()
-    private static var helperRequestScheduled = false
+    static let helperSetupNeeded = Notification.Name("BMHelperSetupNeeded")
+    private static var helperSetupNoticePosted = false
 
     // MARK: - Чтение состояния (read-only снимок текущих настроек заряда)
 
@@ -35,8 +35,14 @@ enum ChargeControl {
     /// Любой активный режим заряда требует демона (для применения BCLM).
     /// Зеркало приватного chargeActive в SettingsWindowController.
     static var isActive: Bool {
-        SettingsStore.chargeMode == "sail" || SettingsStore.heatProtect || SettingsStore.chargeLimit < 100
+        SettingsStore.chargeMode == "sail"
+            || SettingsStore.heatProtect
+            || SettingsStore.chargeLimit < 100
+            || isTopUpActive
+            || SettingsStore.chargeAlarmOn
     }
+    static var systemControlReady: Bool { HelperInstall.fandInstalled }
+    static var requiresSystemControl: Bool { isActive && !HelperInstall.fandInstalled }
 
     // MARK: - Pro-гейт
 
@@ -44,7 +50,7 @@ enum ChargeControl {
     /// вызывающий должен откатить UI. Тот же путь, что используют хендлеры настроек.
     @discardableResult
     static func requireProGate() -> Bool {
-        SettingsWindowController.shared.requirePro(.charge)
+        SettingsCoordinator.requirePro(.charge)
     }
 
     // MARK: - Применение изменений
@@ -108,6 +114,7 @@ enum ChargeControl {
             SettingsStore.sailUpper = min(90, SettingsStore.sailLower + 5)
         }
         writeJSON()
+        if SettingsStore.chargeMode == "sail" { ensureHelper() }
         return (SettingsStore.sailUpper, SettingsStore.sailLower)
     }
 
@@ -151,6 +158,17 @@ enum ChargeControl {
         return true
     }
 
+    /// Защита аккумулятора от перегрева. Как и остальные параметры, сначала
+    /// сохраняет конфигурацию, а setup системного компонента оставляет явной CTA.
+    @discardableResult
+    static func setHeatProtection(_ on: Bool) -> Bool {
+        if on, !SettingsStore.heatProtect, !requireProGate() { return false }
+        SettingsStore.heatProtect = on
+        writeJSON()
+        if on { ensureHelper() }
+        return true
+    }
+
     // MARK: - Единый путь записи (json + установка демона)
 
     /// Пишет полный charge-limit.json. Поле "limit" всегда присутствует — старый
@@ -177,25 +195,18 @@ enum ChargeControl {
         if let data = try? JSONSerialization.data(withJSONObject: obj) { try? data.write(to: URL(fileURLWithPath: path)) }
     }
 
-    /// Тонкая обёртка над installChargeHelperIfNeeded (системный диалог ставит root-демон,
-    /// если ещё не стоит). Живёт на контроллере, т.к. трогает его UI (refreshFanDaemonRow/NSAlert).
+    /// Сообщает UI, что конфигурация подготовлена, но системный компонент ещё не подключён.
+    /// ВАЖНО: штатное изменение настройки никогда само не открывает admin/password dialog.
+    /// Установка выполняется только по явной CTA пользователя в Settings.
     static func ensureHelper() {
-        guard !HelperInstall.fandInstalled else { return }
-        helperRequestLock.lock()
-        guard !helperRequestScheduled else {
-            helperRequestLock.unlock()
+        if HelperInstall.fandInstalled {
+            helperSetupNoticePosted = false
             return
         }
-        helperRequestScheduled = true
-        helperRequestLock.unlock()
-
-        // Сначала дать контролу отрисовать новое состояние; системный диалог
-        // установки открывается следующим проходом main run loop.
+        guard !helperSetupNoticePosted else { return }
+        helperSetupNoticePosted = true
         DispatchQueue.main.async {
-            SettingsWindowController.shared.ensureChargeHelper()
-            helperRequestLock.lock()
-            helperRequestScheduled = false
-            helperRequestLock.unlock()
+            NotificationCenter.default.post(name: helperSetupNeeded, object: nil)
         }
     }
 }

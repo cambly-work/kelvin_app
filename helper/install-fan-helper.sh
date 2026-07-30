@@ -25,6 +25,9 @@ mkdir -p "$SUPPORT"
 cp "$SRC/kelvin-fand" "$SUPPORT/kelvin-fand"
 chown root:wheel "$SUPPORT/kelvin-fand"
 chmod 755 "$SUPPORT/kelvin-fand"
+printf '%s\n' "2" > "$SUPPORT/kelvin-fand.version"
+chown root:wheel "$SUPPORT/kelvin-fand.version"
+chmod 644 "$SUPPORT/kelvin-fand.version"
 
 echo "→ Профиль: $PROFILE"
 mkdir -p "$UDIR"
@@ -41,8 +44,7 @@ cat > "$PLIST" <<PL
     <key>ProgramArguments</key>
     <array>
         <string>$SUPPORT/kelvin-fand</string>
-        <string>--profile</string>
-        <string>$PROFILE</string>
+        <string>--follow-console-user</string>
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -52,8 +54,18 @@ cat > "$PLIST" <<PL
 </plist>
 PL
 chown root:wheel "$PLIST"; chmod 644 "$PLIST"
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load -w "$PLIST"
+launchctl bootout system/com.trykelvin.kelvin.fand 2>/dev/null || true
+if ! launchctl bootstrap system "$PLIST"; then
+    echo "✗ launchd не принял системный компонент." >&2
+    exit 1
+fi
+launchctl enable system/com.trykelvin.kelvin.fand
+launchctl kickstart -k system/com.trykelvin.kelvin.fand
+if ! launchctl print system/com.trykelvin.kelvin.fand | grep -q "state = running"; then
+    echo "✗ Системный компонент зарегистрирован, но не запустился." >&2
+    launchctl bootout system/com.trykelvin.kelvin.fand 2>/dev/null || true
+    exit 1
+fi
 
 echo "✓ Демон вентиляторов запущен."
 echo "  Управление активирует выбранный в настройках профиль (кроме «Авто»)."

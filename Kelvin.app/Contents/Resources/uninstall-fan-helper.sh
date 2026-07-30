@@ -10,5 +10,6 @@ launchctl unload "/Library/LaunchDaemons/com.local.batterymeter.fand.plist" 2>/d
 sleep 1
 rm -f "$PLIST" "/Library/LaunchDaemons/com.local.batterymeter.fand.plist" \
     "/Library/Application Support/Kelvin/kelvin-fand" \
+    "/Library/Application Support/Kelvin/kelvin-fand.version" \
     "/Library/Application Support/BatteryMeter/batterymeter-fand"
 echo "✓ Демон вентиляторов удалён. Вентиляторы в системном авто-режиме."

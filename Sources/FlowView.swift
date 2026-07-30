@@ -694,15 +694,15 @@ final class FlowView: NSView, NSViewToolTipOwner {
     }
 
     private func refreshResolvedColors() {
-        headerTitle.foregroundColor = NSColor.secondaryLabelColor.cgColor
-        headerValue.foregroundColor = NSColor.labelColor.cgColor
-        usbLayer.foregroundColor = NSColor.tertiaryLabelColor.cgColor
-        loadsTitle.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+        headerTitle.foregroundColor = resolvedColor(.secondaryLabelColor).cgColor
+        headerValue.foregroundColor = resolvedColor(.labelColor).cgColor
+        usbLayer.foregroundColor = resolvedColor(.tertiaryLabelColor).cgColor
+        loadsTitle.foregroundColor = resolvedColor(.tertiaryLabelColor).cgColor
         headerDivider.strokeColor = separatorColor.cgColor
 
         for node in nodes {
-            node.title.foregroundColor = NSColor.secondaryLabelColor.cgColor
-            node.auxiliary.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+            node.title.foregroundColor = resolvedColor(.secondaryLabelColor).cgColor
+            node.auxiliary.foregroundColor = resolvedColor(.tertiaryLabelColor).cgColor
             node.separator.strokeColor = separatorColor.cgColor
             node.barTrack.strokeColor = trackColor.cgColor
         }
@@ -714,7 +714,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
 
         let status = powerStatus()
         headerStatus.string = status.text
-        headerStatus.foregroundColor = status.textColor.cgColor
+        headerStatus.foregroundColor = resolvedColor(status.textColor).cgColor
         headerStatusDot.fillColor = status.dotColor.cgColor
 
         let valueToken = String(format: "%.0f", snapshot.systemWatts)
@@ -800,7 +800,9 @@ final class FlowView: NSView, NSViewToolTipOwner {
             }
 
             let sleeping = rail.amps < 0.05
-            node.value.foregroundColor = (sleeping ? NSColor.tertiaryLabelColor : NSColor.labelColor).cgColor
+            node.value.foregroundColor = resolvedColor(
+                sleeping ? .tertiaryLabelColor : .labelColor
+            ).cgColor
             node.barFill.strokeColor = (sleeping ? neutralIconColor : accentColor).withAlphaComponent(sleeping ? 0.25 : 0.9).cgColor
             node.barTrack.strokeColor = trackColor.cgColor
             node.separator.strokeColor = separatorColor.cgColor
@@ -809,7 +811,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
 
     private func refreshFooter() {
         footerText.string = balanceLine()
-        footerText.foregroundColor = footerColor.cgColor
+        footerText.foregroundColor = resolvedColor(footerColor).cgColor
     }
 
     private func refreshEdges() {
@@ -1076,7 +1078,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
         guard snapshot.plugged else {
             return NSAttributedString(string: "—", attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: NSColor.tertiaryLabelColor
+                .foregroundColor: resolvedColor(.tertiaryLabelColor)
             ])
         }
 
@@ -1085,7 +1087,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
             string: String(format: "%.0f", snapshot.adapterWatts),
             attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: NSColor.labelColor
+                .foregroundColor: resolvedColor(.labelColor)
             ]
         ))
 
@@ -1094,7 +1096,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
                 string: String(format: L(" / %d Вт"), rated),
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                    .foregroundColor: NSColor.tertiaryLabelColor
+                    .foregroundColor: resolvedColor(.tertiaryLabelColor)
                 ]
             ))
         } else {
@@ -1102,7 +1104,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
                 string: " " + L("Вт"),
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                    .foregroundColor: NSColor.tertiaryLabelColor
+                    .foregroundColor: resolvedColor(.tertiaryLabelColor)
                 ]
             ))
         }
@@ -1128,15 +1130,15 @@ final class FlowView: NSView, NSViewToolTipOwner {
             attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
                 .foregroundColor: snapshot.battFlow == .idle
-                    ? NSColor.tertiaryLabelColor
-                    : NSColor.labelColor
+                    ? resolvedColor(.tertiaryLabelColor)
+                    : resolvedColor(.labelColor)
             ]
         ))
         result.append(NSAttributedString(
             string: " " + L("Вт") + " · " + batteryFlowWord(snapshot.battFlow),
             attributes: [
                 .font: NSFont.systemFont(ofSize: 8.5, weight: .regular),
-                .foregroundColor: NSColor.tertiaryLabelColor
+                .foregroundColor: resolvedColor(.tertiaryLabelColor)
             ]
         ))
         return result
@@ -1148,14 +1150,14 @@ final class FlowView: NSView, NSViewToolTipOwner {
             string: String(format: "%.0f", watts),
             attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 23, weight: .semibold),
-                .foregroundColor: NSColor.labelColor
+                .foregroundColor: resolvedColor(.labelColor)
             ]
         ))
         result.append(NSAttributedString(
             string: " " + L("Вт"),
             attributes: [
                 .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                .foregroundColor: NSColor.tertiaryLabelColor
+                .foregroundColor: resolvedColor(.tertiaryLabelColor)
             ]
         ))
         return result
@@ -1342,6 +1344,10 @@ final class FlowView: NSView, NSViewToolTipOwner {
         effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
+    private func resolvedColor(_ color: NSColor) -> NSColor {
+        Design.Color.resolved(color, dark: isDark)
+    }
+
     private var accentColor: NSColor {
         Design.Color.accent(isDark)
     }
@@ -1472,7 +1478,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
             : NSFont.systemFont(ofSize: size, weight: weight)
         layer.font = font
         layer.fontSize = size
-        layer.foregroundColor = color.cgColor
+        layer.foregroundColor = resolvedColor(color).cgColor
         layer.truncationMode = .end
         layer.isWrapped = false
     }

@@ -149,7 +149,7 @@ final class CorrectionChoiceHUD {
         blur.translatesAutoresizingMaskIntoConstraints = false
 
         statusIcon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
-        statusIcon.contentTintColor = .systemTeal
+        statusIcon.contentTintColor = Design.Color.accentAdaptive
         statusIcon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
         statusIcon.translatesAutoresizingMaskIntoConstraints = false
 

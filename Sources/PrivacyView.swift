@@ -108,6 +108,9 @@ final class PrivacyView: NSView {
 
     // MARK: - Служебное
     private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+    private func resolved(_ color: NSColor) -> NSColor {
+        Design.Color.resolved(color, dark: isDark)
+    }
     private var scale: CGFloat { window?.backingScaleFactor ?? 2 }
     private var radarCenter = CGPoint.zero          // центр радара в координатах вида (для путей бегунков)
     private var lastFingerprint = ""                // отпечаток модели: пропускаем перестройку на неизменном тике
@@ -170,7 +173,7 @@ final class PrivacyView: NSView {
 
         styleText(emptyLayer, size: 11, weight: .regular, align: .center)
         emptyLayer.string = L("Тишина в эфире — исходящих соединений нет")
-        emptyLayer.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+        emptyLayer.foregroundColor = resolved(.tertiaryLabelColor).cgColor
         emptyLayer.isHidden = true
         root.addSublayer(emptyLayer)
 
@@ -489,13 +492,13 @@ final class PrivacyView: NSView {
         segPill.backgroundColor = Design.Color.accentMuted(isDark).cgColor
         for (t, r, on) in [(segCountry, segCountryRect, basis == .country), (segApp, segAppRect, basis == .app), (segPorts, segPortsRect, basis == .ports)] {
             t.frame = CGRect(x: r.minX, y: r.midY - 6, width: r.width, height: 12)
-            t.foregroundColor = (on ? NSColor.labelColor : NSColor.secondaryLabelColor).cgColor
+            t.foregroundColor = resolved(on ? .labelColor : .secondaryLabelColor).cgColor
         }
     }
 
     /// Кратко показать «Скопировано» у точки клика (обратная связь копирования IP).
     private func flashToast(at p: CGPoint) {
-        toast.foregroundColor = NSColor.labelColor.cgColor
+        toast.foregroundColor = resolved(.labelColor).cgColor
         toast.backgroundColor = Design.Color.controlFill(isDark).cgColor
         let w: CGFloat = 92, h: CGFloat = 16
         toast.frame = CGRect(x: min(max(p.x - w / 2, 4), bounds.width - w - 4), y: p.y + 3, width: w, height: h)
@@ -682,15 +685,17 @@ final class PrivacyView: NSView {
             if i == slots - 1 && extra > 0 {
                 ui.flag.string = "…"
                 ui.name.string = String(format: L("ещё %d узлов"), extra + 1)
-                ui.name.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+                ui.name.foregroundColor = resolved(.tertiaryLabelColor).cgColor
                 ui.stat.string = ""
             } else if i < nds.count {
                 let nd = nds[i]
                 setLeading(ui, flag: nd.flag, icon: nd.icon, id: nd.key)
                 ui.name.string = nd.title
-                ui.name.foregroundColor = (nd.isLocal ? NSColor.secondaryLabelColor : NSColor.labelColor).cgColor
+                ui.name.foregroundColor = resolved(
+                    nd.isLocal ? .secondaryLabelColor : .labelColor
+                ).cgColor
                 ui.stat.string = subStat(nd.conns, nd.subCount)
-                ui.stat.foregroundColor = NSColor.secondaryLabelColor.cgColor
+                ui.stat.foregroundColor = resolved(.secondaryLabelColor).cgColor
             } else {
                 ui.flag.string = ""; ui.name.string = ""; ui.stat.string = ""
             }
@@ -704,9 +709,9 @@ final class PrivacyView: NSView {
         let h = makeRow(Self.backKey, 0)
         setLeading(h, flag: nd.flag, icon: nd.icon, id: nd.key)
         h.name.string = "‹  " + nd.title
-        h.name.foregroundColor = NSColor.labelColor.cgColor
+        h.name.foregroundColor = resolved(.labelColor).cgColor
         h.stat.string = subStat(nd.conns, nd.subCount)
-        h.stat.foregroundColor = NSColor.secondaryLabelColor.cgColor
+        h.stat.foregroundColor = resolved(.secondaryLabelColor).cgColor
         addRow(h)
 
         let rows = nd.rows                            // уже отсортированы построителем модели
@@ -722,16 +727,18 @@ final class PrivacyView: NSView {
                     ui.flag.foregroundColor = (row.accent ? Design.Color.accent(isDark) : Design.Color.neutralNode(isDark)).cgColor
                 }
                 ui.name.string = row.name
-                ui.name.foregroundColor = (basis == .ports && !row.accent ? NSColor.secondaryLabelColor : NSColor.labelColor).cgColor
+                ui.name.foregroundColor = resolved(
+                    basis == .ports && !row.accent ? .secondaryLabelColor : .labelColor
+                ).cgColor
                 ui.stat.string = row.ep
                 ui.stat.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
                 ui.stat.truncationMode = .middle      // длинный IPv6 не должен «съедать» :порт с правого края
-                ui.stat.foregroundColor = NSColor.secondaryLabelColor.cgColor
+                ui.stat.foregroundColor = resolved(.secondaryLabelColor).cgColor
                 ui.copyText = row.ep                  // клик по строке → копировать ip:port
             } else if k == showN && overflow {
                 ui.flag.string = "…"
                 ui.name.string = String(format: L("ещё %d адресов"), rows.count - showN)
-                ui.name.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+                ui.name.foregroundColor = resolved(.tertiaryLabelColor).cgColor
             }
             addRow(ui)
         }
@@ -765,7 +772,7 @@ final class PrivacyView: NSView {
             ui.disc.borderColor = Design.Color.surfaceRim(isDark).cgColor
             ui.spokeCore.strokeColor = tint.withAlphaComponent(isDark ? 0.7 : 0.6).cgColor
             ui.spokeGlow.strokeColor = tint.withAlphaComponent(isDark ? 0.16 : 0.12).cgColor
-            ui.count.foregroundColor = NSColor.secondaryLabelColor.cgColor
+            ui.count.foregroundColor = resolved(.secondaryLabelColor).cgColor
             ui.particle.backgroundColor = tint.cgColor
             ui.particle.shadowColor = tint.cgColor
             ui.particle.shadowOffset = .zero
@@ -991,9 +998,9 @@ final class PrivacyView: NSView {
         func seg(_ n: Int, _ cap: String, first: Bool) {
             if !first { s.append(sepAttr()) }
             s.append(NSAttributedString(string: "\(n) ", attributes: [
-                .font: Design.Font.numericBody, .foregroundColor: NSColor.labelColor]))
+                .font: Design.Font.numericBody, .foregroundColor: resolved(.labelColor)]))
             s.append(NSAttributedString(string: cap, attributes: [
-                .font: Design.Font.microStat, .foregroundColor: NSColor.secondaryLabelColor,
+                .font: Design.Font.microStat, .foregroundColor: resolved(.secondaryLabelColor),
                 .kern: Design.Font.capsKern]))
         }
         // «НАПР.» = внешние направления (страны). «Локальная сеть» — узел, но НЕ направление наружу:
@@ -1009,13 +1016,13 @@ final class PrivacyView: NSView {
     }
     private func sepAttr() -> NSAttributedString {
         NSAttributedString(string: "   ·   ", attributes: [
-            .font: Design.Font.numericBody, .foregroundColor: NSColor.tertiaryLabelColor])
+            .font: Design.Font.numericBody, .foregroundColor: resolved(.tertiaryLabelColor)])
     }
 
     /// Микро-подпись радара (обычный регистр, без апперкейса/кернинга — единый V3-регистр, без «дашборд-CAPS»).
     private func attrCaps(_ s: String, color: NSColor) -> NSAttributedString {
         NSAttributedString(string: s, attributes: [
-            .font: Design.Font.sys(8, .semibold), .foregroundColor: color])
+            .font: Design.Font.sys(8, .semibold), .foregroundColor: resolved(color)])
     }
 
     private func styleText(_ l: CATextLayer, size: CGFloat, weight: NSFont.Weight, align: CATextLayerAlignmentMode) {
@@ -1024,7 +1031,7 @@ final class PrivacyView: NSView {
         l.alignmentMode = align
         l.truncationMode = .end
         l.contentsScale = scale
-        l.foregroundColor = NSColor.labelColor.cgColor
+        l.foregroundColor = resolved(.labelColor).cgColor
     }
 
     private func cgImage(_ img: NSImage) -> CGImage? {
@@ -1047,7 +1054,7 @@ final class PrivacyView: NSView {
         guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return nil }
         let img = NSImage(size: base.size)
         img.lockFocus()
-        color.set()
+        resolved(color).set()
         let r = NSRect(origin: .zero, size: base.size)
         base.draw(in: r)
         r.fill(using: .sourceAtop)

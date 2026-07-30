@@ -100,6 +100,9 @@ struct LangSwitcherStatus {
     static func current() -> LangSwitcherStatus {
         let switcher = LangSwitcher.shared
         let savedMode = switcher.mode
+        let wanted = savedMode != .off
+            || SettingsStore.snippetsEnabled
+            || SettingsStore.spellFixEnabled
         
         // Лицензия
         let hasProAccess = Licensing.shared.isPro
@@ -115,7 +118,7 @@ struct LangSwitcherStatus {
         
         // Runtime status determination
         let runtimeStatus: LangRuntimeStatus
-        if savedMode == .off {
+        if !wanted {
             runtimeStatus = .off
         } else if !hasProAccess {
             runtimeStatus = .unavailableByLicense

@@ -30,27 +30,35 @@
 		</data>
 		<key>Resources/install-fan-helper.sh</key>
 		<data>
-		hgAsEnJBb/vfLVDm0yNsK2i78G4=
+		aBu6kyiPu0XwjYY0QR0xqrD+iRE=
 		</data>
 		<key>Resources/install-helper.sh</key>
 		<data>
-		kZRlg0VOxP1fdQJP5zhpkfr4/sc=
+		28j3atFeXmG9wtm6bWLh8BtKAMY=
 		</data>
 		<key>Resources/kelvin-fand</key>
 		<data>
-		jnxJNR++7l66oporQbCcnyxQYtg=
+		HOk0oEDpEKrwFkVbocB+SEwPVHE=
 		</data>
 		<key>Resources/kelvin-powerd.sh</key>
 		<data>
-		oBpfa9kqJ1AggGl6UwpKf7OUlrY=
+		SB7Z7BSnBBlYJKr8DCGCXJxgbxw=
+		</data>
+		<key>Resources/kelvin-privileged</key>
+		<data>
+		mzolt05xkIOCKZ3epLizN98MGsM=
+		</data>
+		<key>Resources/kelvin-privileged.version</key>
+		<data>
+		5fpE8rMcH7VTtgIec2DQfV2R/14=
 		</data>
 		<key>Resources/uninstall-fan-helper.sh</key>
 		<data>
-		TLbUGH+z51GqmZGYzSuyHI+fAO0=
+		WBQQCxQubvU82ecyGv+uPMOAAcI=
 		</data>
 		<key>Resources/uninstall-helper.sh</key>
 		<data>
-		YBYH4zW3m80+DJqJiFiWTa7Irx0=
+		5oYWEHEfAE5l2IPAxF9g6+bN8wI=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -63,6 +71,20 @@
 			</data>
 			<key>requirement</key>
 			<string>cdhash H"4d1ecc9695430e5e97ea4ec01c5b40318dba8d04" or cdhash H"f5b813907e259d128b34a66ec64c719f3bc3719a"</string>
+		</dict>
+		<key>Library/LaunchDaemons/com.trykelvin.kelvin.privileged</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ny4GRs4XHOGsX+ByEaCBrY3/437FK5byAsRbtl0FhCc=
+			</data>
+		</dict>
+		<key>Library/LaunchDaemons/com.trykelvin.kelvin.privileged.plist</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			cmjErqPM1HSA2ATvSUHfSWUmqjFh6pUb6X4YIa8IhMM=
+			</data>
 		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
@@ -110,42 +132,56 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			7JEvlmYolkylulyeJ+ahw6sZwk83q1Khqi6vGAJES2g=
+			429Rpc5oFsn9yegdLbM7kY0gNRv7SxS0jaWG13vePmc=
 			</data>
 		</dict>
 		<key>Resources/install-helper.sh</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			onvZs5yxgwYJdy9y/FaUZWmMSQSx0B4eB74tWel4aWM=
+			tIB1+1ChSxNSRt//k4qHJ/1k7XXEZ2XzarfkjbBO5hM=
 			</data>
 		</dict>
 		<key>Resources/kelvin-fand</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			9sSeHAzgqc3kYhNbCpjoS4xlhGt39Fi2ViHziLtLPqk=
+			458EKLajcZ7GeUSFQ2ooLcLtKlzlZ0BvAjHmrRLw0x4=
 			</data>
 		</dict>
 		<key>Resources/kelvin-powerd.sh</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			LSEqnS1livbqgBE7Ll0M4c1h7gjp1hURYWcp2cJqTUI=
+			9AZGU1xeHWFEuW0jmFqfCT887r+27kpqgFU3AqyKSzI=
+			</data>
+		</dict>
+		<key>Resources/kelvin-privileged</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ny4GRs4XHOGsX+ByEaCBrY3/437FK5byAsRbtl0FhCc=
+			</data>
+		</dict>
+		<key>Resources/kelvin-privileged.version</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Q1WkaxnTSNwvV8BG+O9j1FOOu5NgAPPJ7pVKJ0YN2GU=
 			</data>
 		</dict>
 		<key>Resources/uninstall-fan-helper.sh</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			odxYUie12PuCIW6WZgZsrroajlW/RUVi1DoHIogrE8I=
+			NWl9sO0syNTG5vCxe/Ee4fGkmP1PkZ7qtCm4+xpHWVY=
 			</data>
 		</dict>
 		<key>Resources/uninstall-helper.sh</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			1lKzHz8reV+Pywf3xDrFQoYeGTGmhANM2kFV5M3Rf1Q=
+			rIDj+GZ9RGiNlRmIdD9iS/5w0Mp998+XZv6nHm6kv7s=
 			</data>
 		</dict>
 	</dict>

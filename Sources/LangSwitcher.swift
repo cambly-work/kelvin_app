@@ -104,7 +104,6 @@ final class LangSwitcher {
                                                qos: .userInteractive)
     private var accessPollTimer: Timer?
     private var accessPollCount = 0
-    private var accessPromptRequested = false
     private let spellRequestLock = NSLock()
     private var spellRequestGeneration: UInt64 = 0
     private let postSource = CGEventSource(stateID: .privateState)
@@ -139,22 +138,22 @@ final class LangSwitcher {
             $0.mode != .off || $0.snippetsEnabled || $0.spellFixEnabled
         }
         wanted ? startTap() : stopTap()
+        publishRuntimeChanged()
+    }
+
+    private func publishRuntimeChanged() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Notification.Name("BMLangRuntimeChanged"), object: nil)
+        }
     }
 
     private func startTap() {
         guard isTrusted else {
-            // A saved "hotkey"/"auto" mode is restored during app launch. Previously
-            // that path only polled AXIsProcessTrusted and never displayed the macOS
-            // permission prompt, leaving the feature silently inert until the user
-            // happened to change the segment again in Settings.
-            if !accessPromptRequested {
-                accessPromptRequested = true
-                _ = requestAccessibility()
-            }
+            // Восстановленный режим не должен сам показывать TCC prompt при запуске.
+            // Доступ запрашивается только по явной CTA в onboarding/Settings.
             awaitAccessibility()
             return
         }
-        accessPromptRequested = false
 
         tapStateLock.lock()
         guard tapThread == nil else {
@@ -198,6 +197,7 @@ final class LangSwitcher {
                 tapThread = nil
                 tapStateLock.unlock()
                 Log.lang.error("CGEventTap creation failed; Accessibility/Input Monitoring unavailable")
+                publishRuntimeChanged()
                 return
             }
 
@@ -214,6 +214,7 @@ final class LangSwitcher {
                 CFRunLoopAddSource(loop, source, .commonModes)
                 CGEvent.tapEnable(tap: eventTap, enable: true)
                 Log.lang.info("Keyboard event tap started on dedicated run loop")
+                publishRuntimeChanged()
                 CFRunLoopRun()
                 CFRunLoopRemoveSource(loop, source, .commonModes)
             }
@@ -228,6 +229,7 @@ final class LangSwitcher {
             tapShouldStop = false
             tapStateLock.unlock()
             Log.lang.info("Keyboard event tap stopped")
+            publishRuntimeChanged()
         }
     }
 
@@ -253,7 +255,6 @@ final class LangSwitcher {
             }
             if !wanted || accessPollCount > 90 { stopAwaitingAccess(); return }
             if isTrusted {
-                accessPromptRequested = false
                 startTap()
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: Notification.Name("BMLangRuntimeChanged"), object: nil)

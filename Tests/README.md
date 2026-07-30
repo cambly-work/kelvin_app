@@ -63,16 +63,16 @@ Tests for `CrashReportUploader`:
 
 ## Running Tests
 
+The privacy-critical sanitizer is part of the executable raw-`swiftc` gate:
+
 ```bash
-# Build and run all tests
-swift test
-
-# Run specific test suite
-swift test --filter CrashReportSanitizerTests
-
-# Run with coverage
-swift test --enable-code-coverage
+bash test/run-tests.sh
 ```
+
+The older XCTest files in `Tests/` document broader integration scenarios but
+target obsolete APIs, and Command Line Tools do not ship the XCTest module.
+Migrate scenarios into `test/units/` only after replacing their network calls
+with deterministic mocks.
 
 ## Golden Test Updates
 

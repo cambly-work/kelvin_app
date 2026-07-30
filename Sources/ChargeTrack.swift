@@ -31,6 +31,7 @@ final class ChargeTrack: NSView {
     private var sailLower = 70
     private var pro = false
     private var topUpActive = false
+    private var controlReady = false
 
     // MARK: - Перетаскивание
     private enum Grip { case none, limit, sailUpper, sailLower }
@@ -189,11 +190,12 @@ final class ChargeTrack: NSView {
     /// JSON не читаем — только рендер. Значения берёт вызывающий из SettingsStore/ChargeControl.
     func set(charge: Int, charging: Bool, flow: BatteryFlow,
              limit: Int, mode: String, sailUpper: Int, sailLower: Int,
-             topUpActive: Bool, pro: Bool) {
+             topUpActive: Bool, controlReady: Bool, pro: Bool) {
         self.charge = max(0, min(100, charge))
         self.charging = charging
         self.flow = flow
         self.topUpActive = topUpActive
+        self.controlReady = controlReady
         self.pro = pro
         // во время активного drag НЕ перетираем потолок/паруса/режим живым тиком (1Гц update),
         // иначе ручка «дёргалась» бы назад к сохранённому значению до коммита.
@@ -203,6 +205,11 @@ final class ChargeTrack: NSView {
         self.mode = mode
         self.sailUpper = sailUpper
         self.sailLower = sailLower
+        let prepared = mode == "sail" || limit < 100 || topUpActive
+        toolTip = prepared && !controlReady
+            ? L("Настройки подготовлены; подключите системное управление, чтобы они начали работать.")
+            : nil
+        bar.alphaValue = prepared && !controlReady ? 0.62 : 1
         // сегмент переключателя: Выкл(0)=limit@100, Лимит(1)=limit<100, Парус(2)=sail
         let seg = mode == "sail" ? 2 : (limit < 100 ? 1 : 0)
         if modeSwitch.selectedIndex != seg { modeSwitch.select(seg, animated: false) }
@@ -582,7 +589,8 @@ final class ChargeTrack: NSView {
         let xl = x(for: CGFloat(lo) / 100, in: scale)
         let xu = x(for: CGFloat(up) / 100, in: scale)
         let band = CGRect(x: xl, y: scale.minY, width: max(0, xu - xl), height: scale.height)
-        Design.Color.glassTint(Design.Color.accent(dark), dark).setFill()
+        let bandColor = controlReady ? Design.Color.accent(dark) : NSColor.secondaryLabelColor
+        Design.Color.glassTint(bandColor, dark).setFill()
         NSBezierPath(rect: band).fill()
         // Пунктирная ось диапазона поддержания (та же грамматика, что у top-up-намёка): читается как
         // «здесь заряд гуляет между границами», а не как сплошная заливка-уровень (AlDente-ясность).
@@ -591,7 +599,8 @@ final class ChargeTrack: NSView {
             dash.move(to: CGPoint(x: xl + 3, y: scale.midY)); dash.line(to: CGPoint(x: xu - 3, y: scale.midY))
             dash.lineWidth = 1.5
             dash.setLineDash([3, 3], count: 2, phase: 0)
-            Design.Color.accentBright(dark).withAlphaComponent(0.6).setStroke()
+            (controlReady ? Design.Color.accentBright(dark) : NSColor.secondaryLabelColor)
+                .withAlphaComponent(0.6).setStroke()
             dash.stroke()
         }
         // призрачная зона за верхней границей
@@ -610,7 +619,7 @@ final class ChargeTrack: NSView {
     /// Ручка-потолок: 2px accentBright маркёр-линия на всю высоту трека + вертикальная грип-пилюля.
     private func drawHandle(at pct: Int, scale: NSRect, bounds: NSRect, dark: Bool) {
         let hx = x(for: CGFloat(pct) / 100, in: scale)
-        let acc = Design.Color.accentBright(dark)
+        let acc = controlReady ? Design.Color.accentBright(dark) : NSColor.secondaryLabelColor
 
         // маркёр-линия (та же грамматика, что у тика кольца: accentBright, 2px)
         let line = NSBezierPath()

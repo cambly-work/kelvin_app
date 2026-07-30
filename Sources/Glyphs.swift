@@ -5,7 +5,7 @@ import AppKit
 /// Рисуются текущим цветом (template → система тинтует под свет/тьму/выделение).
 enum KelvinGlyph {
     /// Какие параметры имеют кастомный глиф (иначе — фолбэк на SF Symbol).
-    static let supported: Set<String> = ["battery", "watts", "cputemp", "gputemp", "fan",
+    static let supported: Set<String> = ["kelvin", "ring", "battery", "watts", "cputemp", "gputemp", "fan",
                                          "cpu", "ram", "net", "diskio", "diskfree",
                                          "btbatt", "clock", "date"]
 
@@ -25,6 +25,8 @@ enum KelvinGlyph {
         let s = min(r.width, r.height)
         let lw = max(1, s * 0.085)            // единый штрих ~8.5% размера
         switch id {
+        case "kelvin":            kelvinMark(r, s, lw)
+        case "ring":              ring(r, s, lw)
         case "cputemp", "gputemp": thermometer(r, s, lw)
         case "fan":                fan(r, s, lw)
         case "cpu":                chip(r, s, lw)
@@ -44,6 +46,43 @@ enum KelvinGlyph {
 
     private static func stroked(_ p: NSBezierPath, _ lw: CGFloat) {
         p.lineWidth = lw; p.lineCapStyle = .round; p.lineJoinStyle = .round; p.stroke()
+    }
+
+    private static func kelvinMark(_ r: NSRect, _ s: CGFloat, _ lw: CGFloat) {
+        let x = r.minX + s * 0.35
+        let bulbR = s * 0.18
+        let bulbY = r.minY + s * 0.22
+        let stem = NSBezierPath(roundedRect: NSRect(x: x - s * 0.105, y: bulbY,
+                                                    width: s * 0.21, height: s * 0.68),
+                                xRadius: s * 0.105, yRadius: s * 0.105)
+        stroked(stem, lw * 0.82)
+        NSBezierPath(ovalIn: NSRect(x: x - bulbR, y: bulbY - bulbR,
+                                    width: bulbR * 2, height: bulbR * 2)).fill()
+        let mercury = NSBezierPath(roundedRect: NSRect(x: x - s * 0.038, y: bulbY,
+                                                       width: s * 0.076, height: s * 0.38),
+                                   xRadius: s * 0.038, yRadius: s * 0.038)
+        mercury.fill()
+        let ticks = NSBezierPath()
+        for i in 0..<4 {
+            let y = r.minY + s * (0.34 + CGFloat(i) * 0.15)
+            ticks.move(to: NSPoint(x: r.minX + s * 0.58, y: y))
+            ticks.line(to: NSPoint(x: r.minX + s * (i.isMultiple(of: 2) ? 0.88 : 0.80), y: y))
+        }
+        stroked(ticks, lw * 0.72)
+    }
+
+    private static func ring(_ r: NSRect, _ s: CGFloat, _ lw: CGFloat) {
+        let circle = NSBezierPath(ovalIn: r.insetBy(dx: s * 0.12, dy: s * 0.12))
+        stroked(circle, lw * 1.15)
+        let bolt = NSBezierPath()
+        bolt.move(to: NSPoint(x: r.midX + s * 0.04, y: r.maxY - s * 0.18))
+        bolt.line(to: NSPoint(x: r.midX - s * 0.17, y: r.midY))
+        bolt.line(to: NSPoint(x: r.midX, y: r.midY))
+        bolt.line(to: NSPoint(x: r.midX - s * 0.06, y: r.minY + s * 0.18))
+        bolt.line(to: NSPoint(x: r.midX + s * 0.18, y: r.midY + s * 0.05))
+        bolt.line(to: NSPoint(x: r.midX + s * 0.01, y: r.midY + s * 0.05))
+        bolt.close()
+        bolt.fill()
     }
 
     private static func thermometer(_ r: NSRect, _ s: CGFloat, _ lw: CGFloat) {

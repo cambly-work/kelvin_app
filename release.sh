@@ -38,7 +38,18 @@ fi
 
 if [ -n "$DEVID_APP" ]; then
     echo "━━ 2/4  Подпись Developer ID + hardened runtime ━━"
-    # Сначала вложенные Mach-O (демон fand и пр.), затем сам бандл — БЕЗ --deep.
+
+    # Fail-closed gate: Privileged GPU Service требует Team ID для client validation.
+    # Без него привилегированный сервис принимает ad-hoc подпись — небезопасно для production.
+    TEAM_ID=$(echo "$DEVID_APP" | grep -oE '\([A-Z0-9]{10}\)$' | tr -d '()' || true)
+    if [ -z "$TEAM_ID" ]; then
+        echo "  ⚠ Не удалось извлечь Team ID из DEVID_APP."
+        echo "    Привилегированный GPU-сервис не сможет валидировать клиента."
+        echo "    Для production укажите DEVID_APP в формате: \"Developer ID Application: Name (TEAMID)\""
+        echo "    Продолжаю, но это НЕ production-сборка."
+    fi
+
+    # Сначала вложенные Mach-O (демон fand, privileged-сервис и пр.), затем сам бандл — БЕЗ --deep.
     # (фильтр Mach-O делает grep; -type f без -perm — портируемо между BSD/GNU find)
     while IFS= read -r f; do
         if file "$f" | grep -q "Mach-O"; then

@@ -77,11 +77,42 @@ struct AlertRule: Codable, Equatable {
 /// кулдаун — чтобы не спамить на дребезге у границы.
 final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
     static let shared = AlertsEngine()
-    private override init() { super.init() }
+    private static let authorizationCacheKey = "notifications.authorizationGranted"
+    private override init() {
+        super.init()
+        if let cached = UserDefaults.standard.object(forKey: Self.authorizationCacheKey) as? Bool {
+            authorizationState = cached ? .authorized : .denied
+            authorized = cached
+            if !cached {
+                SettingsStore.alertsEnabled = false
+                SettingsStore.firstConnAlerts = false
+            }
+        } else {
+            // Старые сборки включали master-toggle по умолчанию, даже не зная TCC.
+            // До первого явного согласия считаем уведомления выключенными.
+            SettingsStore.alertsEnabled = false
+            SettingsStore.firstConnAlerts = false
+        }
+    }
+
+    enum AuthorizationState: Equatable {
+        case notDetermined
+        case authorized
+        case denied
+        case unavailable
+
+        var canPost: Bool {
+            if case .authorized = self { return true }
+            return false
+        }
+    }
 
     private struct Rt { var armed = true; var streak = 0; var lastFired: Date? = nil }
     private var rt: [AlertKind: Rt] = [:]
     private var authorized = false
+    private(set) var authorizationState: AuthorizationState = .notDetermined
+    private var authorizationRequestInFlight = false
+    private var authorizationCompletions: [(Bool) -> Void] = []
 
     // Авто-ответ «кулеры на максимум» — сериализован НА УРОВНЕ ДВИЖКА (не per-rule): один захват профиля до
     // форса, восстановление только когда отпустило ПОСЛЕДНЕЕ форсящее правило. Иначе multi-rule/fan-auto/ручная
@@ -163,7 +194,7 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
     /// переиспользуем свежее значение, а не зовём cpu() повторно (иначе back-to-back
     /// вызов дал бы «нулевую» дельту → провал в графике загрузки).
     func evaluate(battery b: BatteryInfo, popoverOpen: Bool, sampledCPULoad: Double? = nil) {
-        guard SettingsStore.alertsEnabled else { return }
+        guard SettingsStore.alertsEnabled, authorized else { return }
         let rules = SettingsStore.alertRules.filter { $0.on }
         guard !rules.isEmpty else { return }
 
@@ -292,37 +323,97 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// Тестовый баннер из настроек — заодно вызывает системный запрос разрешения в контексте.
-    func sendTest() {
-        withAuthorization {
+    func sendTest(completion: ((Bool) -> Void)? = nil) {
+        requestOrOpenSettings { granted in
+            guard granted else {
+                completion?(false)
+                return
+            }
             let c = UNMutableNotificationContent()
             c.title = L("Уведомления Kelvin"); c.body = L("Так выглядит предупреждение. Можно настроить пороги ниже."); c.sound = .default
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "kelvin.alert.test", content: c, trigger: nil))
+            completion?(true)
         }
     }
 
-    /// Спросить разрешение заранее (из настроек) — чтобы prompt появился осознанно,
-    /// а не «из ниоткуда» при первом перегреве.
+    /// Спросить разрешение только из явного пользовательского действия.
+    /// После отказа macOS больше не показывает prompt — UI должен вести в Settings.
     func primeAuthorization(completion: ((Bool) -> Void)? = nil) {
-        let center = UNUserNotificationCenter.current()
-        // requestAuthorization безопасно вызывать повторно: после первого выбора
-        // macOS сразу возвращает сохранённый результат и больше не показывает prompt.
-        // Не используем getNotificationSettings здесь: на части поддерживаемых macOS
-        // его Swift callback падал внутри UserNotifications при раннем запуске app.
-        center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
-            DispatchQueue.main.async {
-                self.authorized = ok
-                completion?(ok)
+        requestOrOpenSettings(completion: completion)
+    }
+
+    /// Возвращает последнее состояние, подтверждённое явным пользовательским
+    /// действием. Намеренно не вызывает getNotificationSettings: на поддерживаемых
+    /// старых macOS этот API уже приводил к SIGSEGV при старте/onboarding.
+    func refreshAuthorizationStatus(completion: ((AuthorizationState) -> Void)? = nil) {
+        DispatchQueue.main.async { completion?(self.authorizationState) }
+    }
+
+    /// Контекстная CTA. requestAuthorization безопасно повторять: macOS показывает
+    /// prompt только при первом выборе, затем возвращает фактический результат.
+    /// Запросы сериализованы, чтобы быстрые клики не создавали конкурирующие callbacks.
+    func requestOrOpenSettings(completion: ((Bool) -> Void)? = nil) {
+        DispatchQueue.main.async {
+            if let completion { self.authorizationCompletions.append(completion) }
+            guard !self.authorizationRequestInFlight else { return }
+            self.authorizationRequestInFlight = true
+            let shouldOpenSettingsOnFailure = self.authorizationState == .denied
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { ok, error in
+                DispatchQueue.main.async {
+                    let state: AuthorizationState = error == nil
+                        ? (ok ? .authorized : .denied)
+                        : .unavailable
+                    self.applyAuthorization(state)
+                    self.authorizationRequestInFlight = false
+                    let completions = self.authorizationCompletions
+                    self.authorizationCompletions.removeAll()
+                    if !ok, shouldOpenSettingsOnFailure { self.openNotificationSettings() }
+                    completions.forEach { $0(ok) }
+                }
             }
         }
     }
 
     private func withAuthorization(_ post: @escaping () -> Void) {
-        if authorized { post(); return }
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
-            DispatchQueue.main.async {
-                self.authorized = ok
-                if ok { post() }
+        // Фоновое событие никогда не вызывает ни системный prompt, ни TCC-query.
+        // Состояние меняется только после явной CTA пользователя.
+        guard authorized else { return }
+        post()
+    }
+
+    private func mapAuthorization(_ status: UNAuthorizationStatus) -> AuthorizationState {
+        switch status {
+        case .notDetermined: return .notDetermined
+        case .authorized, .provisional, .ephemeral: return .authorized
+        case .denied: return .denied
+        @unknown default: return .unavailable
+        }
+    }
+
+    private func applyAuthorization(_ state: AuthorizationState) {
+        authorizationState = state
+        authorized = state.canPost
+        switch state {
+        case .authorized:
+            UserDefaults.standard.set(true, forKey: Self.authorizationCacheKey)
+        case .denied:
+            UserDefaults.standard.set(false, forKey: Self.authorizationCacheKey)
+            SettingsStore.alertsEnabled = false
+            SettingsStore.firstConnAlerts = false
+            onRulesChanged()
+        case .notDetermined, .unavailable:
+            break
+        }
+    }
+
+    private func openNotificationSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.trykelvin.kelvin",
+            "x-apple.systempreferences:com.apple.preference.notifications",
+        ]
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                return
             }
         }
     }

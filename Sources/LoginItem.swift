@@ -14,6 +14,33 @@ enum LoginItem {
         return FileManager.default.fileExists(atPath: legacyPlistPath)
     }
 
+    /// Мигрирует только реально существовавший старый автозапуск. Fresh install
+    /// больше не включает запуск при входе без выбора пользователя.
+    static func migrateLegacyIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "loginItem.migrated") else { return }
+        guard #available(macOS 13, *) else {
+            defaults.set(true, forKey: "loginItem.migrated")
+            return
+        }
+
+        let oldBatteryMeter = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/LaunchAgents/com.local.batterymeter.plist")
+        let candidates = [legacyPlistPath, oldBatteryMeter]
+        guard candidates.contains(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            defaults.set(true, forKey: "loginItem.migrated")
+            return
+        }
+        guard set(true) else { return }
+
+        let domain = "gui/\(getuid())"
+        for path in candidates where FileManager.default.fileExists(atPath: path) {
+            _ = ProcessRunner.succeeds("/bin/launchctl", ["bootout", domain, path], timeout: 4)
+            try? FileManager.default.removeItem(atPath: path)
+        }
+        defaults.set(true, forKey: "loginItem.migrated")
+    }
+
     /// Включить/выключить автозапуск. Возвращает успех.
     @discardableResult
     static func set(_ on: Bool) -> Bool {

@@ -249,8 +249,8 @@ enum CrashReportStore {
     }
     
     /// Удалить старые отчёты (отправленные > 24ч, отклонённые > 7 дней).
-    static func cleanupExpired() throws {
-        try queue.sync(flags: .barrier) {
+    static func cleanupExpired() {
+        queue.sync(flags: .barrier) {
             let now = Date()
             var metadata = loadMetadata()
             

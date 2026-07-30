@@ -1,6 +1,36 @@
 import AppKit
 import SwiftUI
 
+enum MacSystemSettings {
+    static func open(_ candidates: [String]) {
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) { return }
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+    }
+
+    static func openGraphics() {
+        open([
+            "x-apple.systempreferences:com.apple.Battery-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.energysaver",
+        ])
+    }
+
+    static func openFirewall() {
+        open([
+            "x-apple.systempreferences:com.apple.Network-Settings.extension?Firewall",
+            "x-apple.systempreferences:com.apple.preference.security?Firewall",
+        ])
+    }
+
+    static func openInputMonitoring() {
+        open([
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        ])
+    }
+}
+
 /// Полностью новый интерфейс настроек. Он намеренно не использует SettingsKit,
 /// NSStackView-страницы и async-подмену documentView старого окна.
 final class KelvinSettingsWindowController: NSWindowController, NSWindowDelegate {
@@ -258,6 +288,7 @@ final class KelvinSettingsModel: ObservableObject {
 
 private struct KelvinSettingsRoot: View {
     @ObservedObject var model: KelvinSettingsModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 0) {
@@ -268,12 +299,14 @@ private struct KelvinSettingsRoot: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .accentColor(KelvinSwiftUITheme.accent(colorScheme))
         .frame(minWidth: 860, minHeight: 560)
     }
 }
 
 private struct KelvinSettingsSidebar: View {
     @ObservedObject var model: KelvinSettingsModel
+    @Environment(\.colorScheme) private var colorScheme
 
     private let primary: [KelvinSettingsSection] = [.general, .power, .cooling, .input, .popover, .notifications]
     private let system: [KelvinSettingsSection] = [.security, .maintenance]
@@ -282,15 +315,15 @@ private struct KelvinSettingsSidebar: View {
         ZStack {
             VisualEffect(material: .sidebar, blendingMode: .behindWindow)
             ScrollView {
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 9) {
+                VStack(alignment: .leading, spacing: KelvinSwiftUITheme.Spacing.compact) {
+                    HStack(spacing: KelvinSwiftUITheme.Spacing.control) {
                         Image(systemName: "thermometer.medium")
                             .font(.system(size: 22, weight: .semibold))
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(KelvinSwiftUITheme.accent(colorScheme))
                         Text("Kelvin")
-                            .font(.system(size: 20, weight: .bold))
+                            .font(KelvinSwiftUITheme.Typography.brand)
                     }
-                    .padding(.bottom, 16)
+                    .padding(.bottom, KelvinSwiftUITheme.Spacing.cardInset)
 
                     sidebarGroup(nil, primary)
                     sidebarGroup(L("Система"), system)
@@ -307,7 +340,7 @@ private struct KelvinSettingsSidebar: View {
     private func sidebarGroup(_ label: String?, _ sections: [KelvinSettingsSection]) -> some View {
         if let label {
             Text(label.uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .font(KelvinSwiftUITheme.Typography.eyebrow)
                 .foregroundColor(.secondary)
                 .padding(.leading, 10)
                 .padding(.top, 15)
@@ -317,21 +350,31 @@ private struct KelvinSettingsSidebar: View {
             Button {
                 model.selected = section
             } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: KelvinSwiftUITheme.Spacing.control) {
                     Image(systemName: section.symbol)
                         .font(.system(size: 14, weight: .semibold))
                         .frame(width: 21)
-                        .foregroundColor(model.selected == section ? .white : .accentColor)
+                        .foregroundColor(KelvinSwiftUITheme.accent(colorScheme))
                     Text(section.title)
+                        .font(KelvinSwiftUITheme.Typography.navigation)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 36)
-                .foregroundColor(model.selected == section ? .white : .primary)
+                .foregroundColor(.primary)
                 .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(model.selected == section ? Color.accentColor : Color.clear)
+                    RoundedRectangle(cornerRadius: KelvinSwiftUITheme.Radius.chip, style: .continuous)
+                        .fill(model.selected == section
+                              ? KelvinSwiftUITheme.accentMuted(colorScheme)
+                              : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: KelvinSwiftUITheme.Radius.chip, style: .continuous)
+                        .stroke(model.selected == section
+                                ? KelvinSwiftUITheme.accentRim(colorScheme)
+                                : Color.clear,
+                                lineWidth: 0.5)
                 )
                 .contentShape(Rectangle())
             }
@@ -345,16 +388,16 @@ private struct KelvinSettingsPage: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: KelvinSwiftUITheme.Spacing.section) {
                 Text(model.selected.title)
-                    .font(.system(size: 27, weight: .bold))
+                    .font(KelvinSwiftUITheme.Typography.pageTitle)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 3)
+                    .padding(.bottom, KelvinSwiftUITheme.Spacing.compact)
                 page
             }
             .frame(maxWidth: 760, alignment: .leading)
-            .padding(.horizontal, 34)
-            .padding(.top, 48)
+            .padding(.horizontal, KelvinSwiftUITheme.Spacing.page)
+            .padding(.top, 44)
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity, alignment: .top)
         }
@@ -377,9 +420,186 @@ private struct KelvinSettingsPage: View {
     }
 }
 
+// MARK: - GPU Mode Card (in-app picker + setup)
+
+/// Карточка переключения GPU: показывает активную GPU, текущую политику,
+/// Picker Авто/Встроенная/Дискретная и статус привилегированного сервиса.
+private struct GPUModeCard: View {
+    @ObservedObject private var gpu = GPUController.shared
+    @State private var showSetupSheet = false
+
+    var body: some View {
+        KelvinCard(L("Графика")) {
+            // Активная GPU (живой индикатор)
+            if let active = GPUInfo.active() {
+                SettingsRow(active.integrated ? "checkmark.circle.fill" : "circle.fill",
+                            active.name,
+                            detail: active.kind + " · " + active.vramText) {
+                    EmptyView()
+                }
+                CardDivider()
+            }
+
+            // Текущая политика + Picker
+            SettingsRow("cpu", L("Режим графики")) {
+                if gpu.canSwitch {
+                    gpuPicker
+                } else {
+                    // Сервис не установлен — показываем setup CTA
+                    gpuSetupCTA
+                }
+            }
+
+            // Inline состояние применения
+            if gpu.isApplying {
+                CardDivider()
+                SettingsRow("arrow.triangle.2.circlepath", L("Применяется…")) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                }
+            }
+
+            // Inline ошибка
+            if let err = gpu.lastError {
+                CardDivider()
+                SettingsRow("exclamationmark.triangle", L("Ошибка"),
+                            detail: err) {
+                    Button(L("Повторить")) {
+                        gpu.clearError()
+                    }
+                }
+            }
+        }
+        .onAppear {
+            gpu.refreshSupportState()
+            gpu.refreshServiceState()
+            gpu.refreshModeFromSystem()
+        }
+    }
+
+    /// Picker для выбора режима. Disabled во время применения.
+    private var gpuPicker: some View {
+        Picker(L("Режим графики"), selection: Binding(
+            get: { gpu.selectedMode ?? .automatic },
+            set: { gpu.setMode($0) }
+        )) {
+            ForEach(GPUMode.allCases, id: \.self) { mode in
+                Text(mode.shortTitle).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .disabled(gpu.isApplying)
+        .frame(width: 200)
+    }
+
+    /// CTA для установки привилегированного сервиса.
+    private var gpuSetupCTA: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            if case .notInstalled = gpu.serviceState {
+                Text(L("Не подключён"))
+                    .font(KelvinSwiftUITheme.Typography.detail)
+                    .foregroundColor(.secondary)
+                Button(L("Подключить")) {
+                    showSetupSheet = true
+                }
+            } else if case .approvalRequired = gpu.serviceState {
+                Text(L("Требует одобрения"))
+                    .font(KelvinSwiftUITheme.Typography.detail)
+                    .foregroundColor(.orange)
+                Button(L("Открыть настройки")) {
+                    MacSystemSettings.openGraphics()
+                }
+            } else if case .repairNeeded = gpu.serviceState {
+                Text(L("Требует восстановления"))
+                    .font(KelvinSwiftUITheme.Typography.detail)
+                    .foregroundColor(.orange)
+                Button(L("Восстановить")) {
+                    showSetupSheet = true
+                }
+            } else {
+                Text(L("Подключение…"))
+                    .font(KelvinSwiftUITheme.Typography.detail)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .sheet(isPresented: $showSetupSheet) {
+            GPUSetupSheet(isPresented: $showSetupSheet)
+        }
+    }
+}
+
+/// Sheet установки/восстановления привилегированного сервиса GPU.
+private struct GPUSetupSheet: View {
+    @Binding var isPresented: Bool
+    @ObservedObject private var gpu = GPUController.shared
+    @State private var installing = false
+    @State private var result: PrivilegedServiceManager.InstallResult?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(L("Переключение графики"))
+                .font(.system(size: 16, weight: .semibold))
+
+            Text(L("Kelvin установит один системный компонент для переключения видеокарты. Пароль администратора понадобится только один раз — после этого переключение работает без пароля."))
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(L("Компонент умеет только переключать разрешённые режимы GPU (Авто, Встроенная, Дискретная) и не может выполнять другие команды."))
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let result {
+                switch result {
+                case .success:
+                    Label(L("Компонент подключён"), systemImage: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                case .approvalRequired:
+                    Label(L("Откройте Системные настройки → Общие → Объекты входа и разрешите компонент Kelvin"), systemImage: "info.circle")
+                        .foregroundColor(.orange)
+                case .failed(let msg):
+                    Label(msg, systemImage: "exclamationmark.triangle")
+                        .foregroundColor(.red)
+                case .cancelled:
+                    Label(L("Установка отменена"), systemImage: "xmark.circle")
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            HStack {
+                Spacer()
+                if installing {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                }
+                Button(L("Готово")) { isPresented = false }
+                    .keyboardShortcut(.cancelAction)
+                if result == nil || (result != nil && result != .success) {
+                    Button(L("Подключить")) {
+                        installing = true
+                        Task {
+                            let r = await gpu.installService()
+                            await MainActor.run {
+                                self.result = r
+                                self.installing = false
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(installing)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+    }
+}
+
 private struct KelvinCard<Content: View>: View {
     let title: String?
     let content: Content
+    @Environment(\.colorScheme) private var colorScheme
 
     init(_ title: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
@@ -390,9 +610,9 @@ private struct KelvinCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             if let title {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(KelvinSwiftUITheme.Typography.section)
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, KelvinSwiftUITheme.Spacing.cardInset)
                     .padding(.top, 13)
                     .padding(.bottom, 6)
             }
@@ -400,13 +620,81 @@ private struct KelvinCard<Content: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(NSColor.controlBackgroundColor))
+            RoundedRectangle(cornerRadius: KelvinSwiftUITheme.Radius.card, style: .continuous)
+                .fill(KelvinSwiftUITheme.surface(colorScheme))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: KelvinSwiftUITheme.Radius.card, style: .continuous)
+                .stroke(KelvinSwiftUITheme.surfaceRim(colorScheme), lineWidth: 0.5)
         )
+    }
+}
+
+/// Честное состояние системного компонента. Настройки можно подготовить заранее,
+/// но пароль появляется только после явного нажатия этой CTA.
+private struct SystemControlCard: View {
+    @ObservedObject var model: KelvinSettingsModel
+    let required: Bool
+
+    private var state: HelperInstall.InstallState {
+        HelperInstall.installState(.control)
+    }
+
+    private var title: String {
+        switch state {
+        case .starting: return L("Системное управление запускается")
+        case .installed: return L("Системное управление подключено")
+        case .updateAvailable: return L("Доступно обновление системного управления")
+        case .repairNeeded: return L("Системное управление требует восстановления")
+        case .notInstalled: return required ? L("Настройки подготовлены") : L("Системное управление не подключено")
+        }
+    }
+
+    private var detail: String {
+        switch state {
+        case .starting:
+            return L("Kelvin проверяет системный компонент. Настройки применятся после запуска.")
+        case .installed:
+            return L("Лимит заряда и профили вентиляторов применяются без повторного пароля.")
+        case .updateAvailable:
+            return L("Текущая версия продолжает работать. Обновление запускается только по вашему выбору.")
+        case .repairNeeded:
+            return L("Установка неполная; обычные переключатели не будут запрашивать пароль.")
+        case .notInstalled:
+            return required
+                ? L("Подключите компонент один раз, чтобы применить выбранные параметры.")
+                : L("Понадобится только для управления зарядом и вентиляторами.")
+        }
+    }
+
+    private var actionTitle: String {
+        switch state {
+        case .notInstalled: return L("Подключить…")
+        case .updateAvailable: return L("Обновить…")
+        case .repairNeeded: return L("Восстановить…")
+        case .starting, .installed: return ""
+        }
+    }
+
+    var body: some View {
+        KelvinCard(L("Системные функции")) {
+            SettingsRow(state == .installed ? "checkmark.shield.fill" : "lock.shield",
+                        title,
+                        detail: detail) {
+                if state == .starting {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if state == .installed {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                } else {
+                    Button(actionTitle) {
+                        _ = SettingsCoordinator.installSystemControlHelper()
+                        model.reload()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -424,16 +712,16 @@ private struct SettingsRow<Control: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: KelvinSwiftUITheme.Spacing.row) {
             Image(systemName: symbol)
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13))
+                Text(title).font(KelvinSwiftUITheme.Typography.body)
                 if let detail {
                     Text(detail)
-                        .font(.system(size: 11))
+                        .font(KelvinSwiftUITheme.Typography.detail)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -442,14 +730,21 @@ private struct SettingsRow<Control: View>: View {
             control
                 .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, KelvinSwiftUITheme.Spacing.cardInset)
         .padding(.vertical, detail == nil ? 11 : 9)
         .frame(maxWidth: .infinity)
     }
 }
 
 private struct CardDivider: View {
-    var body: some View { Divider().padding(.leading, 48) }
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Rectangle()
+            .fill(KelvinSwiftUITheme.hairline(colorScheme))
+            .frame(height: 0.5)
+            .padding(.leading, 48)
+    }
 }
 
 private func settingBinding<T>(
@@ -501,19 +796,19 @@ private struct GeneralSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
 
     /// Extra indicator definitions (id → label).
-    private static let menuExtraDefs: [(id: String, label: String)] = [
-        ("watts",   L("Потребление (Вт)")),
-        ("cputemp", L("Температура CPU")),
-        ("gputemp", L("Температура GPU")),
-        ("fan",     L("Обороты вентилятора")),
-        ("cpu",     L("Загрузка CPU")),
-        ("ram",     L("Оперативная память")),
-        ("net",     L("Сетевая скорость")),
-        ("clock",   L("Часы")),
-        ("date",    L("Дата")),
-        ("diskio",  L("Диск (R/W)")),
-        ("diskfree",L("Диск (свободно)")),
-        ("btbatt",  L("Bluetooth-аккумулятор")),
+    private static let menuExtraDefs: [(id: String, label: String, symbol: String)] = [
+        ("watts",   L("Потребление (Вт)"), "bolt.fill"),
+        ("cputemp", L("Температура CPU"), "thermometer.medium"),
+        ("gputemp", L("Температура GPU"), "thermometer.high"),
+        ("fan",     L("Обороты вентилятора"), "fanblades.fill"),
+        ("cpu",     L("Загрузка CPU"), "cpu"),
+        ("ram",     L("Оперативная память"), "memorychip"),
+        ("net",     L("Сетевая скорость"), "arrow.up.arrow.down"),
+        ("clock",   L("Часы"), "clock"),
+        ("date",    L("Дата"), "calendar"),
+        ("diskio",  L("Диск (R/W)"), "internaldrive"),
+        ("diskfree",L("Диск (свободно)"), "externaldrive.badge.checkmark"),
+        ("btbatt",  L("Bluetooth-аккумулятор"), "wave.3.right"),
     ]
 
     var body: some View {
@@ -538,6 +833,8 @@ private struct GeneralSettingsPage: View {
                         Text(L("Батарея")).tag("battery")
                         Text("CPU").tag("cpu")
                         Text("RAM").tag("ram")
+                        Text(L("Температура CPU")).tag("cputemp")
+                        Text(L("Вентилятор")).tag("fan")
                     }
                     .labelsHidden()
                     .frame(width: 150)
@@ -549,8 +846,10 @@ private struct GeneralSettingsPage: View {
                             get: { SettingsStore.mainIconStyle },
                             set: { SettingsStore.mainIconStyle = $0; model.changed(menuBar: true) }
                         )) {
+                            Text("Kelvin Live").tag("kelvin")
                             Text(L("Термометр")).tag("thermometer")
                             Text(L("Батарея")).tag("battery")
+                            Text(L("Кольцо заряда")).tag("ring")
                         }
                         .labelsHidden()
                         .frame(width: 150)
@@ -570,10 +869,20 @@ private struct GeneralSettingsPage: View {
                     .frame(width: 150)
                 }
                 CardDivider()
-                SettingsRow("bolt", L("Показывать потребление")) {
+                if SettingsStore.menuBarMode == "battery" {
+                    SettingsRow("bolt", L("Показывать потребление")) {
+                        Toggle("", isOn: settingBinding(
+                            get: { SettingsStore.menuBarShowWatts },
+                            set: { SettingsStore.menuBarShowWatts = $0; model.changed(menuBar: true) }
+                        )).labelsHidden()
+                    }
+                    CardDivider()
+                }
+                SettingsRow("waveform.path", L("Живые анимации"),
+                            detail: L("Движение показывает зарядку и смену состояния; системное «Уменьшение движения» имеет приоритет.")) {
                     Toggle("", isOn: settingBinding(
-                        get: { SettingsStore.menuBarShowWatts },
-                        set: { SettingsStore.menuBarShowWatts = $0; model.changed(menuBar: true) }
+                        get: { SettingsStore.menuBarMotion },
+                        set: { SettingsStore.menuBarMotion = $0; model.changed(menuBar: true) }
                     )).labelsHidden()
                 }
                 CardDivider()
@@ -584,21 +893,28 @@ private struct GeneralSettingsPage: View {
                     )).labelsHidden()
                 }
                 if SettingsStore.menuBarCombined {
-                    ForEach(Array(Self.menuExtraDefs.enumerated()), id: \.element.id) { index, def in
-                        CardDivider()
-                        SettingsRow("circle", def.label) {
-                            Toggle("", isOn: settingBinding(
-                                get: { SettingsStore.menuBarExtras.contains(def.id) },
-                                set: { isOn in
-                                    var extras = SettingsStore.menuBarExtras
-                                    if isOn && extras.count < 3 { extras.append(def.id) }
-                                    else if !isOn { extras.removeAll { $0 == def.id } }
-                                    SettingsStore.menuBarExtras = extras
-                                    model.changed(menuBar: true)
-                                }
-                            )).labelsHidden()
-                            .disabled(!SettingsStore.menuBarExtras.contains(def.id) && SettingsStore.menuBarExtras.count >= 3)
-                        }
+                    CardDivider()
+                    SettingsRow("app.badge", L("Иконки показателей")) {
+                        Toggle("", isOn: settingBinding(
+                            get: { SettingsStore.menuBarExtraIcons },
+                            set: { SettingsStore.menuBarExtraIcons = $0; model.changed(menuBar: true) }
+                        )).labelsHidden()
+                    }
+                }
+                ForEach(Array(Self.menuExtraDefs.enumerated()), id: \.element.id) { index, def in
+                    CardDivider()
+                    SettingsRow(def.symbol, def.label) {
+                        Toggle("", isOn: settingBinding(
+                            get: { SettingsStore.menuBarExtras.contains(def.id) },
+                            set: { isOn in
+                                var extras = SettingsStore.menuBarExtras
+                                if isOn && extras.count < 3 { extras.append(def.id) }
+                                else if !isOn { extras.removeAll { $0 == def.id } }
+                                SettingsStore.menuBarExtras = extras
+                                model.changed(menuBar: true)
+                            }
+                        )).labelsHidden()
+                        .disabled(!SettingsStore.menuBarExtras.contains(def.id) && SettingsStore.menuBarExtras.count >= 3)
                     }
                 }
             }
@@ -680,16 +996,7 @@ private struct PowerSettingsPage: View {
                                 : (SettingsStore.chargeLimit < 100 ? "limit" : "off")
                         },
                         set: { value in
-                            guard SettingsWindowController.shared.requirePro(.charge) else { model.reload(); return }
-                            if value == "off" {
-                                SettingsStore.chargeMode = "limit"
-                                SettingsStore.chargeLimit = 100
-                                _ = ChargeControl.setLimit(100)
-                            } else {
-                                SettingsStore.chargeMode = value
-                                if value == "limit", SettingsStore.chargeLimit == 100 { SettingsStore.chargeLimit = 80 }
-                                _ = ChargeControl.setMode(value)
-                            }
+                            guard ChargeControl.setMode(value) else { model.reload(); return }
                             model.changed(popover: true)
                         }
                     )) {
@@ -720,14 +1027,20 @@ private struct PowerSettingsPage: View {
                     SettingsRow("arrow.up.circle", L("Заряжать до"), detail: "\(SettingsStore.sailUpper)%") {
                         Slider(value: settingBinding(
                             get: { Double(SettingsStore.sailUpper) },
-                            set: { SettingsStore.sailUpper = Int($0); _ = ChargeControl.setMode("sail"); model.changed(popover: true) }
+                            set: {
+                                _ = ChargeControl.setSail(upper: Int($0), lower: SettingsStore.sailLower)
+                                model.changed(popover: true)
+                            }
                         ), in: 60...90, step: 5).frame(width: 220)
                     }
                     CardDivider()
                     SettingsRow("arrow.down.circle", L("Держать не ниже"), detail: "\(SettingsStore.sailLower)%") {
                         Slider(value: settingBinding(
                             get: { Double(SettingsStore.sailLower) },
-                            set: { SettingsStore.sailLower = Int($0); _ = ChargeControl.setMode("sail"); model.changed(popover: true) }
+                            set: {
+                                _ = ChargeControl.setSail(upper: SettingsStore.sailUpper, lower: Int($0))
+                                model.changed(popover: true)
+                            }
                         ), in: 50...85, step: 5).frame(width: 220)
                     }
                 }
@@ -736,10 +1049,14 @@ private struct PowerSettingsPage: View {
                 SettingsRow("thermometer.high", L("Защита от перегрева"), detail: L("Приостанавливать заряд при высокой температуре аккумулятора.")) {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.heatProtect },
-                        set: { SettingsStore.heatProtect = $0; model.changed(popover: true) }
+                        set: {
+                            guard ChargeControl.setHeatProtection($0) else { model.reload(); return }
+                            model.changed(popover: true)
+                        }
                     )).labelsHidden()
                 }
             }
+            SystemControlCard(model: model, required: ChargeControl.isActive)
             // MARK: - Top-up & Scheduled Charge
             if SettingsStore.chargeMode != "off" {
                 KelvinCard(L("Дозарядка")) {
@@ -753,8 +1070,10 @@ private struct PowerSettingsPage: View {
                         Toggle("", isOn: settingBinding(
                             get: { SettingsStore.chargeAlarmOn },
                             set: { v in
-                                SettingsStore.chargeAlarmOn = v
-                                _ = ChargeControl.setAlarm(on: v, targetMin: SettingsStore.chargeAlarmTargetMin, leadMin: SettingsStore.chargeAlarmLeadMin)
+                                guard ChargeControl.setAlarm(on: v,
+                                                             targetMin: SettingsStore.chargeAlarmTargetMin,
+                                                             leadMin: SettingsStore.chargeAlarmLeadMin)
+                                else { model.reload(); return }
                                 model.changed(popover: true)
                             }
                         )).labelsHidden()
@@ -805,6 +1124,7 @@ private struct PowerSettingsPage: View {
 
 private struct CoolingSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
+    @State private var advancedProfile = SettingsStore.customFanProfile
     
     private var rules: [AlertRule] { alertRules() }
     
@@ -833,12 +1153,16 @@ private struct CoolingSettingsPage: View {
             
             // MARK: - Fan Profile (только если есть активное охлаждение)
             if hasFans && !isPassive {
+            SystemControlCard(
+                model: model,
+                required: SettingsStore.activeFanProfileName != "auto" || SettingsStore.fanAutoBySource
+            )
             KelvinCard(L("Профиль вентиляторов")) {
                 SettingsRow("fanblades", L("Активный профиль"), detail: L("Системный режим безопаснее всего для повседневной работы.")) {
                     Picker("", selection: settingBinding(
                         get: { SettingsStore.activeFanProfileName },
                         set: { value in
-                            guard SettingsWindowController.shared.requirePro(.fans) else { model.reload(); return }
+                            guard SettingsCoordinator.requirePro(.fans) else { model.reload(); return }
                             SettingsStore.activeFanProfileName = value
                             FanController.applyProfileHeadless(named: value)
                             model.changed(popover: true)
@@ -846,6 +1170,9 @@ private struct CoolingSettingsPage: View {
                     )) {
                         ForEach(SettingsStore.builtinFanIDs, id: \.self) {
                             Text(SettingsStore.builtinFanDisplay($0)).tag($0)
+                        }
+                        ForEach(SettingsStore.userFanPresets, id: \.name) {
+                            Text($0.name).tag($0.name)
                         }
                     }
                     .labelsHidden()
@@ -855,15 +1182,26 @@ private struct CoolingSettingsPage: View {
                 SettingsRow("arrow.triangle.2.circlepath", L("Автоматически по источнику питания")) {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.fanAutoBySource },
-                        set: { SettingsStore.fanAutoBySource = $0; model.changed(popover: true) }
+                        set: { on in
+                            if on, !SettingsCoordinator.requirePro(.fans) { model.reload(); return }
+                            SettingsStore.fanAutoBySource = on
+                            if on { ChargeControl.ensureHelper() }
+                            model.changed(popover: true)
+                        }
                     )).labelsHidden()
                 }
                 CardDivider()
                 SettingsRow("slider.horizontal.3", L("Профессиональный редактор"),
-                            detail: L("Кривые по нескольким датчикам, отдельная настройка каждого вентилятора, время разгона, передача управления macOS в простое и аварийный порог.")) {
-                    Button(L("Открыть…")) {
-                        SettingsWindowController.shared.openAdvancedCoolingEditor()
-                    }
+                            detail: L("Свой профиль: датчики, кривая, разгон и отдельная настройка вентиляторов.")) {
+                    EmptyView()
+                }
+                CardDivider()
+                AdvancedCoolingEditor(profile: $advancedProfile, fans: fans) {
+                    guard SettingsCoordinator.requirePro(.fans) else { return }
+                    SettingsStore.customFanProfile = advancedProfile
+                    SettingsStore.activeFanProfileName = advancedProfile.name
+                    FanController.writeProfileFile(advancedProfile)
+                    model.changed(popover: true)
                 }
             }
 
@@ -883,32 +1221,7 @@ private struct CoolingSettingsPage: View {
 
             // MARK: - GPU
             if GPUInfo.switchable {
-                KelvinCard(L("Графика")) {
-                    if let active = GPUInfo.active() {
-                        SettingsRow(active.integrated ? "checkmark.circle.fill" : "circle.fill",
-                                    active.name,
-                                    detail: active.kind + " · " + active.vramText) {
-                            EmptyView()
-                        }
-                    }
-                    CardDivider()
-                    SettingsRow("cpu", L("Режим графики")) {
-                        Picker("", selection: settingBinding(
-                            get: { GPUInfo.mode() ?? .automatic },
-                            set: { m in
-                                guard m != .automatic else { _ = GPUInfo.setMode(.automatic); return }
-                                guard SettingsWindowController.shared.requirePro(.gpuSwitch) else { model.reload(); return }
-                                _ = GPUInfo.setMode(m)
-                            }
-                        )) {
-                            ForEach([GPUMode.automatic, .integratedOnly, .discreteOnly], id: \.rawValue) { mode in
-                                Text(mode.title).tag(mode)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 180)
-                    }
-                }
+                GPUModeCard()
             }
 
             // MARK: - Thermal Rules
@@ -950,13 +1263,21 @@ private struct CoolingSettingsPage: View {
                 Toggle("", isOn: settingBinding(
                     get: { rule.on },
                     set: { on in
-                        updateAlertRule(rule.kind) { r in
-                            r.on = on
-                            if !on { r.action = nil }
+                        if on {
+                            AlertsEngine.shared.requestOrOpenSettings { granted in
+                                guard granted else { model.changed(); return }
+                                updateAlertRule(rule.kind) { $0.on = true }
+                                AlertsEngine.shared.onRulesChanged()
+                                model.changed()
+                            }
+                        } else {
+                            updateAlertRule(rule.kind) { r in
+                                r.on = false
+                                r.action = nil
+                            }
+                            AlertsEngine.shared.onRulesChanged()
+                            model.changed()
                         }
-                        if on { AlertsEngine.shared.primeAuthorization() }
-                        AlertsEngine.shared.onRulesChanged()
-                        model.changed()
                     }
                 )).labelsHidden()
                 .disabled(!SettingsStore.alertsEnabled)
@@ -990,7 +1311,7 @@ private struct CoolingSettingsPage: View {
                     Toggle("", isOn: settingBinding(
                         get: { rule.action == .fansMax },
                         set: { on in
-                            guard SettingsWindowController.shared.requirePro(.fans) else {
+                            guard SettingsCoordinator.requirePro(.fans) else {
                                 model.reload(); return
                             }
                             updateAlertRule(rule.kind) { r in
@@ -1006,9 +1327,283 @@ private struct CoolingSettingsPage: View {
     }
 }
 
+/// Встроенный профессиональный редактор. Остаётся частью текущей SwiftUI-страницы:
+/// никаких вторых окон и визуального скачка в legacy AppKit.
+private struct AdvancedCoolingEditor: View {
+    @Binding var profile: FanProfile
+    let fans: [FanInfo]
+    let apply: () -> Void
+    @State private var profileName = ""
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var availableSensors: [TempSensor] { FanController.sensors() }
+
+    private var idleEnabled: Binding<Bool> {
+        Binding(
+            get: { (profile.idleHandoffTemp ?? 0) > 0 },
+            set: { profile.idleHandoffTemp = $0 ? max(35, profile.idleHandoffTemp ?? 45) : nil }
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SettingsRow("person.crop.square", L("Название профиля"),
+                        detail: L("Сохраните несколько профилей для разных задач.")) {
+                TextField(L("Например, Монтаж"), text: $profileName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+            }
+            CardDivider()
+            SettingsRow("dial.medium", L("Режим")) {
+                Picker("", selection: Binding(
+                    get: { profile.mode },
+                    set: { mode in
+                        profile.mode = mode
+                        if mode == .curve, (profile.curvePoints?.count ?? 0) < 2 {
+                            let lo = Int(fans.map(\.min).filter { $0 > 0 }.min() ?? 1800)
+                            let hi = Int(fans.map(\.max).max() ?? 6000)
+                            profile.curvePoints = [
+                                CurvePoint(temp: 35, rpm: lo),
+                                CurvePoint(temp: 55, rpm: max(lo, (lo + hi) / 2)),
+                                CurvePoint(temp: 75, rpm: hi)
+                            ]
+                        }
+                    }
+                )) {
+                    Text(L("По датчикам")).tag(FanMode.curve)
+                    Text(L("Постоянные обороты")).tag(FanMode.constant)
+                }
+                .labelsHidden()
+                .frame(width: 210)
+            }
+            if profile.mode == .constant {
+                SettingsRow("fanblades", L("Целевые обороты")) {
+                    HStack(spacing: 10) {
+                        Slider(value: Binding(
+                            get: { Double(profile.rpm) },
+                            set: { profile.rpm = Int($0.rounded()) }
+                        ), in: rpmBounds, step: 50)
+                        .frame(width: 190)
+                        Text("\(profile.rpm)")
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .frame(width: 52, alignment: .trailing)
+                    }
+                }
+            } else {
+                CardDivider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(L("Датчики кривой"))
+                        .font(.system(size: 12, weight: .semibold))
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 175), spacing: 7)], alignment: .leading, spacing: 7) {
+                        ForEach(availableSensors, id: \.key) { sensor in
+                            SensorChip(
+                                title: sensor.name,
+                                selected: selectedSensorKeys.contains(sensor.key)
+                            ) { toggleSensor(sensor.key) }
+                        }
+                    }
+                    FanCurveRepresentable(
+                        points: Binding(
+                            get: { profile.curvePoints ?? [] },
+                            set: { profile.curvePoints = $0 }
+                        ),
+                        rpmRange: rpmBounds,
+                        currentTemp: selectedSensorKeys.compactMap { FanController.temp($0) }.max()
+                    )
+                    .frame(height: 178)
+                    Text(L("Перетаскивайте точки: температура слева направо, обороты снизу вверх. Самый горячий выбранный датчик управляет кривой."))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            SettingsRow("timer", L("Время разгона"),
+                        detail: L("Плавное изменение оборотов снижает резкие скачки шума.")) {
+                HStack(spacing: 10) {
+                    Slider(value: Binding(
+                        get: { Double(profile.rampTime) },
+                        set: { profile.rampTime = Int($0.rounded()) }
+                    ), in: 0...120, step: 5)
+                    .frame(width: 170)
+                    Text(profile.rampTime == 0 ? L("мгновенно") : "\(profile.rampTime) " + L("с"))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .frame(width: 78, alignment: .trailing)
+                }
+            }
+            CardDivider()
+            SettingsRow("moon.zzz", L("Передавать управление macOS в простое"),
+                        detail: L("Ниже выбранной температуры система снова управляет вентиляторами.")) {
+                Toggle("", isOn: idleEnabled).labelsHidden()
+            }
+            if idleEnabled.wrappedValue {
+                SettingsRow("thermometer.low", L("Температура возврата")) {
+                    HStack(spacing: 10) {
+                        Slider(value: Binding(
+                            get: { Double(profile.idleHandoffTemp ?? 45) },
+                            set: { profile.idleHandoffTemp = Int($0.rounded()) }
+                        ), in: 30...60, step: 1)
+                        .frame(width: 170)
+                        Text("\(profile.idleHandoffTemp ?? 45)°")
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .frame(width: 48, alignment: .trailing)
+                    }
+                }
+            }
+            if fans.count > 1 {
+                CardDivider()
+                SettingsRow("fanblades", L("Настроить вентиляторы отдельно"),
+                            detail: L("Используйте только при раздельных зонах охлаждения.")) {
+                    Toggle("", isOn: Binding(
+                        get: { profile.perFan?.count == fans.count },
+                        set: { enabled in
+                            if enabled {
+                                let base = profile.setting(forFan: 0)
+                                profile.perFan = fans.map { _ in base }
+                            } else {
+                                profile.perFan = nil
+                            }
+                        }
+                    )).labelsHidden()
+                }
+            }
+            CardDivider()
+            HStack {
+                Label(L("Защита от перегрева остаётся активной при любом профиле."),
+                      systemImage: "checkmark.shield.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if !profileName.trimmingCharacters(in: .whitespaces).isEmpty {
+                    Button(L("Сохранить профиль")) { saveProfile() }
+                }
+                Button(L("Применить")) {
+                    if !profileName.trimmingCharacters(in: .whitespaces).isEmpty { saveProfile() }
+                    apply()
+                }
+                    .buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .background(KelvinSwiftUITheme.accentMuted(colorScheme).opacity(0.28))
+        .onAppear {
+            ensureCurve()
+            if profileName.isEmpty, !SettingsStore.isBuiltinFanID(profile.name) {
+                profileName = profile.name == "Свой" ? "" : profile.name
+            }
+        }
+    }
+
+    private var rpmBounds: ClosedRange<Double> {
+        let lo = fans.map(\.min).filter { $0 > 0 }.min() ?? 1200
+        let hi = max(fans.map(\.max).max() ?? 6000, lo + 500)
+        return lo...hi
+    }
+
+    private var selectedSensorKeys: [String] {
+        let keys = profile.curveSensorKeys ?? [profile.sensorKey]
+        return keys.filter { !$0.isEmpty }
+    }
+
+    private func toggleSensor(_ key: String) {
+        var keys = selectedSensorKeys
+        if let index = keys.firstIndex(of: key) {
+            if keys.count > 1 { keys.remove(at: index) }
+        } else {
+            keys.append(key)
+        }
+        profile.curveSensorKeys = keys
+        profile.sensorKey = keys.first ?? profile.sensorKey
+    }
+
+    private func saveProfile() {
+        let name = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !SettingsStore.builtinFanNames.contains(name) else { return }
+        profile.name = name
+        var presets = SettingsStore.userFanPresets
+        if let index = presets.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            presets[index] = profile
+        } else {
+            presets.append(profile)
+        }
+        SettingsStore.userFanPresets = presets
+        SettingsStore.customFanProfile = profile
+        SettingsStore.activeFanProfileName = name
+    }
+
+    private func ensureCurve() {
+        guard profile.mode == .curve, (profile.curvePoints?.count ?? 0) < 2 else { return }
+        let lo = Int(rpmBounds.lowerBound)
+        let hi = Int(rpmBounds.upperBound)
+        profile.curvePoints = [
+            CurvePoint(temp: 35, rpm: lo),
+            CurvePoint(temp: 55, rpm: max(lo, (lo + hi) / 2)),
+            CurvePoint(temp: 75, rpm: hi)
+        ]
+    }
+}
+
+private struct SensorChip: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                Text(title).lineLimit(1)
+            }
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(selected
+                        ? KelvinSwiftUITheme.accentMuted(colorScheme)
+                        : KelvinSwiftUITheme.control(colorScheme))
+            .cornerRadius(KelvinSwiftUITheme.Radius.chip)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct FanCurveRepresentable: NSViewRepresentable {
+    @Binding var points: [CurvePoint]
+    let rpmRange: ClosedRange<Double>
+    let currentTemp: Double?
+
+    func makeNSView(context: Context) -> FanCurveView {
+        let view = FanCurveView()
+        view.onChange = { context.coordinator.points.wrappedValue = $0 }
+        return view
+    }
+
+    func updateNSView(_ view: FanCurveView, context: Context) {
+        context.coordinator.points = $points
+        if view.points != points { view.points = points }
+        view.rpmRange = rpmRange
+        view.currentTemp = currentTemp
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(points: $points) }
+    final class Coordinator {
+        var points: Binding<[CurvePoint]>
+        init(points: Binding<[CurvePoint]>) { self.points = points }
+    }
+}
+
+
 private struct InputSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
     @State private var snippets = SettingsStore.snippetsRaw
+    @State private var inputStatus = LangSwitcherStatus.current()
+
+    private var needsInputAccess: Bool {
+        SettingsStore.langMode != "off"
+            || SettingsStore.spellFixEnabled
+            || SettingsStore.snippetsEnabled
+    }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -1061,6 +1656,34 @@ private struct InputSettingsPage: View {
                         }
                         .labelsHidden()
                         .frame(width: 60)
+                    }
+                }
+            }
+            if needsInputAccess {
+                KelvinCard(L("Разрешение системы")) {
+                    SettingsRow(inputStatus.runtimeStatus.isWorking ? "checkmark.circle.fill" : "accessibility",
+                                inputStatus.runtimeStatus.localizedDescription,
+                                detail: inputPermissionDetail) {
+                        switch inputStatus.runtimeStatus {
+                        case .active:
+                            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                        case .accessibilityDenied:
+                            Button(L("Разрешить…")) {
+                                _ = LangSwitcher.shared.requestAccessibility()
+                            }
+                        case .inputMonitoringUnavailable, .tapFailed:
+                            Button(L("Открыть настройки")) {
+                                MacSystemSettings.openInputMonitoring()
+                            }
+                        case .missingLayouts:
+                            Button(L("Открыть настройки")) {
+                                InputSources.openSystemKeyboardSettings()
+                            }
+                        case .tapStarting:
+                            ProgressView().controlSize(.small)
+                        case .off, .unavailableByLicense:
+                            EmptyView()
+                        }
                     }
                 }
             }
@@ -1193,6 +1816,32 @@ private struct InputSettingsPage: View {
                         LangSwitcher.shared.snippets = SettingsStore.parseSnippets(value)
                     }
             }
+        }
+        .onAppear { inputStatus = LangSwitcherStatus.current() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            inputStatus = LangSwitcherStatus.current()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("BMLangRuntimeChanged"))) { _ in
+            inputStatus = LangSwitcherStatus.current()
+        }
+    }
+
+    private var inputPermissionDetail: String {
+        switch inputStatus.runtimeStatus {
+        case .active:
+            return L("Обработка клавиш работает локально на вашем Mac.")
+        case .accessibilityDenied:
+            return L("Kelvin не запрашивает доступ при запуске. Разрешите его только если хотите использовать автозамену.")
+        case .inputMonitoringUnavailable, .tapFailed:
+            return L("Универсальный доступ разрешён, но обработчик ввода не запустился. Проверьте «Мониторинг ввода» в настройках macOS.")
+        case .missingLayouts:
+            return L("Добавьте вторую поддерживаемую раскладку в настройках клавиатуры macOS.")
+        case .tapStarting:
+            return L("Kelvin запускает локальный обработчик ввода.")
+        case .off:
+            return L("Обработка ввода выключена.")
+        case .unavailableByLicense:
+            return L("Функция недоступна без активной лицензии Kelvin Pro.")
         }
     }
 }
@@ -1373,6 +2022,25 @@ private func moduleSymbol(_ id: String) -> String {
 
 private struct NotificationSettingsPage: View {
     @ObservedObject var model: KelvinSettingsModel
+    @State private var permission = AlertsEngine.shared.authorizationState
+
+    private var permissionTitle: String {
+        switch permission {
+        case .authorized: return L("Разрешены при последней проверке")
+        case .notDetermined: return L("Разрешение ещё не запрошено")
+        case .denied: return L("Отключены в настройках macOS")
+        case .unavailable: return L("Состояние разрешения недоступно")
+        }
+    }
+
+    private var permissionDetail: String {
+        switch permission {
+        case .authorized: return L("Нажмите «Проверить», чтобы подтвердить доступ и отправить тестовое уведомление.")
+        case .notDetermined: return L("Системный запрос появится только после вашего нажатия.")
+        case .denied: return L("Откройте настройки macOS, чтобы снова разрешить уведомления.")
+        case .unavailable: return L("Kelvin не будет показывать неожиданный системный запрос.")
+        }
+    }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -1380,17 +2048,62 @@ private struct NotificationSettingsPage: View {
                 SettingsRow("bell", L("Уведомления Kelvin"), detail: L("Температура, заряд и другие важные состояния.")) {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.alertsEnabled },
-                        set: { SettingsStore.alertsEnabled = $0; model.changed() }
+                        set: { on in
+                            if on {
+                                AlertsEngine.shared.requestOrOpenSettings { granted in
+                                    SettingsStore.alertsEnabled = granted
+                                    permission = AlertsEngine.shared.authorizationState
+                                    model.changed()
+                                }
+                            } else {
+                                SettingsStore.alertsEnabled = false
+                                AlertsEngine.shared.onRulesChanged()
+                                model.changed()
+                            }
+                        }
                     )).labelsHidden()
                 }
                 CardDivider()
                 SettingsRow("network.badge.shield.half.filled", L("Новое приложение в сети")) {
                     Toggle("", isOn: settingBinding(
                         get: { SettingsStore.firstConnAlerts },
-                        set: { SettingsStore.firstConnAlerts = $0; model.changed() }
+                        set: { on in
+                            if on {
+                                AlertsEngine.shared.requestOrOpenSettings { granted in
+                                    SettingsStore.firstConnAlerts = granted
+                                    permission = AlertsEngine.shared.authorizationState
+                                    model.changed()
+                                }
+                            } else {
+                                SettingsStore.firstConnAlerts = false
+                                model.changed()
+                            }
+                        }
                     )).labelsHidden()
                 }
             }
+            KelvinCard(L("Разрешение системы")) {
+                SettingsRow(permission == .authorized ? "checkmark.circle.fill" : "bell.slash",
+                            permissionTitle,
+                            detail: permissionDetail) {
+                    if permission == .authorized {
+                        Button(L("Проверить")) {
+                            AlertsEngine.shared.sendTest { _ in
+                                permission = AlertsEngine.shared.authorizationState
+                            }
+                        }
+                    } else {
+                        Button(permission == .denied ? L("Открыть настройки") : L("Разрешить…")) {
+                            AlertsEngine.shared.requestOrOpenSettings { _ in
+                                permission = AlertsEngine.shared.authorizationState
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            permission = AlertsEngine.shared.authorizationState
         }
     }
 }
@@ -1404,43 +2117,21 @@ private struct SecuritySettingsPage: View {
                 SettingsRow(model.firewallEnabled ? "checkmark.shield.fill" : "exclamationmark.shield",
                             model.firewallAvailable ? L("Встроенный сетевой экран macOS") : L("Сетевой экран недоступен"),
                             detail: model.firewallEnabled ? L("Входящие подключения контролируются.") : L("Входящие подключения не контролируются.")) {
-                    Toggle("", isOn: Binding(
-                        get: { model.firewallEnabled },
-                        set: { value in
-                            guard SettingsWindowController.shared.requirePro(.firewall) else { model.refreshSecurity(); return }
-                            DispatchQueue.global(qos: .userInitiated).async {
-                                _ = Firewall.setEnabled(value)
-                                DispatchQueue.main.async { model.refreshSecurity() }
-                            }
-                        }
-                    ))
-                    .labelsHidden()
+                    Button(L("Открыть настройки")) {
+                        MacSystemSettings.openFirewall()
+                    }
                     .disabled(!model.firewallAvailable)
                 }
                 if model.firewallEnabled && model.firewallAvailable {
                     CardDivider()
                     SettingsRow("eye.slash", L("Невидимый режим (Stealth)")) {
-                        Toggle("", isOn: settingBinding(
-                            get: { model.firewallStealth },
-                            set: { value in
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    _ = Firewall.setStealth(value)
-                                    DispatchQueue.main.async { model.refreshSecurity() }
-                                }
-                            }
-                        )).labelsHidden()
+                        Image(systemName: model.firewallStealth ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(model.firewallStealth ? .green : .secondary)
                     }
                     CardDivider()
                     SettingsRow("shield.lefthalf.filled", L("Блокировать всё, кроме подписанного")) {
-                        Toggle("", isOn: settingBinding(
-                            get: { model.firewallBlockAll },
-                            set: { value in
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    _ = Firewall.setBlockAll(value)
-                                    DispatchQueue.main.async { model.refreshSecurity() }
-                                }
-                            }
-                        )).labelsHidden()
+                        Image(systemName: model.firewallBlockAll ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(model.firewallBlockAll ? .green : .secondary)
                     }
                 }
             }
@@ -1453,7 +2144,7 @@ private struct SecuritySettingsPage: View {
                     SettingsRow("network.badge.shield.half.filled", profile.name,
                                 detail: profile.connected ? L("Подключено") : (profile.enabled ? L("Готов к подключению") : L("Отключён в системе"))) {
                         Button(profile.connected ? L("Отключить") : L("Подключить")) {
-                            guard SettingsWindowController.shared.requirePro(.vpn) else { model.refreshSecurity(); return }
+                            guard SettingsCoordinator.requirePro(.vpn) else { model.refreshSecurity(); return }
                             DispatchQueue.global(qos: .userInitiated).async {
                                 if profile.connected { VPN.disconnect(profile.name) }
                                 else { VPN.connect(profile.name) }
@@ -1468,7 +2159,7 @@ private struct SecuritySettingsPage: View {
                 SettingsRow("network", L("Открыть сетевой радар"), detail: L("Подробные подключения доступны в поповере Kelvin.")) {
                     Button(L("Открыть")) {
                         KelvinSettingsWindowController.shared.window?.orderOut(nil)
-                        NotificationCenter.default.post(name: Notification.Name("BMOpenPopoverSection"), object: "privacy")
+                        (NSApp.delegate as? AppDelegate)?.openRadarFromAlert()
                     }
                 }
             }
@@ -1659,7 +2350,16 @@ private struct ProSettingsPage: View {
                             Text(L("Без подписки • Один платёж"))
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
-                            Text(String(format: L("%@ %@"), L("Включает"), L("триал \(Licensing.shared.trialDays) дн.")))
+                            Text(
+                                String(
+                                    format: L("%@ %@"),
+                                    L("Включает"),
+                                    String(
+                                        format: L("триал %d дн."),
+                                        Licensing.shared.trialDays
+                                    )
+                                )
+                            )
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
                         }

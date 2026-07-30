@@ -441,6 +441,10 @@ final class CatalogRowView: NSView {
         effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
+    private func resolved(_ color: NSColor) -> NSColor {
+        Design.Color.resolved(color, dark: isDark)
+    }
+
     private var backingScale: CGFloat {
         window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
     }
@@ -647,12 +651,14 @@ final class CatalogRowView: NSView {
         let nameFont = isRaw ? Design.Font.caption : Design.Font.body
         nameLayer.font = nameFont
         nameLayer.fontSize = nameFont.pointSize
-        nameLayer.foregroundColor = (row.key.decodable ? NSColor.labelColor : NSColor.tertiaryLabelColor).cgColor
+        nameLayer.foregroundColor = resolved(
+            row.key.decodable ? .labelColor : .tertiaryLabelColor
+        ).cgColor
         nameLayer.string = row.key.displayName
 
         rawLayer.font = Design.Font.numericMicro
         rawLayer.fontSize = Design.Font.numericMicro.pointSize
-        rawLayer.foregroundColor = NSColor.tertiaryLabelColor.cgColor
+        rawLayer.foregroundColor = resolved(.tertiaryLabelColor).cgColor
         rawLayer.string = isRaw ? row.key.fourCC : nil
         rawLayer.isHidden = !isRaw
 
@@ -669,7 +675,7 @@ final class CatalogRowView: NSView {
         guard row.key.decodable, row.value != nil else {
             return NSAttributedString(string: "—", attributes: [
                 .font: Design.Font.numericBody,
-                .foregroundColor: NSColor.tertiaryLabelColor,
+                .foregroundColor: resolved(.tertiaryLabelColor),
                 .paragraphStyle: paragraph,
             ])
         }
@@ -681,18 +687,18 @@ final class CatalogRowView: NSView {
             let unit = String(text[text.index(after: split)...])
             attributed.append(NSAttributedString(string: number + " ", attributes: [
                 .font: Design.Font.numericBody,
-                .foregroundColor: NSColor.labelColor,
+                .foregroundColor: resolved(.labelColor),
                 .paragraphStyle: paragraph,
             ]))
             attributed.append(NSAttributedString(string: unit, attributes: [
                 .font: Design.Font.numericMicro,
-                .foregroundColor: NSColor.tertiaryLabelColor,
+                .foregroundColor: resolved(.tertiaryLabelColor),
                 .paragraphStyle: paragraph,
             ]))
         } else {
             attributed.append(NSAttributedString(string: text, attributes: [
                 .font: Design.Font.numericBody,
-                .foregroundColor: NSColor.labelColor,
+                .foregroundColor: resolved(.labelColor),
                 .paragraphStyle: paragraph,
             ]))
         }
@@ -1513,8 +1519,7 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
             guard let self,
                   self.items.indices.contains(rowIndex),
                   case .sensor(let id) = self.items[rowIndex],
-                  let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView
-                    ?? rowView as? CatalogRowView,
+                  let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView,
                   let row = byID[id] ?? self.lastRows[id]
             else { return }
 
@@ -1534,7 +1539,6 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
                   case .engine(let engineIndex) = self.items[rowIndex],
                   self.engineRows.indices.contains(engineIndex),
                   let view = rowView.subviews.first(where: { $0 is EngineRowView }) as? EngineRowView
-                    ?? rowView as? EngineRowView
             else { return }
             view.update(self.engineRows[engineIndex])
         }
@@ -1631,7 +1635,6 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
                   self.items.indices.contains(rowIndex),
                   case .sensor(let id) = self.items[rowIndex],
                   let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView
-                    ?? rowView as? CatalogRowView
             else { return }
             view.setSelected(self.selectedID == id, animated: animated)
         }
@@ -1647,8 +1650,7 @@ final class HardwareView: NSView, NSTableViewDataSource, NSTableViewDelegate, NS
 
     private func clearVisibleHover() {
         table.enumerateAvailableRowViews { rowView, _ in
-            if let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView
-                ?? rowView as? CatalogRowView {
+            if let view = rowView.subviews.first(where: { $0 is CatalogRowView }) as? CatalogRowView {
                 view.clearHover()
             }
         }

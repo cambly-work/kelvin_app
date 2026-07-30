@@ -27,19 +27,29 @@ enum QuickToggleRegistry {
     static let all: [QuickToggleDef] = [
         QuickToggleDef(id: "limit80", label: L("Лимит 80%"), icon: "battery.75percent", accent: brand,
                        available: { BatteryReader.read() != nil },
-                       isOn: { ChargeControl.mode != "sail" && ChargeControl.limit < 100 },
+                       isOn: {
+                           HelperInstall.fandInstalled
+                               && ChargeControl.mode != "sail" && ChargeControl.limit < 100
+                       },
                        toggle: {
-                           // вкл = вход в лимит (Pro-гейт/апселл внутри setMode); выкл — свободно
-                           if ChargeControl.mode != "sail" && ChargeControl.limit < 100 { ChargeControl.setMode("off") }
-                           else { ChargeControl.setMode("limit") }
+                           let configured = ChargeControl.mode != "sail" && ChargeControl.limit < 100
+                           if configured {
+                               ChargeControl.setMode("off")                 // выключить можно всегда
+                           } else if !HelperInstall.fandInstalled {
+                               SettingsCoordinator.open(section: "power")  // setup без внезапного password prompt
+                           } else {
+                               ChargeControl.setMode("limit")
+                           }
                        }),
         QuickToggleDef(id: "topup", label: L("До 100%"), icon: "bolt.badge.clock", accent: brand,
                        available: { BatteryReader.read() != nil },
-                       isOn: { ChargeControl.isTopUpActive },
+                       isOn: { HelperInstall.fandInstalled && ChargeControl.isTopUpActive },
                        toggle: {
                            if ChargeControl.isTopUpActive {                 // отмена дозаряда — свободно (честно: вернуть потолок)
                                SettingsStore.topUpUntil = 0
                                ChargeControl.writeJSON()
+                           } else if !HelperInstall.fandInstalled {
+                               SettingsCoordinator.open(section: "power")
                            } else {
                                ChargeControl.topUp()                        // Pro-гейт внутри
                            }
@@ -48,21 +58,18 @@ enum QuickToggleRegistry {
                        available: { !FanController.fans().isEmpty },
                        isOn: { FanController.daemonInstalled && SettingsStore.activeFanProfileName == "turbo" },
                        toggle: {
-                           guard Licensing.shared.isPro else { _ = SettingsWindowController.shared.requirePro(.fans); return }
-                           let on = FanController.daemonInstalled && SettingsStore.activeFanProfileName == "turbo"
-                           FanController.applyProfileHeadless(named: on ? "auto" : "turbo")
-                       }),
-        QuickToggleDef(id: "panic", label: L("Паника: блок сети"), icon: "exclamationmark.shield.fill", accent: brand,
-                       available: { Firewall.available },
-                       isOn: { Firewall.enabled && Firewall.blockAll },
-                       toggle: {
-                           if Firewall.enabled && Firewall.blockAll {
-                               _ = Firewall.privileged(["--setblockall off"])          // выключить можно всегда
+                           guard Licensing.shared.isPro else { _ = SettingsCoordinator.requirePro(.fans); return }
+                           if SettingsStore.activeFanProfileName == "turbo" {
+                               FanController.applyProfileHeadless(named: "auto")
+                           } else if !FanController.daemonInstalled {
+                               SettingsCoordinator.open(section: "cooling")
                            } else {
-                               guard SettingsWindowController.shared.requirePro(.firewall) else { return }
-                               _ = Firewall.privileged(["--setglobalstate on", "--setblockall on"])
+                               FanController.applyProfileHeadless(named: "turbo")
                            }
                        }),
+        // Root-firewall action намеренно не выдаём за «быстрый переключатель»:
+        // текущий compatibility path требует системной авторизации на каждое действие.
+        // Он останется в явном разделе Security до переноса в typed privileged service.
         QuickToggleDef(id: "caffeine", label: L("Не засыпать"), icon: "cup.and.saucer.fill", accent: brand,
                        available: { true }, isOn: { Caffeine.active }, toggle: { Caffeine.toggle() }),
         QuickToggleDef(id: "hidden", label: L("Скрытые файлы"), icon: "eye", accent: brand,

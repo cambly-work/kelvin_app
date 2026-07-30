@@ -143,21 +143,22 @@ enum FanController {
     /// Список вентиляторов с текущими оборотами (чтение без sudo).
     static func fans() -> [FanInfo] {
         // Использовать resolved sensor set для определения доступных вентиляторов.
-        let model = sysctlStr("hw.model")
-        let arch = architecture()
-        let catalog = SensorCatalog.build()
         let smc = EnergyModel.smc
         
         // Сначала попробовать FNum через resolver
         if let fnum = smc.read("FNum"), fnum > 0 {
             let mask = Int(smc.read("FS! ") ?? 0)
-            return (0..<Int(fnum)).compactMap { i in
+            return (0..<min(Int(fnum), 10)).compactMap { i in
                 let acKey = "F\(i)Ac"
-                guard let cur = smc.read(acKey), cur > 1 else { return nil }
+                let minRPM = smc.read("F\(i)Mn")
+                let maxRPM = smc.read("F\(i)Mx")
+                guard let cur = smc.read(acKey),
+                      cur.isFinite, cur >= 0,
+                      minRPM != nil || maxRPM != nil else { return nil }
                 return FanInfo(index: i,
                                rpm: cur,
-                               min: smc.read("F\(i)Mn") ?? 0,
-                               max: smc.read("F\(i)Mx") ?? 0,
+                               min: minRPM ?? 0,
+                               max: maxRPM ?? max(cur, 1),
                                forced: (mask >> i) & 1 == 1)
             }
         }
@@ -276,10 +277,10 @@ enum FanController {
     }
 
     /// Headless-применение профиля по id (без NSAlert) — для автоматики по источнику питания.
-    /// Демон подхватит файл за ~2с и применит со всеми своими backstop'ами (санитайз/перегрев/аренда).
-    /// No-op без установленного демона. activeFanProfileName синхронизируем — чтобы UI показывал активное.
+    /// Конфигурация сохраняется даже без установленного демона: UI честно показывает её как
+    /// подготовленную, а после явного подключения системного компонента она применится без
+    /// повторного выбора. Демон подхватит файл за ~2с со всеми backstop'ами.
     static func applyProfileHeadless(named id: String) {
-        guard daemonInstalled else { return }
         writeProfileFile(profile(named: id))
         SettingsStore.activeFanProfileName = id
     }
@@ -288,7 +289,7 @@ enum FanController {
         (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/Kelvin")
     }
     static var daemonInstalled: Bool {
-        FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.trykelvin.kelvin.fand.plist")
+        HelperInstall.fandInstalled
     }
     /// Heartbeat «аренды»: пока приложение живо, обновляем mtime конфигов — демон видит, что
     /// контроллер на связи. Если приложение исчезнет (краш/удаление), файлы «протухнут» за лизинг-окно

@@ -2,7 +2,7 @@
 # Проверка покрытия локализации: каждая запись Strings.table должна иметь uk/en/pt
 # (частичная запись = баг → сломанная не-RU сборка). Плюс отчёт по ключам L(...),
 # которых нет в таблице (они покажут русский во всех языках).
-# Падает (exit 1) ТОЛЬКО на частичных записях таблицы — это однозначный дефект.
+# Падает при частичных записях и при любом используемом ключе без перевода.
 cd "$(dirname "$0")/.." || exit 2
 
 python3 - <<'PY'
@@ -33,8 +33,8 @@ missing = sorted(k for k in used if k not in table)
 
 print(f"  таблица: {len(table)} записей · использований L(\"…\"): {len(used)}")
 if missing:
-    print(f"  ℹ {len(missing)} ключей L(\"…\") нет в таблице (покажут русский) — примеры:")
-    for k in missing[:8]:
+    print(f"  ✗ {len(missing)} ключей L(\"…\") нет в таблице:")
+    for k in missing[:20]:
         print(f"      · {k[:70]}")
 
 if partial:
@@ -42,6 +42,9 @@ if partial:
     for k, v in list(partial.items())[:20]:
         miss = ",".join(l for l, ok in v.items() if not ok)
         print(f"      · нет [{miss}]: {k[:60]}")
+    sys.exit(1)
+
+if missing:
     sys.exit(1)
 
 print("  ✓ все записи таблицы полны (uk/en/pt)")

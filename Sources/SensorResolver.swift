@@ -161,7 +161,6 @@ enum SensorResolver {
     /// Fanless-модели для проверки cooling topology.
     private static let fanlessModels: Set<String> = [
         "MacBookAir10,1",  // M1 Air
-        "MacBookAir8,1",   // Intel Air 13" 2018-2019 (частично fanless)
     ]
     
     /// Разрешить сенсоры для данной модели.
