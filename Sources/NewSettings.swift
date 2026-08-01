@@ -857,7 +857,7 @@ private struct GeneralSettingsPage: View {
                 }
                 CardDivider()
                 SettingsRow("paintpalette", L("Стиль иконок"),
-                            detail: L("Системные используют оригинальные SF Symbols macOS; Kelvin — фирменные векторные глифы.")) {
+                            detail: L("Системные используют размеры и SF Symbols macOS; батарея показывает точный уровень заряда.")) {
                     Picker("", selection: settingBinding(
                         get: { SettingsStore.menuBarIconStyle },
                         set: { SettingsStore.menuBarIconStyle = $0; model.changed(menuBar: true) }

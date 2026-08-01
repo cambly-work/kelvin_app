@@ -11,19 +11,9 @@
         <true/>
     </dict>
 
-    <!--
-        Путь к бинарю внутри bundle.
-        SMAppService (macOS 13+) запускает daemon относительно бандла приложения.
-        SMJobBless (macOS 11-12) копирует бинарь в /Library/PrivilegedHelperTools/,
-        но plist также валидируется из Contents/Library/LaunchDaemons/.
-    -->
-    <key>Program</key>
+    <!-- SMAppService resolves BundleProgram relative to Kelvin.app. -->
+    <key>BundleProgram</key>
     <string>Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged</string>
-    </array>
 
     <key>KeepAlive</key>
     <true/>

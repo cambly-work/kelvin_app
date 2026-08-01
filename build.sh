@@ -84,6 +84,12 @@ cp helper/privileged/com.trykelvin.kelvin.privileged.plist "$APP/Contents/Librar
 # Копируем бинарь в LaunchDaemons (SMAppService запускает daemon из бандла)
 cp "$APP/Contents/Resources/kelvin-privileged" "$APP/Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged"
 
+# A nested helper needs its own stable signing identifier. The XPC client
+# verifies this identifier before trusting the privileged endpoint.
+codesign --force --sign - \
+    --identifier "com.trykelvin.kelvin.privileged" \
+    "$APP/Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged"
+
 echo "→ Ad-hoc подпись…"
 # A plain ad-hoc signature gets an implicit cdhash-based designated requirement.
 # That cdhash changes on every build, so TCC treats each local Kelvin build as a

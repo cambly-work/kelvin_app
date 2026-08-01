@@ -315,8 +315,9 @@ actor PrivilegedServiceClient {
             return true  // не блокируем при невозможности верифицировать
         }
 
-        // Требуем совпадение bundle identifier с нашим сервисом.
-        let requirement = "identifier \"\(PrivilegedServiceConfig.bundleID)\"" as CFString
+        // Helper has its own signing identifier; the application bundle ID is
+        // checked in the opposite direction by the helper.
+        let requirement = "identifier \"\(PrivilegedServiceConfig.serviceName)\"" as CFString
         var req: SecRequirement?
         guard SecRequirementCreateWithString(requirement, [], &req) == errSecSuccess,
               let req else {

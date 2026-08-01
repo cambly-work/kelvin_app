@@ -2532,6 +2532,12 @@ final class PopoverController: NSViewController {
         paintGPU()
         guard GPUInfo.switchable else { return gpuLine }
 
+        // The settings screen owns setup/approval. A selector that cannot
+        // execute is misleading and used to produce serviceUnavailable on
+        // every click from the popover.
+        GPUController.shared.refreshServiceState()
+        guard GPUController.shared.canSwitch else { return gpuLine }
+
         // Компактный селектор: Встроенная / Дискретная / Авто.
         let labels = GPUMode.allCases.map { $0.shortTitle }
         let currentRaw = GPUInfo.mode()?.rawValue ?? GPUMode.automatic.rawValue
@@ -4582,6 +4588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Hardening.denyDebugger()              // релиз-only: затруднить lldb-attach к гейту лицензии
         SettingsStore.migrateMenuBarIdentityIfNeeded()
+        SettingsStore.migrateNativeMenuBarIfNeeded()
         if let btn = statusItem.button {
             // Бренд виден с первого кадра; асинхронный hardware tick затем добавит
             // реальное значение. Больше нет безликого временного «…».
@@ -4756,9 +4763,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case "ring":
             return menuBarRingIcon(charge: charge, charging: charging, phase: statusAnimationPhase)
         default:
-            if SettingsStore.menuBarIconStyle == "system",
-               let image = systemMenuBarIcon(charge: charge, charging: charging) {
-                return image
+            if SettingsStore.menuBarIconStyle == "system" {
+                // У системной батареи SF Symbols только пять дискретных состояний.
+                // Рисуем её в нативных пропорциях сами, чтобы заливка честно следовала
+                // каждому проценту; для термометра оставляем оригинальный SF Symbol.
+                if SettingsStore.mainIconStyle == "battery" {
+                    return menuBarBatteryIcon(charge: charge, charging: charging)
+                }
+                if let image = systemMenuBarIcon(charge: charge, charging: charging) {
+                    return image
+                }
             }
             return SettingsStore.mainIconStyle == "battery"
                 ? menuBarBatteryIcon(charge: charge, charging: charging)
@@ -4934,7 +4948,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
             symbol = "battery.\(level)"
         }
-        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
         guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: charging ? L("Зарядка") : nil)?
             .withSymbolConfiguration(config) else { return nil }
         image.isTemplate = true
@@ -4943,15 +4957,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// Charge-aware батарея (горизонтальная): уровень заливки = заряд, молния-вырез при зарядке.
     private func menuBarBatteryIcon(charge: Int, charging: Bool) -> NSImage {
-        let w: CGFloat = 16, h: CGFloat = 11
+        // Размер близок к системной батарее macOS: она шире большинства SF-глифов
+        // и занимает почти всю полезную высоту menu bar, не выглядя мелкой пиктограммой.
+        let w: CGFloat = 19, h: CGFloat = 12
         let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
-            let body = NSRect(x: 0.7, y: 1.6, width: w - 3.2, height: h - 3.2)
+            let body = NSRect(x: 0.75, y: 1.45, width: w - 3.8, height: h - 2.9)
             NSColor.black.setStroke()
-            let outline = NSBezierPath(roundedRect: body, xRadius: 2.2, yRadius: 2.2); outline.lineWidth = 1.1; outline.stroke()
+            let outline = NSBezierPath(roundedRect: body, xRadius: 2.35, yRadius: 2.35)
+            outline.lineWidth = 1.15
+            outline.stroke()
             NSColor.black.setFill()
-            NSBezierPath(roundedRect: NSRect(x: body.maxX + 0.6, y: h/2 - 1.7, width: 1.5, height: 3.4),
+            NSBezierPath(roundedRect: NSRect(x: body.maxX + 0.65, y: h/2 - 1.65, width: 1.7, height: 3.3),
                          xRadius: 0.7, yRadius: 0.7).fill()                      // клемма
-            let inset = body.insetBy(dx: 1.7, dy: 1.7)
+            let inset = body.insetBy(dx: 1.65, dy: 1.65)
             let fillW = inset.width * CGFloat(max(0, min(100, charge))) / 100
             if fillW > 0.5 {
                 NSBezierPath(roundedRect: NSRect(x: inset.minX, y: inset.minY, width: fillW, height: inset.height),
@@ -5062,11 +5080,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let btn = statusItem.button else { return }
         let powerTransition = hasStatusSnapshot
             && (b.charging != lastStatusBattery.charging || b.external != lastStatusBattery.external)
+        let chargeTransition = hasStatusSnapshot && b.present
+            && b.charge != lastStatusBattery.charge
         lastStatusBattery = b
         lastStatusEnergy = energy
         hasStatusSnapshot = true
         updateStatusAnimationTimer()
         if powerTransition { animateStatusTransition() }
+        else if chargeTransition { animateChargeTransition() }
         let prim = menuBarPrimaryToken(b, energy)
         // Объединённый вид: рисуем всё одной template-картинкой (моно, без семантического цвета —
         // зато ОС корректно тинтует для светлой/тёмной/подсветки). Перестраиваем только при смене подписи.
@@ -5155,6 +5176,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         animation.duration = 0.34
         animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         layer.add(animation, forKey: "powerTransition")
+    }
+
+    /// Небольшой нативный cross-fade при изменении процента: новая геометрия заливки
+    /// появляется мягко, но status item не пульсирует и не отвлекает пользователя.
+    private func animateChargeTransition() {
+        guard SettingsStore.menuBarMotion, !Motion.reduced,
+              !SettingsStore.menuBarCombined,
+              SettingsStore.menuBarMode == "battery",
+              let layer = statusItem.button?.layer else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.68
+        fade.toValue = 1.0
+        fade.duration = 0.22
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: "chargeTransition")
     }
     /// Человеческая сводка для подсказки на иконке: заряд/состояние/время/ватты.
     private func menuBarTooltip(_ b: BatteryInfo, _ e: EnergySnapshot) -> String {
@@ -5280,7 +5316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     /// Шаблонная картинка SF-символа фиксированной высоты для строки меню (моно-template-тинт).
     private func menuBarGlyphImage(_ name: String) -> NSImage? {
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
         guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(cfg) else { return nil }
         img.isTemplate = true
@@ -5291,7 +5327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if id == "kelvin" || id == "ring" {
             return KelvinGlyph.image(id, size: 13)
         }
-        if SettingsStore.menuBarIconStyle == "kelvin", let img = KelvinGlyph.image(id, size: 13) { return img }
+        if SettingsStore.menuBarIconStyle == "kelvin", let img = KelvinGlyph.image(id, size: 14) { return img }
         guard let name = Self.menuBarGlyphs[id] else { return nil }
         return menuBarGlyphImage(name)
     }

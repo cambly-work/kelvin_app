@@ -12,7 +12,7 @@ let COMMAND_TIMEOUT: TimeInterval = 10.0
 
 // MARK: - Allowed GPUMode values
 
-/// 0 = dynamic switching, 1 = force integrated, 2 = force discrete
+/// pmset gpuswitch: 0 = integrated, 1 = discrete, 2 = automatic/dynamic.
 let ALLOWED_MODES: Set<Int> = [0, 1, 2]
 
 // MARK: - XPC Protocol Definition

@@ -105,6 +105,8 @@ enum PrivilegedServiceManager {
         lines.append("Plist name: \(PrivilegedServiceConfig.plistName)")
         lines.append("Bless label: \(PrivilegedServiceConfig.blessHelperLabel)")
         lines.append("Bundled plist: \(blessPlistPath ?? "nil")")
+        lines.append("Bundled binary: \(bundledBinaryPath)")
+        lines.append("Bundled binary exists: \(bundledBinaryExists())")
         lines.append("Installed binary: \(installedBinaryPath)")
         lines.append("Binary exists: \(installedBinaryExists())")
         lines.append("Version current: \(isVersionCurrent())")
@@ -213,6 +215,19 @@ enum PrivilegedServiceManager {
         "/Library/PrivilegedHelperTools/\(PrivilegedServiceConfig.serviceName)"
     }
 
+    /// SMAppService (macOS 13+) does not copy the daemon to
+    /// /Library/PrivilegedHelperTools. It launches the signed executable that
+    /// remains inside Kelvin.app.
+    static var bundledBinaryPath: String {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Library/LaunchDaemons/\(PrivilegedServiceConfig.serviceName)")
+            .path
+    }
+
+    static func bundledBinaryExists() -> Bool {
+        FileManager.default.isExecutableFile(atPath: bundledBinaryPath)
+    }
+
     // MARK: - macOS 13+ (SMAppService)
 
     @available(macOS 13.0, *)
@@ -222,13 +237,13 @@ enum PrivilegedServiceManager {
         case .notRegistered:
             return .notInstalled
         case .enabled:
-            // Сервис зарегистрирован — проверяем бинарник и здоровье.
-            guard installedBinaryExists() else { return .repairNeeded }
+            // SMAppService keeps the executable in the signed app bundle.
+            guard bundledBinaryExists() else { return .repairNeeded }
             return .healthy(PrivilegedServiceInfo(
-                serviceVersion: readInstalledVersion(),
+                serviceVersion: readBundledVersion(),
                 protocolVersion: PrivilegedProtocolVersion.current,
                 capabilities: [.gpuSwitching],
-                health: isVersionCurrent() ? .healthy : .degraded
+                health: isBundledVersionCurrent() ? .healthy : .degraded
             ))
         case .requiresApproval:
             return .approvalRequired
@@ -251,7 +266,15 @@ enum PrivilegedServiceManager {
     private static func registerSMAppService(_ service: SMAppService) async -> InstallResult {
         do {
             try service.register()
-            return .success
+            // Registration and administrator approval are separate for a
+            // LaunchDaemon. Never tell the UI it is connected while approval
+            // is still pending.
+            switch service.status {
+            case .enabled: return .success
+            case .requiresApproval: return .approvalRequired
+            case .notFound, .notRegistered: return .failed(L("Системный компонент недоступен"))
+            @unknown default: return .failed(L("Системный компонент недоступен"))
+            }
         } catch {
             let nsError = error as NSError
             // -128 = пользователь отменил авторизацию
@@ -348,6 +371,21 @@ enum PrivilegedServiceManager {
         let versionFile = installedBinaryPath + ".version"
         return (try? String(contentsOfFile: versionFile, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)) ?? "0"
+    }
+
+    private static var bundledVersionPath: String {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/kelvin-privileged.version")
+            .path
+    }
+
+    private static func readBundledVersion() -> String {
+        (try? String(contentsOfFile: bundledVersionPath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? "0"
+    }
+
+    private static func isBundledVersionCurrent() -> Bool {
+        readBundledVersion() == "\(PrivilegedProtocolVersion.current)"
     }
 
     /// Человекочитаемое описание SMAppService.Status.

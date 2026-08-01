@@ -197,6 +197,17 @@ enum SettingsStore {
         d.set(true, forKey: "menubar.identityV2")
     }
 
+    /// V3 возвращает привычную грамматику строки меню macOS: широкая живая батарея
+    /// с точным уровнем и системные глифы. Миграция одноразовая — последующий выбор
+    /// пользователя больше не перезаписывается обновлениями.
+    static func migrateNativeMenuBarIfNeeded() {
+        guard !d.bool(forKey: "menubar.nativeV3") else { return }
+        menuBarIconStyle = "system"
+        mainIconStyle = "battery"
+        if d.object(forKey: "menubar.motion") == nil { menuBarMotion = true }
+        d.set(true, forKey: "menubar.nativeV3")
+    }
+
     static var idleBacklight: Bool {
         get { d.bool(forKey: "kb.idleBacklight") }
         set { d.set(newValue, forKey: "kb.idleBacklight") }
