@@ -1,250 +1,155 @@
 import AppKit
 import QuartzCore
 
-/// V7 — компактный инженерный индикатор энергопотока для popover.
+/// Живая energy scene для вкладки «Питание».
 ///
-/// Визуальная модель:
-///   1. одна сводка: расход системы + текущий режим питания;
-///   2. одна линейная схема: адаптер → система ↔ батарея;
-///   3. компактный список потребителей с честными единицами и долями;
-///   4. одна строка баланса внизу.
-///
-/// Постоянные декоративные анимации отсутствуют. Движение используется только как
-/// подтверждение события: подключение/отключение адаптера, смена направления батареи,
-/// существенное изменение нагрузки и активация узла.
+/// Визуал показывает только честную топологию `адаптер → Mac ↔ батарея` и один
+/// общий замер системы. Компонентные CPU/GPU/DRAM-ватты намеренно исключены:
+/// они приходят из другого источника и не складываются в достоверный баланс.
 final class FlowView: NSView, NSViewToolTipOwner {
 
     // MARK: - Public API
 
-    /// Однострочный разбор узла под курсором либо зафиксированного кликом/клавиатурой.
     var detailSink: ((String?) -> Void)?
 
-    /// Обновляет данные без пересоздания слоёв, пока не изменился набор потребителей.
-    func update(_ snapshot: EnergySnapshot,
-                components: ComponentPower? = nil,
-                hasBattery: Bool = true) {
-        let oldPlugged = previousPlugged
-        let oldBatteryTag = previousBatteryTag
+    func update(
+        _ snapshot: EnergySnapshot,
+        components: ComponentPower? = nil,
+        hasBattery: Bool = true,
+        batteryCharge: Int? = nil,
+        externalPower: Bool? = nil,
+        batteryCharging: Bool? = nil
+    ) {
+        let oldExternal = effectiveExternalPower
+        let oldFlow = effectiveBatteryFlow
 
         self.snapshot = snapshot
-        self.components = components
         self.hasBattery = hasBattery
-
-        let newTopology = topologySignature()
-        if newTopology != topologySig || nodes.isEmpty {
-            topologySig = newTopology
-            rebuildTopology()
-        }
+        self.batteryCharge = batteryCharge
+        externalPowerOverride = externalPower
+        batteryChargingOverride = batteryCharging
+        _ = components // API совместим; component power не участвует в presentation.
 
         needsLayout = true
         layoutSubtreeIfNeeded()
-        refresh(animated: !pendingFirstSync)
+        refresh(animated: hasPresentedData)
 
-        if !pendingFirstSync, window != nil {
-            if let oldPlugged, oldPlugged != snapshot.plugged {
-                animateAdapterEvent(connected: snapshot.plugged)
-            }
-            let newTag = batteryFlowTag(snapshot.battFlow)
-            if let oldBatteryTag, oldBatteryTag != newTag {
-                animateBatteryDirectionChange()
-            }
+        if hasPresentedData, window != nil,
+           oldExternal != effectiveExternalPower || oldFlow != effectiveBatteryFlow {
+            animateSourceEvent()
         }
-
-        previousPlugged = snapshot.plugged
-        previousBatteryTag = batteryFlowTag(snapshot.battFlow)
-        pendingFirstSync = false
+        hasPresentedData = true
     }
 
-    /// Показывает честный счётчик USB-устройств без выдуманной мощности.
     func setUSBCount(_ count: Int, name: String?) {
         usbCount = max(0, count)
         usbFirstName = name
-        refreshUSBText()
     }
 
-    /// Совместимость с прежним API. В V7 это короткий событийный импульс центрального узла,
-    /// а не анимация сложного кольца.
     func pulseObod(connect: Bool) {
-        guard !Motion.reduced, let system = node("Система") else { return }
-        pulse(layer: system.container,
-              scale: connect ? 1.055 : 0.975,
-              duration: connect ? 0.34 : 0.26)
-        pulse(layer: headerValue,
-              scale: connect ? 1.035 : 0.985,
-              duration: connect ? 0.34 : 0.26)
+        guard !Motion.reduced else { return }
+        let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
+        pulse.values = connect ? [1.0, 1.08, 1.0] : [1.0, 0.94, 1.0]
+        pulse.keyTimes = [0, 0.5, 1]
+        pulse.duration = connect ? 0.34 : 0.26
+        pulse.timingFunction = Design.Motion.easeStandard
+        sourceOrb.add(pulse, forKey: "eventPulse")
+        sourceHalo.add(pulse, forKey: "eventPulse")
     }
 
-    /// Клавиатура/VoiceOver используют ту же фиксацию, что и клик.
     func focusNode(_ key: String) {
-        focusedKey = (focusedKey == key) ? nil : key
-        restyle(animated: true)
+        let mapped: RegionKey
+        switch key {
+        case "Адаптер", "Источник": mapped = .source
+        case "Батарея": mapped = .battery
+        case "Система": mapped = .system
+        default: mapped = .hero
+        }
+        selectedRegion = selectedRegion == mapped ? nil : mapped
+        restyleRegions(animated: true)
         emitDetail()
     }
 
-    // MARK: - Presentation objects
-
-    private enum NodeKind {
-        case adapter
-        case system
-        case battery
-        case load
-    }
-
-    private final class NodeUI {
-        let key: String
-        let kind: NodeKind
-        var rect: CGRect = .zero
-
-        let container = CALayer()
-        let icon = CALayer()
-        let title = CATextLayer()
-        let value = CATextLayer()
-        let auxiliary = CATextLayer()
-        let stateDot = CAShapeLayer()
-        let barTrack = CAShapeLayer()
-        let barFill = CAShapeLayer()
-        let separator = CAShapeLayer()
-
-        var lastValueToken = ""
-        var lastTitleToken = ""
-        var lastAuxiliaryToken = ""
-        var lastSymbolToken = ""
-        var appliedBarFraction: Double = .nan
-
-        init(key: String, kind: NodeKind) {
-            self.key = key
-            self.kind = kind
-
-            container.cornerCurve = .continuous
-            container.masksToBounds = false
-
-            icon.contentsGravity = .resizeAspect
-
-            for text in [title, value, auxiliary] {
-                text.truncationMode = .end
-                text.isWrapped = false
-            }
-
-            barTrack.fillColor = nil
-            barTrack.lineCap = .round
-            barFill.fillColor = nil
-            barFill.lineCap = .round
-
-            separator.fillColor = nil
-            separator.lineWidth = 1
-
-            container.addSublayer(icon)
-            container.addSublayer(title)
-            container.addSublayer(value)
-            container.addSublayer(auxiliary)
-            container.addSublayer(stateDot)
-            container.addSublayer(barTrack)
-            container.addSublayer(barFill)
-            container.addSublayer(separator)
-        }
-    }
-
-    private final class EdgeUI {
-        let line = CAShapeLayer()
-        let arrow = CAShapeLayer()
-        var start: CGPoint = .zero
-        var end: CGPoint = .zero
-
-        init() {
-            line.fillColor = nil
-            line.lineCap = .round
-            arrow.lineWidth = 0
-        }
-    }
-
-    // MARK: - Model state
+    // MARK: - State
 
     private var snapshot = EnergySnapshot()
-    private var components: ComponentPower?
     private var hasBattery = true
-
-    private var topologySig = ""
-    private var previousPlugged: Bool?
-    private var previousBatteryTag: String?
-    private var pendingFirstSync = true
-
-    private var hoveredKey: String?
-    private var focusedKey: String?
-
+    private var batteryCharge: Int?
+    private var externalPowerOverride: Bool?
+    private var batteryChargingOverride: Bool?
+    private var hasPresentedData = false
     private var usbCount = 0
     private var usbFirstName: String?
-    private var lastHeaderValueToken = ""
 
-    private var nodes: [NodeUI] = []
-    private var nodeViews: [FlowNodeView] = []
+    private enum RegionKey: String { case hero, scene, source, system, battery }
 
-    private let adapterEdge = EdgeUI()
-    private let batteryEdge = EdgeUI()
+    private struct Region {
+        let key: RegionKey
+        var rect: CGRect
+        let surface: CALayer?
+    }
 
+    private var regions: [Region] = []
+    private var hoveredRegion: RegionKey?
+    private var selectedRegion: RegionKey?
     private var trackingAreaRef: NSTrackingArea?
-    private var lastLayoutBounds: CGRect = .null
+    private var lastTooltipBounds: CGRect = .null
 
-    // MARK: - Static chrome
+    // MARK: - Header layers
 
-    private let headerTitle = CATextLayer()
-    private let headerStatus = CATextLayer()
-    private let headerValue = CATextLayer()
-    private let headerStatusDot = CAShapeLayer()
-    private let usbLayer = CATextLayer()
-    private let headerDivider = CAShapeLayer()
-    private let loadsTitle = CATextLayer()
-    private let footerText = CATextLayer()
+    private let heroSurface = CALayer()
+    private let sourceHalo = CAGradientLayer()
+    private let sourceOrb = CALayer()
+    private let sourceIcon = CALayer()
+    private let statusTitle = CATextLayer()
+    private let statusSubtitle = CATextLayer()
+    private let measurementSurface = CALayer()
+    private let measurementTag = CATextLayer()
+    private let trendTag = CATextLayer()
 
-    // MARK: - Geometry
+    // MARK: - Energy scene layers
 
-    private struct Metrics {
-        let width: CGFloat
-        let height: CGFloat
-        let compact: Bool
-        let tiny: Bool
-        let padding: CGFloat
-        let headerHeight: CGFloat
-        let topologyHeight: CGFloat
-        let sectionHeight: CGFloat
-        let footerHeight: CGFloat
-        let verticalGap: CGFloat
-        let rowHeight: CGFloat
-        let rowCount: Int
+    private let sceneSurface = CAGradientLayer()
+    private let sceneTitle = CATextLayer()
+    private let sceneStatus = CATextLayer()
+    private let sourceStreamBase = CAShapeLayer()
+    private let sourceStreamActive = CAShapeLayer()
+    private let batteryStreamBase = CAShapeLayer()
+    private let batteryStreamActive = CAShapeLayer()
+    private let sourceArrow = CAShapeLayer()
+    private let batteryArrow = CAShapeLayer()
+    private let sourceParticle = CAShapeLayer()
+    private let batteryParticle = CAShapeLayer()
 
-        init(bounds: CGRect, rowCount: Int) {
-            width = bounds.width
-            height = bounds.height
-            compact = bounds.height < 248
-            tiny = bounds.height < 220
-            padding = tiny ? 6 : (compact ? 8 : 10)
-            headerHeight = tiny ? 38 : (compact ? 42 : 48)
-            topologyHeight = tiny ? 38 : (compact ? 42 : 50)
-            sectionHeight = tiny ? 12 : (compact ? 14 : 16)
-            footerHeight = tiny ? 15 : (compact ? 17 : 19)
-            verticalGap = tiny ? 3 : (compact ? 5 : 7)
-            self.rowCount = max(rowCount, 1)
+    private final class NodeUI {
+        let key: RegionKey
+        let surface = CALayer()
+        let icon = CALayer()
+        let caption = CATextLayer()
+        let value = CATextLayer()
+        let stateDot = CAShapeLayer()
 
-            let reserved = padding * 2
-                + headerHeight
-                + topologyHeight
-                + sectionHeight
-                + footerHeight
-                + verticalGap * 4
-            let available = max(18 * CGFloat(self.rowCount), height - reserved)
-            rowHeight = max(tiny ? 15 : 18,
-                            min(tiny ? 20 : (compact ? 24 : 28),
-                                available / CGFloat(self.rowCount)))
-        }
-
-        func rectFromTop(x: CGFloat, top: CGFloat, width: CGFloat, height: CGFloat) -> CGRect {
-            CGRect(x: x, y: self.height - top - height, width: width, height: height)
+        init(key: RegionKey) {
+            self.key = key
+            surface.cornerCurve = .continuous
+            surface.masksToBounds = false
+            icon.contentsGravity = .resizeAspect
+            caption.truncationMode = .end
+            value.truncationMode = .end
+            value.alignmentMode = .center
+            caption.alignmentMode = .center
+            stateDot.strokeColor = nil
+            surface.addSublayer(icon)
+            surface.addSublayer(caption)
+            surface.addSublayer(value)
+            surface.addSublayer(stateDot)
         }
     }
 
-    override var intrinsicContentSize: NSSize {
-        let rows = max(orderedRails.count, 1)
-        return NSSize(width: 390, height: 158 + CGFloat(rows) * 26)
-    }
+    private let adapterNode = NodeUI(key: .source)
+    private let systemNode = NodeUI(key: .system)
+    private let batteryNode = NodeUI(key: .battery)
+    private var nodes: [NodeUI] { [adapterNode, systemNode, batteryNode] }
 
     // MARK: - Lifecycle
 
@@ -258,26 +163,104 @@ final class FlowView: NSView, NSViewToolTipOwner {
         commonInit()
     }
 
+    override var intrinsicContentSize: NSSize { NSSize(width: 316, height: 188) }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { statusTitleText }
+
     private func commonInit() {
         wantsLayer = true
         layer?.masksToBounds = false
-        buildStaticChrome()
+
+        heroSurface.cornerRadius = 15
+        heroSurface.cornerCurve = .continuous
+        heroSurface.masksToBounds = true
+        layer?.addSublayer(heroSurface)
+
+        sourceHalo.type = .radial
+        sourceHalo.startPoint = CGPoint(x: 0.5, y: 0.5)
+        sourceHalo.endPoint = CGPoint(x: 1, y: 1)
+        sourceHalo.locations = [0, 0.54, 1]
+        sourceHalo.cornerRadius = 30
+        heroSurface.addSublayer(sourceHalo)
+
+        sourceOrb.cornerRadius = 22
+        sourceOrb.cornerCurve = .continuous
+        sourceOrb.masksToBounds = true
+        sourceIcon.contentsGravity = .resizeAspect
+        sourceOrb.addSublayer(sourceIcon)
+        heroSurface.addSublayer(sourceOrb)
+
+        configureText(statusTitle, size: 17, weight: .semibold, color: .labelColor)
+        configureText(statusSubtitle, size: 10.5, weight: .regular, color: .secondaryLabelColor)
+        configureText(measurementTag, size: 8.5, weight: .semibold, color: .secondaryLabelColor)
+        measurementTag.alignmentMode = .center
+        configureText(trendTag, size: 9, weight: .medium, color: .tertiaryLabelColor)
+        trendTag.alignmentMode = .right
+        measurementSurface.cornerRadius = 8
+        measurementSurface.cornerCurve = .continuous
+
+        for item in [statusTitle, statusSubtitle, measurementSurface, measurementTag, trendTag] {
+            heroSurface.addSublayer(item)
+        }
+
+        sceneSurface.cornerRadius = 15
+        sceneSurface.cornerCurve = .continuous
+        sceneSurface.masksToBounds = true
+        sceneSurface.startPoint = CGPoint(x: 0, y: 0.5)
+        sceneSurface.endPoint = CGPoint(x: 1, y: 0.5)
+        layer?.addSublayer(sceneSurface)
+
+        configureText(sceneTitle, size: 9.5, weight: .medium, color: .secondaryLabelColor)
+        configureText(sceneStatus, size: 9.5, weight: .medium, color: .secondaryLabelColor)
+        sceneStatus.alignmentMode = .right
+        layer?.addSublayer(sceneTitle)
+        layer?.addSublayer(sceneStatus)
+
+        for stream in [sourceStreamBase, sourceStreamActive, batteryStreamBase, batteryStreamActive] {
+            stream.fillColor = nil
+            stream.lineCap = .round
+            stream.lineJoin = .round
+            layer?.addSublayer(stream)
+        }
+        sourceStreamBase.lineWidth = 5
+        batteryStreamBase.lineWidth = 5
+        sourceStreamActive.lineWidth = 2.5
+        batteryStreamActive.lineWidth = 2.5
+
+        for arrow in [sourceArrow, batteryArrow] {
+            arrow.strokeColor = nil
+            layer?.addSublayer(arrow)
+        }
+        for particle in [sourceParticle, batteryParticle] {
+            particle.path = CGPath(ellipseIn: CGRect(x: -3, y: -3, width: 6, height: 6), transform: nil)
+            particle.opacity = 0
+            layer?.addSublayer(particle)
+        }
+
+        for node in nodes {
+            node.surface.cornerRadius = node.key == .system ? 15 : 13
+            configureText(node.caption, size: 8.5, weight: .medium, color: .tertiaryLabelColor)
+            configureText(
+                node.value,
+                size: node.key == .system ? 16 : 11,
+                weight: .semibold,
+                color: .labelColor,
+                mono: node.key == .system
+            )
+            layer?.addSublayer(node.surface)
+        }
+
+        refresh(animated: false)
+        updateContentsScale()
     }
-
-    override var isFlipped: Bool { false }
-
-    override func accessibilityRole() -> NSAccessibility.Role? { .group }
-    override func accessibilityLabel() -> String? { L("Схема энергопотока") }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        pendingFirstSync = true
         updateContentsScale()
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        invalidatePresentationTokens()
         refresh(animated: false)
     }
 
@@ -287,1163 +270,573 @@ final class FlowView: NSView, NSViewToolTipOwner {
         let area = NSTrackingArea(
             rect: bounds,
             options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
-            owner: self,
-            userInfo: nil
+            owner: self
         )
         addTrackingArea(area)
         trackingAreaRef = area
     }
 
-    override func layout() {
-        super.layout()
-        guard bounds.width > 220, bounds.height > 150 else { return }
-
-        let metrics = Metrics(bounds: bounds, rowCount: orderedRails.count)
-        layoutStaticChrome(metrics)
-        layoutTopology(metrics)
-        layoutLoadRows(metrics)
-        layoutEdges()
-        layoutAccessibilityViews()
-
-        if lastLayoutBounds != bounds {
-            rebuildToolTips()
-            lastLayoutBounds = bounds
-        }
-    }
-
-    // MARK: - Topology construction
-
-    private var orderedRails: [RailFlow] {
-        let priority = ["CPU": 0, "GPU": 1, "Память": 2]
-        return snapshot.rails.enumerated().sorted {
-            (priority[$0.element.name] ?? 3, $0.offset)
-                < (priority[$1.element.name] ?? 3, $1.offset)
-        }.map(\.element)
-    }
-
-    private func topologySignature() -> String {
-        (hasBattery ? "B|" : "-|" )
-            + orderedRails.map(\.name).joined(separator: ",")
-    }
-
-    private func rebuildTopology() {
-        nodes.forEach { $0.container.removeFromSuperlayer() }
-        nodeViews.forEach { $0.removeFromSuperview() }
-        nodes.removeAll(keepingCapacity: true)
-        nodeViews.removeAll(keepingCapacity: true)
-        removeAllToolTips()
-        lastLayoutBounds = .null
-
-        appendNode(key: "Адаптер", kind: .adapter)
-        appendNode(key: "Система", kind: .system)
-        if hasBattery { appendNode(key: "Батарея", kind: .battery) }
-        for rail in orderedRails { appendNode(key: rail.name, kind: .load) }
-
-        for (index, view) in nodeViews.enumerated() where !nodeViews.isEmpty {
-            view.nextKeyView = nodeViews[(index + 1) % nodeViews.count]
-        }
-
-        invalidateIntrinsicContentSize()
-        needsLayout = true
-    }
-
-    private func appendNode(key: String, kind: NodeKind) {
-        let node = NodeUI(key: key, kind: kind)
-        configureNodeLayers(node)
-        layer?.addSublayer(node.container)
-        nodes.append(node)
-
-        let accessibilityView = FlowNodeView(key: key)
-        accessibilityView.onActivate = { [weak self] key in self?.focusNode(key) }
-        addSubview(accessibilityView)
-        nodeViews.append(accessibilityView)
-    }
-
-    private func buildStaticChrome() {
-        guard let root = layer else { return }
-
-        configureText(headerTitle, size: 10, weight: .semibold, color: .secondaryLabelColor)
-        configureText(headerStatus, size: 10, weight: .regular, color: .secondaryLabelColor)
-        configureText(headerValue, size: 23, weight: .semibold, color: .labelColor, mono: true)
-        headerValue.alignmentMode = .right
-
-        configureText(usbLayer, size: 9, weight: .medium, color: .tertiaryLabelColor, mono: true)
-        usbLayer.alignmentMode = .right
-        usbLayer.isHidden = true
-
-        configureText(loadsTitle, size: 9, weight: .semibold, color: .tertiaryLabelColor)
-        configureText(footerText, size: 9, weight: .regular, color: .secondaryLabelColor, mono: true)
-        footerText.alignmentMode = .left
-
-        headerStatusDot.strokeColor = nil
-        headerDivider.fillColor = nil
-        headerDivider.lineWidth = 1
-
-        root.addSublayer(headerTitle)
-        root.addSublayer(headerStatus)
-        root.addSublayer(headerValue)
-        root.addSublayer(headerStatusDot)
-        root.addSublayer(usbLayer)
-        root.addSublayer(headerDivider)
-        root.addSublayer(loadsTitle)
-        root.addSublayer(footerText)
-
-        root.addSublayer(adapterEdge.line)
-        root.addSublayer(adapterEdge.arrow)
-        root.addSublayer(batteryEdge.line)
-        root.addSublayer(batteryEdge.arrow)
-
-        updateContentsScale()
-    }
-
-    private func configureNodeLayers(_ node: NodeUI) {
-        configureText(node.title, size: 9, weight: .medium, color: .secondaryLabelColor)
-        configureText(node.value, size: 11, weight: .semibold, color: .labelColor, mono: true)
-        configureText(node.auxiliary, size: 9, weight: .regular, color: .tertiaryLabelColor, mono: true)
-
-        node.stateDot.strokeColor = nil
-        node.separator.strokeColor = separatorColor.cgColor
-        node.barTrack.strokeColor = trackColor.cgColor
-        node.barFill.strokeColor = accentColor.cgColor
-
-        updateContentsScale(node)
-    }
-
     // MARK: - Layout
 
-    private func layoutStaticChrome(_ m: Metrics) {
-        let p = m.padding
-        let valueWidth: CGFloat = m.compact ? 102 : 116
+    override func layout() {
+        super.layout()
+        guard bounds.width > 240, bounds.height > 160 else { return }
 
-        headerTitle.frame = m.rectFromTop(
-            x: p,
-            top: p,
-            width: max(80, m.width - p * 2 - valueWidth),
-            height: 13
-        )
-        headerStatusDot.frame = m.rectFromTop(x: p, top: p + 23, width: 7, height: 7)
-        headerStatusDot.path = CGPath(ellipseIn: headerStatusDot.bounds, transform: nil)
-        headerStatus.frame = m.rectFromTop(
-            x: p + 12,
-            top: p + 20,
-            width: max(90, m.width - p * 2 - valueWidth - 12),
-            height: 14
-        )
-        headerValue.frame = m.rectFromTop(
-            x: m.width - p - valueWidth,
-            top: p + 2,
-            width: valueWidth,
-            height: 30
-        )
-        usbLayer.frame = m.rectFromTop(
-            x: max(p, m.width - p - valueWidth - 100),
-            top: p + 28,
-            width: 96,
-            height: 11
-        )
+        let heroRect = rectFromTop(x: 0, top: 0, width: bounds.width, height: 70)
+        let sceneRect = rectFromTop(x: 0, top: 78, width: bounds.width, height: 110)
+        heroSurface.frame = heroRect
+        sceneSurface.frame = sceneRect
 
-        let dividerY = m.height - (p + m.headerHeight)
-        let dividerPath = CGMutablePath()
-        dividerPath.move(to: CGPoint(x: p, y: dividerY))
-        dividerPath.addLine(to: CGPoint(x: m.width - p, y: dividerY))
-        headerDivider.path = dividerPath
-        headerDivider.strokeColor = separatorColor.cgColor
+        sourceHalo.frame = CGRect(x: 3, y: 2, width: 66, height: 66)
+        sourceOrb.frame = CGRect(x: 12, y: 13, width: 44, height: 44)
+        sourceIcon.frame = CGRect(x: 11, y: 11, width: 22, height: 22)
+        statusTitle.frame = CGRect(x: 70, y: 39, width: 160, height: 23)
+        statusSubtitle.frame = CGRect(x: 70, y: 17, width: heroRect.width - 178, height: 17)
+        measurementSurface.frame = CGRect(x: heroRect.width - 74, y: 42, width: 62, height: 18)
+        measurementTag.frame = measurementSurface.frame
+        trendTag.frame = CGRect(x: heroRect.width - 104, y: 18, width: 92, height: 13)
 
-        let topologyTop = p + m.headerHeight + m.verticalGap
-        let loadsTop = topologyTop + m.topologyHeight + m.verticalGap
-        loadsTitle.frame = m.rectFromTop(
-            x: p,
-            top: loadsTop,
-            width: m.width - p * 2,
-            height: m.sectionHeight
-        )
+        sceneTitle.frame = CGRect(x: 12, y: sceneRect.maxY - 22, width: 98, height: 13)
+        sceneStatus.frame = CGRect(x: sceneRect.maxX - 194, y: sceneRect.maxY - 22, width: 182, height: 13)
 
-        footerText.frame = m.rectFromTop(
-            x: p,
-            top: m.height - p - m.footerHeight,
-            width: m.width - p * 2,
-            height: m.footerHeight
-        )
-    }
+        let nodeY = sceneRect.minY + 12
+        adapterNode.surface.frame = CGRect(x: 8, y: nodeY + 5, width: 76, height: 62)
+        systemNode.surface.frame = CGRect(x: 116, y: nodeY, width: 84, height: 72)
+        batteryNode.surface.frame = CGRect(x: bounds.width - 84, y: nodeY + 5, width: 76, height: 62)
+        layoutNode(adapterNode)
+        layoutNode(systemNode)
+        layoutNode(batteryNode)
+        layoutStreams()
 
-    private func layoutTopology(_ m: Metrics) {
-        guard let adapter = node("Адаптер"), let system = node("Система") else { return }
-
-        let p = m.padding
-        let top = p + m.headerHeight + m.verticalGap
-        let gap: CGFloat = m.compact ? 8 : 10
-        let centerWidth: CGFloat = m.tiny ? 62 : (m.compact ? 70 : 78)
-        let availableForSources = m.width - p * 2 - centerWidth - gap * 2
-        let sourceWidth: CGFloat
-        if hasBattery {
-            sourceWidth = max(68, min(118, availableForSources / 2))
-        } else {
-            sourceWidth = max(82, min(118, availableForSources * 0.48))
-        }
-
-        if hasBattery, let battery = node("Батарея") {
-            adapter.rect = m.rectFromTop(x: p, top: top, width: sourceWidth, height: m.topologyHeight)
-            system.rect = m.rectFromTop(
-                x: (m.width - centerWidth) / 2,
-                top: top,
-                width: centerWidth,
-                height: m.topologyHeight
-            )
-            battery.rect = m.rectFromTop(
-                x: m.width - p - sourceWidth,
-                top: top,
-                width: sourceWidth,
-                height: m.topologyHeight
-            )
-            layoutSourceNode(adapter, metrics: m)
-            layoutSystemNode(system, metrics: m)
-            layoutSourceNode(battery, metrics: m)
-        } else {
-            adapter.rect = m.rectFromTop(x: p, top: top, width: sourceWidth, height: m.topologyHeight)
-            system.rect = m.rectFromTop(
-                x: min(m.width - p - centerWidth, adapter.rect.maxX + gap + (m.width - p - adapter.rect.maxX - gap - centerWidth) / 2),
-                top: top,
-                width: centerWidth,
-                height: m.topologyHeight
-            )
-            layoutSourceNode(adapter, metrics: m)
-            layoutSystemNode(system, metrics: m)
+        regions = [
+            Region(key: .hero, rect: heroRect, surface: heroSurface),
+            Region(key: .scene, rect: sceneRect, surface: sceneSurface),
+            Region(key: .source, rect: adapterNode.surface.frame, surface: adapterNode.surface),
+            Region(key: .system, rect: systemNode.surface.frame, surface: systemNode.surface),
+            Region(key: .battery, rect: batteryNode.surface.frame, surface: batteryNode.surface),
+        ]
+        restyleRegions(animated: false)
+        if lastTooltipBounds != bounds {
+            rebuildToolTips()
+            lastTooltipBounds = bounds
         }
     }
 
-    private func layoutSourceNode(_ node: NodeUI, metrics m: Metrics) {
-        let r = node.rect
-        node.container.frame = r
-        node.container.cornerRadius = 9
-
-        let iconSize: CGFloat = m.compact ? 14 : 16
-        node.icon.frame = CGRect(x: 8, y: (r.height - iconSize) / 2, width: iconSize, height: iconSize)
-        node.stateDot.frame = CGRect(x: r.width - 11, y: r.height - 11, width: 5, height: 5)
-        node.stateDot.path = CGPath(ellipseIn: node.stateDot.bounds, transform: nil)
-
-        let textX = 8 + iconSize + 7
-        node.title.frame = CGRect(x: textX, y: r.height - 18, width: r.width - textX - 13, height: 12)
-        node.value.frame = CGRect(x: textX, y: 8, width: r.width - textX - 6, height: 15)
-        node.auxiliary.frame = .zero
-
-        node.barTrack.isHidden = true
-        node.barFill.isHidden = true
-        node.separator.isHidden = true
+    private func rectFromTop(x: CGFloat, top: CGFloat, width: CGFloat, height: CGFloat) -> CGRect {
+        CGRect(x: x, y: bounds.height - top - height, width: width, height: height)
     }
 
-    private func layoutSystemNode(_ node: NodeUI, metrics m: Metrics) {
-        let r = node.rect
-        node.container.frame = r
-        node.container.cornerRadius = 9
-
-        let iconSize: CGFloat = m.compact ? 17 : 19
-        node.icon.frame = CGRect(x: (r.width - iconSize) / 2,
-                                 y: r.height / 2 - iconSize / 2 + 6,
+    private func layoutNode(_ node: NodeUI) {
+        let height = node.surface.bounds.height
+        let iconSize: CGFloat = node.key == .system ? 17 : 14
+        node.icon.frame = CGRect(x: (node.surface.bounds.width - iconSize) / 2,
+                                 y: height - iconSize - 9,
                                  width: iconSize,
                                  height: iconSize)
-        node.title.alignmentMode = .center
-        node.title.frame = CGRect(x: 3, y: 7, width: r.width - 6, height: 12)
-        node.value.frame = .zero
-        node.auxiliary.frame = .zero
-        node.stateDot.frame = .zero
-
-        node.barTrack.isHidden = true
-        node.barFill.isHidden = true
-        node.separator.isHidden = true
+        node.caption.frame = CGRect(x: 5, y: height - iconSize - 24,
+                                    width: node.surface.bounds.width - 10, height: 12)
+        node.value.frame = CGRect(x: 4, y: 8, width: node.surface.bounds.width - 8,
+                                  height: node.key == .system ? 20 : 15)
+        node.stateDot.frame = CGRect(x: node.surface.bounds.width - 12, y: height - 12, width: 5, height: 5)
+        node.stateDot.path = CGPath(ellipseIn: node.stateDot.bounds, transform: nil)
     }
 
-    private func layoutLoadRows(_ m: Metrics) {
-        let p = m.padding
-        let topologyTop = p + m.headerHeight + m.verticalGap
-        let loadsTop = topologyTop + m.topologyHeight + m.verticalGap
-        var rowTop = loadsTop + m.sectionHeight
+    private func layoutStreams() {
+        let sourceStart = CGPoint(x: adapterNode.surface.frame.maxX + 2, y: adapterNode.surface.frame.midY)
+        let sourceEnd = CGPoint(x: systemNode.surface.frame.minX - 2, y: systemNode.surface.frame.midY)
+        let batteryStart = CGPoint(x: systemNode.surface.frame.maxX + 2, y: systemNode.surface.frame.midY)
+        let batteryEnd = CGPoint(x: batteryNode.surface.frame.minX - 2, y: batteryNode.surface.frame.midY)
 
-        let loadNodes = nodes.filter { $0.kind == .load }
-        for node in loadNodes {
-            node.rect = m.rectFromTop(x: p, top: rowTop, width: m.width - p * 2, height: m.rowHeight)
-            layoutLoadNode(node, metrics: m)
-            rowTop += m.rowHeight
-        }
-    }
+        let sourcePath = curvedPath(from: sourceStart, to: sourceEnd)
+        let batteryPath = curvedPath(from: batteryStart, to: batteryEnd)
+        sourceStreamBase.path = sourcePath
+        sourceStreamActive.path = sourcePath
+        batteryStreamBase.path = batteryPath
+        batteryStreamActive.path = batteryPath
 
-    private func layoutLoadNode(_ node: NodeUI, metrics m: Metrics) {
-        let r = node.rect
-        node.container.frame = r
-        node.container.cornerRadius = 6
-
-        let iconSize: CGFloat = m.compact ? 11 : 12
-        let iconX: CGFloat = 3
-        node.icon.frame = CGRect(x: iconX, y: (r.height - iconSize) / 2, width: iconSize, height: iconSize)
-
-        let titleX = iconX + iconSize + 7
-        let titleWidth: CGFloat = m.compact ? 66 : 78
-        node.title.frame = CGRect(x: titleX, y: (r.height - 13) / 2, width: titleWidth, height: 13)
-
-        let auxiliaryWidth: CGFloat = 34
-        let valueWidth: CGFloat = m.compact ? 58 : 66
-        let rightPadding: CGFloat = 2
-        node.auxiliary.alignmentMode = .right
-        node.auxiliary.frame = CGRect(
-            x: r.width - rightPadding - auxiliaryWidth,
-            y: (r.height - 12) / 2,
-            width: auxiliaryWidth,
-            height: 12
+        sourceArrow.path = arrowPath(
+            at: midpoint(sourceStart, sourceEnd),
+            forward: true
         )
-        node.value.alignmentMode = .right
-        node.value.frame = CGRect(
-            x: node.auxiliary.frame.minX - 4 - valueWidth,
-            y: (r.height - 14) / 2,
-            width: valueWidth,
-            height: 14
+        batteryArrow.path = arrowPath(
+            at: midpoint(batteryStart, batteryEnd),
+            forward: effectiveBatteryFlow != .discharging
         )
-
-        let barX = titleX + titleWidth + 7
-        let barEnd = node.value.frame.minX - 8
-        let barWidth = max(18, barEnd - barX)
-        let barY = r.height / 2
-        let barPath = CGMutablePath()
-        barPath.move(to: CGPoint(x: barX, y: barY))
-        barPath.addLine(to: CGPoint(x: barX + barWidth, y: barY))
-        node.barTrack.path = barPath
-        node.barFill.path = barPath
-        node.barTrack.lineWidth = m.compact ? 3 : 4
-        node.barFill.lineWidth = m.compact ? 3 : 4
-        node.barTrack.isHidden = false
-        node.barFill.isHidden = false
-
-        let separatorPath = CGMutablePath()
-        separatorPath.move(to: CGPoint(x: titleX, y: 0.5))
-        separatorPath.addLine(to: CGPoint(x: r.width, y: 0.5))
-        node.separator.path = separatorPath
-        node.separator.isHidden = false
-        node.stateDot.frame = .zero
     }
 
-    private func layoutEdges() {
-        guard let adapter = node("Адаптер"), let system = node("Система") else { return }
-
-        let adapterStart = CGPoint(x: adapter.rect.maxX + 2, y: adapter.rect.midY)
-        let adapterEnd = CGPoint(x: system.rect.minX - 2, y: system.rect.midY)
-        setEdgeGeometry(adapterEdge, start: adapterStart, end: adapterEnd,
-                        forward: true, arrowVisible: snapshot.plugged)
-
-        if hasBattery, let battery = node("Батарея") {
-            let batteryStart = CGPoint(x: system.rect.maxX + 2, y: system.rect.midY)
-            let batteryEnd = CGPoint(x: battery.rect.minX - 2, y: battery.rect.midY)
-            let charging = snapshot.battFlow == .charging
-            let idle = snapshot.battFlow == .idle
-            setEdgeGeometry(batteryEdge, start: batteryStart, end: batteryEnd,
-                            forward: charging, arrowVisible: !idle)
-            batteryEdge.line.isHidden = false
-            batteryEdge.arrow.isHidden = idle
-        } else {
-            batteryEdge.line.isHidden = true
-            batteryEdge.arrow.isHidden = true
-        }
-    }
-
-    private func setEdgeGeometry(_ edge: EdgeUI,
-                                 start: CGPoint,
-                                 end: CGPoint,
-                                 forward: Bool,
-                                 arrowVisible: Bool) {
-        edge.start = start
-        edge.end = end
-
+    private func curvedPath(from start: CGPoint, to end: CGPoint, reversed: Bool = false) -> CGPath {
         let path = CGMutablePath()
-        path.move(to: start)
-        path.addLine(to: end)
-        edge.line.path = path
-
-        let midpoint = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
-        let direction: CGFloat = forward ? 1 : -1
-        let size: CGFloat = 4.5
-        let arrow = CGMutablePath()
-        arrow.move(to: CGPoint(x: midpoint.x + direction * size, y: midpoint.y))
-        arrow.addLine(to: CGPoint(x: midpoint.x - direction * size, y: midpoint.y + size * 0.72))
-        arrow.addLine(to: CGPoint(x: midpoint.x - direction * size, y: midpoint.y - size * 0.72))
-        arrow.closeSubpath()
-        edge.arrow.path = arrow
-        edge.arrow.isHidden = !arrowVisible
+        let a = reversed ? end : start
+        let b = reversed ? start : end
+        path.move(to: a)
+        let lift: CGFloat = 3
+        path.addCurve(
+            to: b,
+            control1: CGPoint(x: a.x + (b.x - a.x) * 0.34, y: a.y + lift),
+            control2: CGPoint(x: a.x + (b.x - a.x) * 0.66, y: b.y + lift)
+        )
+        return path
     }
 
-    private func layoutAccessibilityViews() {
-        for (index, node) in nodes.enumerated() where index < nodeViews.count {
-            nodeViews[index].frame = node.rect
-        }
+    private func midpoint(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
+        CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + 2)
+    }
+
+    private func arrowPath(at point: CGPoint, forward: Bool) -> CGPath {
+        let direction: CGFloat = forward ? 1 : -1
+        let size: CGFloat = 3.8
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: point.x + direction * size, y: point.y))
+        path.addLine(to: CGPoint(x: point.x - direction * size, y: point.y + size * 0.72))
+        path.addLine(to: CGPoint(x: point.x - direction * size, y: point.y - size * 0.72))
+        path.closeSubpath()
+        return path
     }
 
     // MARK: - Refresh
 
     private func refresh(animated: Bool) {
         guard layer != nil else { return }
-
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        refreshResolvedColors()
-        refreshHeader(animated: animated)
-        refreshTopologyNodes()
-        refreshLoadNodes(animated: animated)
-        refreshFooter()
-        refreshEdges()
-        refreshUSBText()
-        refreshAccessibilityLabels()
+
+        let accent = stateAccent
+        heroSurface.backgroundColor = surfaceColor(strength: 0.050).cgColor
+        heroSurface.borderWidth = 0.6
+        heroSurface.borderColor = rimColor.cgColor
+        sourceHalo.colors = [
+            accent.withAlphaComponent(isDark ? 0.30 : 0.20).cgColor,
+            accent.withAlphaComponent(isDark ? 0.10 : 0.07).cgColor,
+            NSColor.clear.cgColor,
+        ]
+        sourceOrb.backgroundColor = accent.withAlphaComponent(isDark ? 0.17 : 0.13).cgColor
+        sourceOrb.borderWidth = 0.75
+        sourceOrb.borderColor = accent.withAlphaComponent(isDark ? 0.38 : 0.28).cgColor
+        sourceIcon.contents = symbolImage(sourceSymbol, color: accent, pointSize: 19)
+
+        statusTitle.string = statusTitleText
+        statusSubtitle.string = statusSubtitleText
+        statusTitle.foregroundColor = resolved(.labelColor).cgColor
+        statusSubtitle.foregroundColor = resolved(.secondaryLabelColor).cgColor
+        measurementTag.string = measurementText
+        measurementSurface.backgroundColor = measurementColor.withAlphaComponent(isDark ? 0.12 : 0.08).cgColor
+        measurementSurface.borderWidth = 0.5
+        measurementSurface.borderColor = measurementColor.withAlphaComponent(0.24).cgColor
+        measurementTag.foregroundColor = measurementColor.cgColor
+        trendTag.string = trendWord
+        trendTag.foregroundColor = trendColor.cgColor
+
+        sceneSurface.colors = [
+            accent.withAlphaComponent(isDark ? 0.075 : 0.045).cgColor,
+            surfaceColor(strength: isDark ? 0.025 : 0.018).cgColor,
+            batteryAccent.withAlphaComponent(isDark ? 0.065 : 0.04).cgColor,
+        ]
+        sceneSurface.locations = [0, 0.52, 1]
+        sceneSurface.borderWidth = 0.6
+        sceneSurface.borderColor = rimColor.cgColor
+        sceneTitle.string = L("Поток энергии")
+        sceneStatus.string = flowSummary
+        sceneTitle.foregroundColor = resolved(.secondaryLabelColor).cgColor
+        sceneStatus.foregroundColor = resolved(.tertiaryLabelColor).cgColor
+
+        refreshNodes()
+        refreshStreams()
         CATransaction.commit()
 
-        restyle(animated: false)
+        needsLayout = true
+        restyleRegions(animated: animated)
+        if animated { animateFlowParticles() }
     }
 
-    private func refreshResolvedColors() {
-        headerTitle.foregroundColor = resolvedColor(.secondaryLabelColor).cgColor
-        headerValue.foregroundColor = resolvedColor(.labelColor).cgColor
-        usbLayer.foregroundColor = resolvedColor(.tertiaryLabelColor).cgColor
-        loadsTitle.foregroundColor = resolvedColor(.tertiaryLabelColor).cgColor
-        headerDivider.strokeColor = separatorColor.cgColor
+    private func refreshNodes() {
+        let adapterActive = effectiveExternalPower
+        setNode(
+            adapterNode,
+            symbol: "powerplug.fill",
+            caption: L("Адаптер"),
+            value: adapterValue,
+            tint: adapterActive ? stateAccent : resolved(.tertiaryLabelColor),
+            active: adapterActive
+        )
 
-        for node in nodes {
-            node.title.foregroundColor = resolvedColor(.secondaryLabelColor).cgColor
-            node.auxiliary.foregroundColor = resolvedColor(.tertiaryLabelColor).cgColor
-            node.separator.strokeColor = separatorColor.cgColor
-            node.barTrack.strokeColor = trackColor.cgColor
+        let systemValue = displayedWatts.map { String(format: L("%.0f Вт"), $0) } ?? "—"
+        setNode(
+            systemNode,
+            symbol: "macbook",
+            caption: L("Система"),
+            value: systemValue,
+            tint: stateAccent,
+            active: displayedWatts != nil
+        )
+
+        let batteryValue = batteryCharge.map { "\($0)%" } ?? "—"
+        setNode(
+            batteryNode,
+            symbol: batterySymbol,
+            caption: hasBattery ? batteryShortState : L("Без батареи"),
+            value: batteryValue,
+            tint: batteryAccent,
+            active: hasBattery
+        )
+    }
+
+    private func setNode(
+        _ node: NodeUI,
+        symbol: String,
+        caption: String,
+        value: String,
+        tint: NSColor,
+        active: Bool
+    ) {
+        node.icon.contents = symbolImage(symbol, color: tint, pointSize: node.key == .system ? 15 : 12)
+        node.caption.string = caption
+        node.value.string = value
+        node.caption.foregroundColor = resolved(.tertiaryLabelColor).cgColor
+        node.value.foregroundColor = resolved(active ? .labelColor : .tertiaryLabelColor).cgColor
+        node.stateDot.fillColor = tint.withAlphaComponent(active ? 0.95 : 0.30).cgColor
+        node.surface.backgroundColor = surfaceColor(strength: node.key == .system ? 0.060 : 0.038).cgColor
+        node.surface.borderWidth = node.key == .system ? 0.75 : 0.5
+        node.surface.borderColor = (node.key == .system
+            ? stateAccent.withAlphaComponent(isDark ? 0.25 : 0.18)
+            : rimColor).cgColor
+        node.surface.opacity = active || node.key == .system ? 1 : 0.58
+    }
+
+    private func refreshStreams() {
+        let inactive = resolved(.tertiaryLabelColor).withAlphaComponent(isDark ? 0.14 : 0.10)
+        sourceStreamBase.strokeColor = inactive.cgColor
+        batteryStreamBase.strokeColor = inactive.cgColor
+
+        sourceStreamActive.strokeColor = stateAccent.withAlphaComponent(0.90).cgColor
+        sourceStreamActive.isHidden = !effectiveExternalPower
+        sourceArrow.fillColor = stateAccent.cgColor
+        sourceArrow.isHidden = !effectiveExternalPower
+
+        batteryStreamActive.strokeColor = batteryAccent.withAlphaComponent(0.90).cgColor
+        batteryStreamActive.isHidden = !hasBattery || effectiveBatteryFlow == .idle
+        batteryArrow.fillColor = batteryAccent.cgColor
+        batteryArrow.isHidden = !hasBattery || effectiveBatteryFlow == .idle
+        sourceParticle.fillColor = stateAccent.cgColor
+        batteryParticle.fillColor = batteryAccent.cgColor
+        layoutStreams()
+    }
+
+    // MARK: - Flow animation
+
+    private func animateFlowParticles() {
+        guard !Motion.reduced else { return }
+        if effectiveExternalPower, let path = sourceStreamActive.path {
+            animateParticle(sourceParticle, along: path)
+        }
+        if hasBattery, effectiveBatteryFlow != .idle {
+            let start = CGPoint(x: systemNode.surface.frame.maxX + 2, y: systemNode.surface.frame.midY)
+            let end = CGPoint(x: batteryNode.surface.frame.minX - 2, y: batteryNode.surface.frame.midY)
+            let path = curvedPath(from: start, to: end, reversed: effectiveBatteryFlow == .discharging)
+            animateParticle(batteryParticle, along: path)
         }
     }
 
-    private func refreshHeader(animated: Bool) {
-        headerTitle.string = L("СИСТЕМА ПИТАНИЯ")
-        loadsTitle.string = L("НАГРУЗКА")
+    private func animateParticle(_ particle: CAShapeLayer, along path: CGPath) {
+        particle.removeAnimation(forKey: "travel")
+        let position = CAKeyframeAnimation(keyPath: "position")
+        position.path = path
+        position.calculationMode = .paced
 
-        let status = powerStatus()
-        headerStatus.string = status.text
-        headerStatus.foregroundColor = resolvedColor(status.textColor).cgColor
-        headerStatusDot.fillColor = status.dotColor.cgColor
+        let opacity = CAKeyframeAnimation(keyPath: "opacity")
+        opacity.values = [0, 0.9, 0.9, 0]
+        opacity.keyTimes = [0, 0.18, 0.82, 1]
 
-        let valueToken = String(format: "%.0f", snapshot.systemWatts)
-        let oldToken = lastHeaderValueToken
-        if oldToken != valueToken {
-            lastHeaderValueToken = valueToken
-            headerValue.string = systemValueAttributed(snapshot.systemWatts)
-        }
-
-        if animated,
-           !Motion.reduced,
-           !oldToken.isEmpty,
-           oldToken != valueToken,
-           abs(snapshot.loadDelta) > 0.5 {
-            let animation = CAKeyframeAnimation(keyPath: "transform.scale")
-            animation.values = [1.0, 1.025, 1.0]
-            animation.keyTimes = [0, 0.45, 1]
-            animation.duration = 0.22
-            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            headerValue.add(animation, forKey: "valueTick")
-        }
+        let group = CAAnimationGroup()
+        group.animations = [position, opacity]
+        group.duration = 0.72
+        group.timingFunction = Design.Motion.easeStandard
+        particle.add(group, forKey: "travel")
     }
 
-    private func refreshTopologyNodes() {
-        if let adapter = node("Адаптер") {
-            setText(adapter.title, node: adapter, token: L("Адаптер"), slot: \NodeUI.lastTitleToken)
-            setText(adapter.value, node: adapter,
-                    attributed: adapterValueAttributed(),
-                    token: adapterValueToken())
-            adapter.stateDot.fillColor = adapterStatusColor.cgColor
-            updateSymbol(adapter, name: "powerplug.fill", color: adapterStatusColor, pointSize: 15)
-        }
-
-        if let system = node("Система") {
-            setText(system.title, node: system, token: L("Система"), slot: \NodeUI.lastTitleToken)
-            updateSymbol(system, name: "macbook", color: neutralIconColor, pointSize: 18)
-        }
-
-        if let battery = node("Батарея") {
-            setText(battery.title, node: battery, token: L("Батарея"), slot: \NodeUI.lastTitleToken)
-            setText(battery.value, node: battery,
-                    attributed: batteryValueAttributed(),
-                    token: batteryValueToken())
-            let color = batteryStatusColor
-            battery.stateDot.fillColor = color.cgColor
-            let symbol = snapshot.battFlow == .charging ? "battery.100.bolt" : "battery.75"
-            updateSymbol(battery, name: symbol, color: color, pointSize: 15)
-        }
+    private func animateSourceEvent() {
+        pulseObod(connect: effectiveExternalPower)
+        guard !Motion.reduced else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.3
+        fade.toValue = 1
+        fade.duration = 0.30
+        fade.timingFunction = Design.Motion.easeStandard
+        statusTitle.add(fade, forKey: "sourceChange")
+        statusSubtitle.add(fade, forKey: "sourceChange")
     }
 
-    private func refreshLoadNodes(animated: Bool) {
-        let rows = orderedRails
-        let maxAmps = max(1.2, rows.map(\.amps).max() ?? 1.2)
-
-        for node in nodes where node.kind == .load {
-            guard let rail = rows.first(where: { $0.name == node.key }) else { continue }
-
-            setText(node.title, node: node, token: L(node.key), slot: \NodeUI.lastTitleToken)
-            updateSymbol(node,
-                         name: symbolName(for: node.key),
-                         color: neutralIconColor,
-                         pointSize: 11)
-
-            if let watts = componentWatts(for: node.key) ?? rail.watts {
-                let value = String(format: L("%.1f Вт"), watts)
-                setText(node.value, node: node, token: value, slot: \NodeUI.lastValueToken)
-
-                let fraction = snapshot.systemWatts > 0.5
-                    ? max(0, min(1, watts / snapshot.systemWatts))
-                    : 0
-                let percent = snapshot.systemWatts > 0.5
-                    ? String(format: "%.0f%%", fraction * 100)
-                    : "—"
-                setText(node.auxiliary, node: node, token: percent, slot: \NodeUI.lastAuxiliaryToken)
-                updateBar(node, fraction: fraction, animated: animated)
-            } else {
-                let value = String(format: L("%.2f А"), rail.amps)
-                setText(node.value, node: node, token: value, slot: \NodeUI.lastValueToken)
-                setText(node.auxiliary, node: node, token: "—", slot: \NodeUI.lastAuxiliaryToken)
-                updateBar(node,
-                          fraction: max(0, min(1, rail.amps / maxAmps)),
-                          animated: animated)
-            }
-
-            let sleeping = rail.amps < 0.05
-            node.value.foregroundColor = resolvedColor(
-                sleeping ? .tertiaryLabelColor : .labelColor
-            ).cgColor
-            node.barFill.strokeColor = (sleeping ? neutralIconColor : accentColor).withAlphaComponent(sleeping ? 0.25 : 0.9).cgColor
-            node.barTrack.strokeColor = trackColor.cgColor
-            node.separator.strokeColor = separatorColor.cgColor
-        }
-    }
-
-    private func refreshFooter() {
-        footerText.string = balanceLine()
-        footerText.foregroundColor = resolvedColor(footerColor).cgColor
-    }
-
-    private func refreshEdges() {
-        let adapterAmps = measuredAdapterAmps()
-        adapterEdge.line.lineWidth = flowLineWidth(adapterAmps)
-        adapterEdge.line.strokeColor = (snapshot.plugged ? adapterStatusColor : disabledColor)
-            .withAlphaComponent(snapshot.plugged ? 0.72 : 0.35).cgColor
-        adapterEdge.line.lineDashPattern = snapshot.plugged ? nil : [3, 3]
-        adapterEdge.arrow.fillColor = adapterStatusColor.cgColor
-        adapterEdge.arrow.isHidden = !snapshot.plugged
-
-        if hasBattery {
-            let batteryAmps = abs(snapshot.battAmps)
-            batteryEdge.line.lineWidth = flowLineWidth(batteryAmps)
-            batteryEdge.line.strokeColor = batteryStatusColor
-                .withAlphaComponent(snapshot.battFlow == .idle ? 0.30 : 0.72).cgColor
-            batteryEdge.line.lineDashPattern = snapshot.battFlow == .idle ? [3, 3] : nil
-            batteryEdge.arrow.fillColor = batteryStatusColor.cgColor
-            batteryEdge.arrow.isHidden = snapshot.battFlow == .idle
-        }
-
-        layoutEdges()
-    }
-
-    private func refreshUSBText() {
-        usbLayer.isHidden = usbCount <= 0 || bounds.width < 330
-        guard usbCount > 0 else { return }
-        usbLayer.string = String(format: L("USB: %d"), usbCount)
-    }
-
-    private func refreshAccessibilityLabels() {
-        for view in nodeViews {
-            view.axLabel = detailLine(for: view.key)
-        }
-    }
-
-    // MARK: - Styling and interaction
-
-    private func restyle(animated: Bool) {
-        CATransaction.begin()
-        CATransaction.setAnimationDuration((animated && !Motion.reduced) ? 0.16 : 0)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
-
-        for node in nodes {
-            let hovered = node.key == hoveredKey
-            let focused = node.key == focusedKey
-            let related = focusedKey == nil || node.key == focusedKey || node.kind == .system
-
-            node.container.opacity = related ? 1 : (node.kind == .load ? 0.48 : 0.72)
-            node.container.backgroundColor = nodeBackground(node, hovered: hovered, focused: focused).cgColor
-            node.container.borderWidth = (hovered || focused) ? 1 : (node.kind == .load ? 0 : 0.5)
-            node.container.borderColor = (hovered || focused ? accentColor : separatorColor).cgColor
-
-            if node.kind == .load {
-                node.container.transform = CATransform3DIdentity
-            } else {
-                node.container.transform = CATransform3DMakeScale(hovered ? 1.018 : 1,
-                                                                  hovered ? 1.018 : 1,
-                                                                  1)
-            }
-        }
-
-        let adapterActive = hoveredKey == "Адаптер" || focusedKey == "Адаптер"
-        adapterEdge.line.opacity = adapterActive ? 1 : 0.82
-        adapterEdge.arrow.opacity = adapterActive ? 1 : 0.88
-
-        let batteryActive = hoveredKey == "Батарея" || focusedKey == "Батарея"
-        batteryEdge.line.opacity = batteryActive ? 1 : 0.82
-        batteryEdge.arrow.opacity = batteryActive ? 1 : 0.88
-
-        CATransaction.commit()
-    }
+    // MARK: - Interaction
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let hit = nodes.first(where: { $0.rect.contains(point) })?.key
-        guard hit != hoveredKey else { return }
-        hoveredKey = hit
-        restyle(animated: true)
+        let hit = regions.reversed().first(where: { $0.rect.contains(point) })?.key
+        guard hit != hoveredRegion else { return }
+        hoveredRegion = hit
+        restyleRegions(animated: true)
         emitDetail()
     }
 
     override func mouseExited(with event: NSEvent) {
-        guard hoveredKey != nil else { return }
-        hoveredKey = nil
-        restyle(animated: true)
+        guard hoveredRegion != nil else { return }
+        hoveredRegion = nil
+        restyleRegions(animated: true)
         emitDetail()
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let key = nodes.first(where: { $0.rect.contains(point) })?.key else {
-            focusedKey = nil
-            restyle(animated: true)
+        guard let hit = regions.reversed().first(where: { $0.rect.contains(point) })?.key else {
+            selectedRegion = nil
+            restyleRegions(animated: true)
             emitDetail()
             return
         }
-        focusNode(key)
+        selectedRegion = selectedRegion == hit ? nil : hit
+        restyleRegions(animated: true)
+        emitDetail()
     }
 
-    private func emitDetail() {
-        let key = hoveredKey ?? focusedKey
-        detailSink?(key.map { detailLine(for: $0) })
-    }
-
-    // MARK: - Event animations
-
-    private func animateAdapterEvent(connected: Bool) {
-        pulseObod(connect: connected)
-
-        if connected {
-            animateTravel(on: adapterEdge,
-                          color: adapterStatusColor,
-                          forward: true,
-                          duration: 0.42)
-        } else if !Motion.reduced {
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 1
-            fade.toValue = 0.35
-            fade.duration = 0.26
-            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            adapterEdge.line.add(fade, forKey: "disconnect")
-        }
-    }
-
-    private func animateBatteryDirectionChange() {
-        guard hasBattery, snapshot.battFlow != .idle else { return }
-        animateTravel(on: batteryEdge,
-                      color: batteryStatusColor,
-                      forward: snapshot.battFlow == .charging,
-                      duration: 0.40)
-    }
-
-    private func animateTravel(on edge: EdgeUI,
-                               color: NSColor,
-                               forward: Bool,
-                               duration: CFTimeInterval) {
-        guard !Motion.reduced, let root = layer else { return }
-
-        let pulseLayer = CAShapeLayer()
-        let path = CGMutablePath()
-        let start = forward ? edge.start : edge.end
-        let end = forward ? edge.end : edge.start
-        path.move(to: start)
-        path.addLine(to: end)
-
-        pulseLayer.path = path
-        pulseLayer.fillColor = nil
-        pulseLayer.strokeColor = color.withAlphaComponent(0.95).cgColor
-        pulseLayer.lineWidth = max(2.5, edge.line.lineWidth + 1)
-        pulseLayer.lineCap = .round
-        pulseLayer.strokeStart = 0
-        pulseLayer.strokeEnd = 0.18
-        root.addSublayer(pulseLayer)
-
-        let startAnimation = CABasicAnimation(keyPath: "strokeStart")
-        startAnimation.fromValue = 0
-        startAnimation.toValue = 0.82
-
-        let endAnimation = CABasicAnimation(keyPath: "strokeEnd")
-        endAnimation.fromValue = 0.18
-        endAnimation.toValue = 1
-
-        let group = CAAnimationGroup()
-        group.animations = [startAnimation, endAnimation]
-        group.duration = duration
-        group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        group.isRemovedOnCompletion = true
-
+    private func restyleRegions(animated: Bool) {
         CATransaction.begin()
-        CATransaction.setCompletionBlock { [weak pulseLayer] in
-            pulseLayer?.removeFromSuperlayer()
+        CATransaction.setAnimationDuration(animated && !Motion.reduced ? Design.Motion.durFast : 0)
+        CATransaction.setAnimationTimingFunction(Design.Motion.easeStandard)
+        for region in regions {
+            guard let surface = region.surface else { continue }
+            let active = region.key == hoveredRegion || region.key == selectedRegion
+            if active {
+                surface.borderColor = stateAccent.withAlphaComponent(isDark ? 0.38 : 0.28).cgColor
+                if region.key != .scene {
+                    surface.backgroundColor = stateAccent.withAlphaComponent(isDark ? 0.105 : 0.075).cgColor
+                }
+            } else if let node = nodes.first(where: { $0.key == region.key }) {
+                node.surface.backgroundColor = surfaceColor(strength: node.key == .system ? 0.060 : 0.038).cgColor
+                node.surface.borderColor = (node.key == .system
+                    ? stateAccent.withAlphaComponent(isDark ? 0.25 : 0.18)
+                    : rimColor).cgColor
+            } else if region.key == .hero {
+                surface.backgroundColor = surfaceColor(strength: 0.050).cgColor
+                surface.borderColor = rimColor.cgColor
+            }
         }
-        pulseLayer.add(group, forKey: "travel")
         CATransaction.commit()
     }
 
-    private func pulse(layer: CALayer, scale: CGFloat, duration: CFTimeInterval) {
-        guard !Motion.reduced else { return }
-        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
-        animation.values = [1.0, scale, 1.0]
-        animation.keyTimes = [0, 0.5, 1]
-        animation.duration = duration
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer.add(animation, forKey: "eventPulse")
-    }
-
-    // MARK: - Text and engineering semantics
-
-    private struct PowerStatusPresentation {
-        let text: String
-        let dotColor: NSColor
-        let textColor: NSColor
-    }
-
-    private func powerStatus() -> PowerStatusPresentation {
-        if !snapshot.plugged {
-            if hasBattery {
-                return .init(text: L("Работа от батареи"),
-                             dotColor: batteryStatusColor,
-                             textColor: .secondaryLabelColor)
-            }
-            return .init(text: L("Внешнее питание не обнаружено"),
-                         dotColor: .systemOrange,
-                         textColor: isDark ? .systemOrange : darker(.systemOrange))
-        }
-
-        if let rated = snapshot.adapterRatedWatts,
-           Double(rated) > 0,
-           snapshot.adapterWatts / Double(rated) >= 0.90,
-           snapshot.battFlow != .discharging {
-            return .init(text: L("Адаптер почти на пределе"),
-                         dotColor: .systemOrange,
-                         textColor: isDark ? .systemOrange : darker(.systemOrange))
-        }
-
-        switch snapshot.battFlow {
-        case .discharging:
-            return .init(text: L("Адаптер не покрывает нагрузку"),
-                         dotColor: .systemOrange,
-                         textColor: isDark ? .systemOrange : darker(.systemOrange))
-        case .charging:
-            return .init(text: L("Питание стабильно · батарея заряжается"),
-                         dotColor: .systemGreen,
-                         textColor: .secondaryLabelColor)
-        case .idle:
-            return .init(text: L("Питание стабильно"),
-                         dotColor: .systemGreen,
-                         textColor: .secondaryLabelColor)
-        }
-    }
-
-    private func balanceLine() -> String {
-        if snapshot.plugged {
-            var line = String(format: L("Вход %.0f Вт · Расход %.0f Вт"),
-                              snapshot.adapterWatts,
-                              snapshot.systemWatts)
-            if hasBattery {
-                line += " · " + L("АКБ") + " " + netLabel()
-            }
-            if let gap = measurementGap() {
-                line += " · " + String(format: L("Δ замеров %.0f Вт"), gap)
-            }
-            return line
-        }
-
-        if hasBattery {
-            return String(format: L("Расход %.0f Вт · АКБ %@"),
-                          snapshot.systemWatts,
-                          netLabel())
-        }
-        return String(format: L("Расход %.0f Вт"), snapshot.systemWatts)
-    }
-
-    private func adapterValueToken() -> String {
-        if !snapshot.plugged { return "offline" }
-        if let rated = snapshot.adapterRatedWatts {
-            return "\(Int(snapshot.adapterWatts.rounded()))/\(rated)"
-        }
-        return "\(Int(snapshot.adapterWatts.rounded()))"
-    }
-
-    private func adapterValueAttributed() -> NSAttributedString {
-        guard snapshot.plugged else {
-            return NSAttributedString(string: "—", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: resolvedColor(.tertiaryLabelColor)
-            ])
-        }
-
-        let result = NSMutableAttributedString()
-        result.append(NSAttributedString(
-            string: String(format: "%.0f", snapshot.adapterWatts),
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: resolvedColor(.labelColor)
-            ]
-        ))
-
-        if let rated = snapshot.adapterRatedWatts {
-            result.append(NSAttributedString(
-                string: String(format: L(" / %d Вт"), rated),
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                    .foregroundColor: resolvedColor(.tertiaryLabelColor)
-                ]
-            ))
-        } else {
-            result.append(NSAttributedString(
-                string: " " + L("Вт"),
-                attributes: [
-                    .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                    .foregroundColor: resolvedColor(.tertiaryLabelColor)
-                ]
-            ))
-        }
-        return result
-    }
-
-    private func batteryValueToken() -> String {
-        "\(batteryFlowTag(snapshot.battFlow)):\(Int(snapshot.battWatts.rounded()))"
-    }
-
-    private func batteryValueAttributed() -> NSAttributedString {
-        let signed = netWatts()
-        let number: String
-        if abs(signed) < 0.5 {
-            number = "0"
-        } else {
-            number = (signed > 0 ? "+" : "−") + String(format: "%.0f", abs(signed))
-        }
-
-        let result = NSMutableAttributedString()
-        result.append(NSAttributedString(
-            string: number,
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: snapshot.battFlow == .idle
-                    ? resolvedColor(.tertiaryLabelColor)
-                    : resolvedColor(.labelColor)
-            ]
-        ))
-        result.append(NSAttributedString(
-            string: " " + L("Вт") + " · " + batteryFlowWord(snapshot.battFlow),
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 8.5, weight: .regular),
-                .foregroundColor: resolvedColor(.tertiaryLabelColor)
-            ]
-        ))
-        return result
-    }
-
-    private func systemValueAttributed(_ watts: Double) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        result.append(NSAttributedString(
-            string: String(format: "%.0f", watts),
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 23, weight: .semibold),
-                .foregroundColor: resolvedColor(.labelColor)
-            ]
-        ))
-        result.append(NSAttributedString(
-            string: " " + L("Вт"),
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                .foregroundColor: resolvedColor(.tertiaryLabelColor)
-            ]
-        ))
-        return result
-    }
-
-    private func setText(_ layer: CATextLayer,
-                         node: NodeUI,
-                         token: String,
-                         slot: ReferenceWritableKeyPath<NodeUI, String>) {
-        guard node[keyPath: slot] != token else { return }
-        node[keyPath: slot] = token
-        layer.string = token
-    }
-
-    private func setText(_ layer: CATextLayer,
-                         node: NodeUI,
-                         attributed: NSAttributedString,
-                         token: String) {
-        guard node.lastValueToken != token else { return }
-        node.lastValueToken = token
-        layer.string = attributed
-    }
-
-    private func updateBar(_ node: NodeUI, fraction: Double, animated: Bool) {
-        let target = max(0, min(1, fraction))
-        if node.appliedBarFraction.isNaN || Motion.reduced || !animated {
-            node.barFill.strokeEnd = CGFloat(target)
-            node.appliedBarFraction = target
+    private func emitDetail() {
+        guard let key = hoveredRegion ?? selectedRegion else {
+            detailSink?(nil)
             return
         }
-        guard abs(target - node.appliedBarFraction) >= 0.004 else { return }
-
-        let from = node.barFill.presentation()?.strokeEnd ?? node.barFill.strokeEnd
-        node.barFill.strokeEnd = CGFloat(target)
-        node.appliedBarFraction = target
-
-        let animation = CABasicAnimation(keyPath: "strokeEnd")
-        animation.fromValue = from
-        animation.toValue = target
-        animation.duration = 0.28
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        node.barFill.add(animation, forKey: "value")
+        detailSink?(detail(for: key))
     }
 
-    // MARK: - Detail and tooltips
-
-    private func detailLine(for key: String) -> String {
-        switch key {
-        case "Адаптер":
-            return snapshot.plugged ? adapterDetail() : L("Адаптер не подключён")
-
-        case "Система":
-            var text = balanceLine()
-            if usbCount > 0 {
-                text += " · " + String(format: L("USB-устройства: %d"), usbCount)
-            }
-            return text
-
-        case "Батарея":
-            return String(format: L("Батарея · %.1f В · %.2f А · %.0f Вт · %@"),
-                          snapshot.battVolts,
-                          abs(snapshot.battAmps),
-                          snapshot.battWatts,
-                          batteryFlowWord(snapshot.battFlow))
-
-        default:
-            guard let rail = snapshot.rails.first(where: { $0.name == key }) else { return L(key) }
-            if let watts = componentWatts(for: key) ?? rail.watts {
-                let percent = snapshot.systemWatts > 0.5 ? watts / snapshot.systemWatts * 100 : 0
-                return String(format: L("%@ · %.2f А · %.1f Вт · %.0f%% системы"),
-                              L(key), rail.amps, watts, percent)
-            }
-            return String(format: L("%@ · %.2f А"), L(key), rail.amps)
-        }
-    }
-
-    private func adapterDetail() -> String {
-        if let rated = snapshot.adapterRatedWatts {
-            let reserve = max(0, Double(rated) - snapshot.adapterWatts)
-            return String(format: L("Адаптер %d Вт · отдаёт %.0f Вт · запас %.0f Вт"),
-                          rated,
-                          snapshot.adapterWatts,
-                          reserve)
-        }
-        return String(format: L("Адаптер · %.0f В · %.1f А · %.0f Вт"),
-                      snapshot.adapterVolts,
-                      snapshot.adapterAmps,
-                      snapshot.adapterWatts)
-    }
-
-    func view(_ view: NSView,
-              stringForToolTip tag: NSView.ToolTipTag,
-              point: NSPoint,
-              userData data: UnsafeMutableRawPointer?) -> String {
-        guard let key = nodes.first(where: { $0.rect.contains(point) })?.key else { return "" }
-        var text = detailLine(for: key)
-        if key == "Система", let usbFirstName, usbCount > 0 {
-            text += "\n" + String(format: L("Первое USB-устройство: %@"), usbFirstName)
-        }
-        return text
+    func view(
+        _ view: NSView,
+        stringForToolTip tag: NSView.ToolTipTag,
+        point: NSPoint,
+        userData data: UnsafeMutableRawPointer?
+    ) -> String {
+        guard let key = regions.reversed().first(where: { $0.rect.contains(point) })?.key else { return "" }
+        return detail(for: key)
     }
 
     private func rebuildToolTips() {
         removeAllToolTips()
-        for node in nodes where !node.rect.isEmpty {
-            addToolTip(node.rect, owner: self, userData: nil)
-        }
+        for region in regions where !region.rect.isEmpty { addToolTip(region.rect, owner: self, userData: nil) }
     }
 
-    // MARK: - Data helpers
-
-    private func componentWatts(for key: String) -> Double? {
-        guard let components, components.fresh else { return nil }
+    private func detail(for key: RegionKey) -> String {
         switch key {
-        case "CPU": return components.cpu
-        case "GPU": return components.gpu
-        case "Память": return components.dram
-        default: return nil
+        case .hero:
+            var result = statusTitleText + " · " + statusSubtitleText
+            if let watts = displayedWatts {
+                result += " · " + String(format: L("%.0f Вт"), watts)
+                result += " · " + (measurementIsDirect ? L("прямой датчик") : L("оценка по источнику питания"))
+            }
+            if usbCount > 0 { result += " · " + String(format: L("USB-устройства: %d"), usbCount) }
+            return result
+
+        case .scene:
+            return flowSummary + " · " + trendWord
+
+        case .source:
+            if effectiveExternalPower {
+                if let rated = snapshot.adapterRatedWatts {
+                    return String(format: L("Адаптер подключён · номинал %d Вт"), rated)
+                }
+                return L("Адаптер подключён")
+            }
+            return L("Адаптер не подключён")
+
+        case .system:
+            guard let watts = displayedWatts else { return L("Данные о мощности недоступны") }
+            return String(format: L("Расход %.0f Вт"), watts) + " · " + measurementText + " · " + trendWord
+
+        case .battery:
+            guard hasBattery else { return L("Батарея не обнаружена") }
+            let percent = batteryCharge.map { "\($0)% · " } ?? ""
+            let usb = usbFirstName.map { " · USB: \($0)" } ?? ""
+            return percent + batteryStateLong + usb
         }
     }
 
-    private func netWatts() -> Double {
-        switch snapshot.battFlow {
-        case .charging: return snapshot.battWatts
-        case .discharging: return -snapshot.battWatts
-        case .idle: return 0
+    // MARK: - Presentation semantics
+
+    private var effectiveExternalPower: Bool { externalPowerOverride ?? snapshot.plugged }
+
+    private var effectiveBatteryFlow: BatteryFlow {
+        if snapshot.battFlow != .idle { return snapshot.battFlow }
+        if batteryChargingOverride == true { return .charging }
+        if hasBattery, !effectiveExternalPower { return .discharging }
+        return .idle
+    }
+
+    private var displayedWatts: Double? {
+        let value = snapshot.systemWatts
+        return value.isFinite && value > 0.1 ? value : nil
+    }
+
+    private var measurementIsDirect: Bool {
+        guard let value = snapshot.systemWattsMeasured else { return false }
+        return value.isFinite && value > 0.05
+    }
+
+    private var measurementText: String {
+        guard displayedWatts != nil else { return L("Без измерения") }
+        return measurementIsDirect ? L("Датчик") : L("Оценка")
+    }
+
+    private var measurementColor: NSColor {
+        displayedWatts == nil ? resolved(.tertiaryLabelColor) : stateAccent
+    }
+
+    private var statusTitleText: String {
+        guard effectiveExternalPower else { return hasBattery ? L("От батареи") : L("Питание") }
+        if hasBattery, effectiveBatteryFlow == .charging { return L("Зарядка") }
+        return L("От сети")
+    }
+
+    private var statusSubtitleText: String {
+        guard effectiveExternalPower else {
+            return hasBattery ? L("Mac питается от батареи") : L("Источник питания не определён")
+        }
+        guard hasBattery else { return L("Mac питается от сети") }
+        switch effectiveBatteryFlow {
+        case .charging: return L("Mac питается от адаптера")
+        case .discharging: return L("Батарея дополняет адаптер")
+        case .idle: return L("Mac питается от адаптера")
         }
     }
 
-    private func netLabel() -> String {
-        let watts = netWatts()
-        if abs(watts) < 0.5 { return String(format: L("%.0f Вт"), 0.0) }
-        let sign = watts > 0 ? "+" : "−"
-        return sign + String(format: L("%.0f Вт"), abs(watts))
+    private var sourceSymbol: String {
+        effectiveExternalPower ? "powerplug.fill" : (hasBattery ? "battery.75" : "bolt.slash.fill")
     }
 
-    private func measurementGap() -> Double? {
-        guard snapshot.plugged, snapshot.battFlow != .discharging else { return nil }
-        let gap = snapshot.systemWatts - snapshot.adapterWatts
-        return gap > 1 ? gap : nil
+    private var adapterValue: String {
+        guard effectiveExternalPower else { return "—" }
+        return L("От сети")
     }
 
-    private func measuredAdapterAmps() -> Double {
-        let volts = snapshot.adapterVolts > 5 ? snapshot.adapterVolts : 20
-        return snapshot.adapterWatts > 0.5 ? snapshot.adapterWatts / volts : 0
-    }
-
-    private func flowLineWidth(_ amps: Double) -> CGFloat {
-        amps < 0.05 ? 1 : min(3.4, 1.5 + CGFloat(amps) * 0.72)
-    }
-
-    private func batteryFlowTag(_ flow: BatteryFlow) -> String {
-        switch flow {
-        case .charging: return "charging"
-        case .discharging: return "discharging"
-        case .idle: return "idle"
-        }
-    }
-
-    private func batteryFlowWord(_ flow: BatteryFlow) -> String {
-        switch flow {
+    private var batteryShortState: String {
+        switch effectiveBatteryFlow {
         case .charging: return L("заряд")
         case .discharging: return L("разряд")
-        case .idle: return L("равновесие")
+        case .idle: return L("ожидание")
         }
     }
 
-    private func symbolName(for key: String) -> String {
-        switch key {
-        case "CPU": return "cpu.fill"
-        case "GPU": return "cpu"
-        case "Память": return "memorychip.fill"
-        default: return "ellipsis.circle.fill"
+    private var batteryStateLong: String {
+        switch effectiveBatteryFlow {
+        case .charging: return L("Батарея заряжается")
+        case .discharging: return L("Батарея питает Mac")
+        case .idle: return effectiveExternalPower ? L("Батарея не используется") : L("Батарея питает Mac")
         }
     }
 
-    private func node(_ key: String) -> NodeUI? {
-        nodes.first { $0.key == key }
+    private var batterySymbol: String {
+        switch effectiveBatteryFlow {
+        case .charging: return "battery.100.bolt"
+        case .discharging: return "battery.75"
+        case .idle: return "battery.100"
+        }
     }
 
-    // MARK: - Colors
+    private var trendWord: String {
+        if displayedWatts == nil { return L("Наблюдаем") }
+        if snapshot.loadDelta > 1.2 { return L("Растёт") }
+        if snapshot.loadDelta < -1.2 { return L("Снижается") }
+        return L("Стабильно")
+    }
+
+    private var trendColor: NSColor {
+        if abs(snapshot.loadDelta) <= 1.2 { return resolved(.tertiaryLabelColor) }
+        return snapshot.loadDelta > 0 ? stateAccent : resolved(.secondaryLabelColor)
+    }
+
+    private var flowSummary: String {
+        guard effectiveExternalPower else { return hasBattery ? L("Батарея → Mac") : L("Источник не определён") }
+        switch effectiveBatteryFlow {
+        case .charging: return L("Адаптер → Mac → батарея")
+        case .discharging: return L("Адаптер + батарея → Mac")
+        case .idle: return L("Адаптер → Mac")
+        }
+    }
+
+    // MARK: - Colors and symbols
 
     private var isDark: Bool {
         effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
-    private func resolvedColor(_ color: NSColor) -> NSColor {
-        Design.Color.resolved(color, dark: isDark)
-    }
+    private func resolved(_ color: NSColor) -> NSColor { Design.Color.resolved(color, dark: isDark) }
 
-    private var accentColor: NSColor {
-        Design.Color.accent(isDark)
-    }
-
-    private var neutralIconColor: NSColor {
-        Design.Color.neutralNode(isDark)
-    }
-
-    private var trackColor: NSColor {
-        isDark ? NSColor(white: 1, alpha: 0.10) : NSColor(white: 0, alpha: 0.09)
-    }
-
-    private var separatorColor: NSColor {
-        isDark ? NSColor(white: 1, alpha: 0.09) : NSColor(white: 0, alpha: 0.085)
-    }
-
-    private var disabledColor: NSColor {
-        isDark ? NSColor(white: 0.55, alpha: 1) : NSColor(white: 0.48, alpha: 1)
-    }
-
-    private var adapterStatusColor: NSColor {
-        guard snapshot.plugged else { return disabledColor }
-        return isDark ? .systemOrange : darker(.systemOrange)
-    }
-
-    private var batteryStatusColor: NSColor {
-        let color: NSColor
-        switch snapshot.battFlow {
-        case .charging: color = .systemTeal
-        case .discharging: color = .systemGreen
-        case .idle: color = disabledColor
+    private var stateAccent: NSColor {
+        if hasBattery, let charge = batteryCharge, !effectiveExternalPower {
+            if charge <= 15 { return resolved(Design.Color.levelCrit) }
+            if charge <= 35 { return resolved(Design.Color.levelWarn) }
+            return resolved(Design.Color.levelOK)
         }
-        return isDark ? color : darker(color)
-    }
-
-    private var footerColor: NSColor {
-        snapshot.plugged && snapshot.battFlow == .discharging
-            ? (isDark ? .systemOrange : darker(.systemOrange))
-            : .secondaryLabelColor
-    }
-
-    private func nodeBackground(_ node: NodeUI, hovered: Bool, focused: Bool) -> NSColor {
-        if hovered || focused {
-            return accentColor.withAlphaComponent(isDark ? 0.12 : 0.08)
+        if effectiveExternalPower, effectiveBatteryFlow == .discharging {
+            return resolved(Design.Color.levelWarn)
         }
-        if node.kind == .load {
-            return .clear
-        }
-        return isDark
-            ? NSColor(white: 1, alpha: 0.045)
-            : NSColor(white: 0, alpha: 0.028)
+        return resolved(Design.Color.accent(isDark))
     }
 
-    private func darker(_ color: NSColor) -> NSColor {
-        color.blended(withFraction: 0.22, of: .black) ?? color
+    private var batteryAccent: NSColor {
+        if effectiveBatteryFlow == .charging { return resolved(Design.Color.accent(isDark)) }
+        guard let charge = batteryCharge else { return resolved(.secondaryLabelColor) }
+        if charge <= 15 { return resolved(Design.Color.levelCrit) }
+        if charge <= 35 { return resolved(Design.Color.levelWarn) }
+        return resolved(Design.Color.levelOK)
     }
 
-    private func invalidatePresentationTokens() {
-        lastHeaderValueToken = ""
-        for node in nodes {
-            node.lastValueToken = ""
-            node.lastTitleToken = ""
-            node.lastAuxiliaryToken = ""
-            node.lastSymbolToken = ""
-        }
+    private func surfaceColor(strength: CGFloat) -> NSColor {
+        isDark ? NSColor.white.withAlphaComponent(strength)
+            : NSColor.black.withAlphaComponent(strength * 0.68)
     }
 
-    // MARK: - Symbols and scale
-
-    private struct SymbolKey: Hashable {
-        let name: String
-        let pointSize: Int
-        let color: String
+    private var rimColor: NSColor {
+        isDark ? NSColor.white.withAlphaComponent(0.085)
+            : NSColor.black.withAlphaComponent(0.065)
     }
 
-    private var symbolCache: [SymbolKey: CGImage] = [:]
-
-    private func updateSymbol(_ node: NodeUI,
-                              name: String,
-                              color: NSColor,
-                              pointSize: CGFloat) {
-        let colorToken = colorCacheToken(color)
-        let token = "\(name)|\(Int(pointSize.rounded()))|\(colorToken)"
-        guard node.lastSymbolToken != token else { return }
-        node.lastSymbolToken = token
-        node.icon.contents = cachedSymbol(name: name, color: color, pointSize: pointSize)
+    private func configureText(
+        _ layer: CATextLayer,
+        size: CGFloat,
+        weight: NSFont.Weight,
+        color: NSColor,
+        mono: Bool = false
+    ) {
+        let font = mono
+            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+            : NSFont.systemFont(ofSize: size, weight: weight)
+        layer.font = font
+        layer.fontSize = size
+        layer.foregroundColor = resolved(color).cgColor
+        layer.truncationMode = .end
+        layer.isWrapped = false
     }
 
-    private func cachedSymbol(name: String,
-                              color: NSColor,
-                              pointSize: CGFloat) -> CGImage? {
-        let key = SymbolKey(name: name,
-                            pointSize: Int(pointSize.rounded()),
-                            color: colorCacheToken(color))
-        if let image = symbolCache[key] { return image }
-
+    private func symbolImage(_ name: String, color: NSColor, pointSize: CGFloat) -> CGImage? {
         guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
         let configuration: NSImage.SymbolConfiguration
         if #available(macOS 12, *) {
@@ -1454,120 +847,24 @@ final class FlowView: NSView, NSViewToolTipOwner {
         }
         let image = base.withSymbolConfiguration(configuration) ?? base
         var rect = CGRect(origin: .zero, size: image.size)
-        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return nil }
-        symbolCache[key] = cgImage
-        return cgImage
-    }
-
-    private func colorCacheToken(_ color: NSColor) -> String {
-        guard let rgb = color.usingColorSpace(.deviceRGB) else { return color.description }
-        return String(format: "%.3f,%.3f,%.3f,%.3f",
-                      rgb.redComponent,
-                      rgb.greenComponent,
-                      rgb.blueComponent,
-                      rgb.alphaComponent)
-    }
-
-    private func configureText(_ layer: CATextLayer,
-                               size: CGFloat,
-                               weight: NSFont.Weight,
-                               color: NSColor,
-                               mono: Bool = false) {
-        let font = mono
-            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
-            : NSFont.systemFont(ofSize: size, weight: weight)
-        layer.font = font
-        layer.fontSize = size
-        layer.foregroundColor = resolvedColor(color).cgColor
-        layer.truncationMode = .end
-        layer.isWrapped = false
+        return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }
 
     private func updateContentsScale() {
-        let scale = window?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor
-            ?? 2
-
-        for text in [headerTitle, headerStatus, headerValue, usbLayer, loadsTitle, footerText] {
-            text.contentsScale = scale
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let textLayers = [statusTitle, statusSubtitle, measurementTag, trendTag, sceneTitle, sceneStatus]
+            + nodes.flatMap { [$0.caption, $0.value] }
+        textLayers.forEach { $0.contentsScale = scale }
+        let allLayers: [CALayer] = [
+            heroSurface, sourceHalo, sourceOrb, sourceIcon, measurementSurface, sceneSurface,
+            sourceStreamBase, sourceStreamActive, batteryStreamBase, batteryStreamActive,
+            sourceArrow, batteryArrow, sourceParticle, batteryParticle,
+        ]
+        allLayers.forEach { $0.contentsScale = scale }
+        for node in nodes {
+            node.surface.contentsScale = scale
+            node.icon.contentsScale = scale
+            node.stateDot.contentsScale = scale
         }
-        adapterEdge.line.contentsScale = scale
-        adapterEdge.arrow.contentsScale = scale
-        batteryEdge.line.contentsScale = scale
-        batteryEdge.arrow.contentsScale = scale
-
-        for node in nodes { updateContentsScale(node) }
-    }
-
-    private func updateContentsScale(_ node: NodeUI) {
-        let scale = window?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor
-            ?? 2
-        node.container.contentsScale = scale
-        node.icon.contentsScale = scale
-        node.title.contentsScale = scale
-        node.value.contentsScale = scale
-        node.auxiliary.contentsScale = scale
-        node.stateDot.contentsScale = scale
-        node.barTrack.contentsScale = scale
-        node.barFill.contentsScale = scale
-        node.separator.contentsScale = scale
-    }
-}
-
-/// Прозрачный оверлей: клавиатура и VoiceOver используют те же узлы, что мышь.
-/// Мышь проходит к FlowView, поэтому визуальный hit-test остаётся единым.
-private final class FlowNodeView: NSView {
-    let key: String
-    var axLabel = ""
-    var onActivate: ((String) -> Void)?
-
-    init(key: String) {
-        self.key = key
-        super.init(frame: .zero)
-        focusRingType = .default
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override var acceptsFirstResponder: Bool { true }
-    override var canBecomeKeyView: Bool { true }
-
-    override func becomeFirstResponder() -> Bool {
-        needsDisplay = true
-        return true
-    }
-
-    override func resignFirstResponder() -> Bool {
-        needsDisplay = true
-        return true
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 49 || event.keyCode == 36 {
-            onActivate?(key)
-        } else {
-            super.keyDown(with: event)
-        }
-    }
-
-    override var focusRingMaskBounds: NSRect { bounds }
-
-    override func drawFocusRingMask() {
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1),
-                     xRadius: 7,
-                     yRadius: 7).fill()
-    }
-
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { axLabel }
-
-    override func accessibilityPerformPress() -> Bool {
-        onActivate?(key)
-        return true
     }
 }

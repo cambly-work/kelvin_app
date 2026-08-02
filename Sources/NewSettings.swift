@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 enum MacSystemSettings {
@@ -13,6 +14,13 @@ enum MacSystemSettings {
         open([
             "x-apple.systempreferences:com.apple.Battery-Settings.extension",
             "x-apple.systempreferences:com.apple.preference.energysaver",
+        ])
+    }
+
+    static func openLoginItems() {
+        open([
+            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.users?LoginItems",
         ])
     }
 
@@ -475,6 +483,10 @@ private struct GPUModeCard: View {
             gpu.refreshServiceState()
             gpu.refreshModeFromSystem()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            gpu.refreshServiceState()
+            gpu.refreshModeFromSystem()
+        }
     }
 
     /// Picker для выбора режима. Disabled во время применения.
@@ -507,7 +519,7 @@ private struct GPUModeCard: View {
                     .font(KelvinSwiftUITheme.Typography.detail)
                     .foregroundColor(.orange)
                 Button(L("Открыть настройки")) {
-                    MacSystemSettings.openGraphics()
+                    MacSystemSettings.openLoginItems()
                 }
             } else if case .repairNeeded = gpu.serviceState {
                 Text(L("Требует восстановления"))
@@ -572,6 +584,11 @@ private struct GPUSetupSheet: View {
                 if installing {
                     ProgressView()
                         .scaleEffect(0.7)
+                }
+                if result == .approvalRequired {
+                    Button(L("Открыть настройки")) {
+                        MacSystemSettings.openLoginItems()
+                    }
                 }
                 Button(L("Готово")) { isPresented = false }
                     .keyboardShortcut(.cancelAction)

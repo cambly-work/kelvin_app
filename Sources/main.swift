@@ -491,9 +491,9 @@ final class DossierRowView: NSView {
 }
 
 final class PopoverController: NSViewController {
-    private let CW: CGFloat = 304       // ширина плитки (IW + 2×16 паддинга)
-    private let IW: CGFloat = 272       // ширина контента внутри плитки
-    private let FW: CGFloat = 292       // ширина схемы расхода (почти полноширинная: плитка с узким полем 6px)
+    private let CW: CGFloat = 328       // современный popover: больше воздуха, без тесных трёхколоночных строк
+    private let IW: CGFloat = 296       // ширина контента внутри плитки
+    private let FW: CGFloat = 316       // полноширинный energy canvas с узким полем 6px
     private let appsBarW: CGFloat = 64  // лидерборд: энергобар сужен с 84 → имя дышит (не truncate)
     private let appsValW: CGFloat = 30  // колонка значения (поджата с 34); шапка садится над ней
     private let appsFlagW: CGFloat = 16 // колонка флага страны-назначения
@@ -560,12 +560,12 @@ final class PopoverController: NSViewController {
     /// Нейтральная controlFill-капсула вокруг вердикта (точка + слово) — сенсор-подпись.
     private let verdictPill = CapsuleView()
     private let statSysVal = NSTextField(labelWithString: "—")
-    private var statSysCap = NSTextField(labelWithString: L("Ватт"))
+    private var statSysCap = NSTextField(labelWithString: "CPU")
     private let statBatVal = NSTextField(labelWithString: "—")
-    // «АКБ» вместо «В батарею»: значение знаковое (+заряд/−разряд/0), направление несёт знак —
-    // подпись «В батарею: −12» была самопротиворечивой. (statTimeVal/statTimeCap «ОСТАЛОСЬ» удалены — мёртвый код.)
-    private var statBatCap = NSTextField(labelWithString: L("АКБ"))
-    // V2 витальные-приборы: 4 ячейки Ватт/Темп/Кулер/АКБ (макет). Темп тинтуется по режиму.
+    // Четвёртая виталь — универсальная загрузка RAM. Ватт батареи убран: рядом с общим расходом
+    // он выглядел как противоречащее число, хотя физически это другой замер.
+    private var statBatCap = NSTextField(labelWithString: "RAM")
+    // Витальные-приборы: CPU/Темп/Кулер/RAM. Темп тинтуется по режиму.
     private let statTempVal = NSTextField(labelWithString: "—")
     private var statTempCap = NSTextField(labelWithString: L("Темп"))
     private let statFanVal = NSTextField(labelWithString: "—")
@@ -594,6 +594,7 @@ final class PopoverController: NSViewController {
     // Вкладка «История» V5 = карточка батареи (владелец: «30 дней CPU — мутные данные»).
     // Пилюли метрик/диапазонов удалены; SQLite пишет все метрики как прежде (90 дней — PDF/тренд/CSV).
     private var historyChart: HistoryChart?
+    private let historyHero = TabStatusHeroView()
     private let historyFooter = NSTextField(labelWithString: "")
     private let historyDegrade = NSTextField(labelWithString: "")   // строка деталей тренда под графиком
     private let historyVerdict = NSTextField(labelWithString: "")   // ГОТОВЫЙ ВЫВОД («АКБ стабильна» / «теряет N%/мес»)
@@ -602,10 +603,8 @@ final class PopoverController: NSViewController {
     private let histCardTrend = NSTextField(labelWithString: "—")
 
     // Advisor (Health Center) UI elements
-    private let healthVerdictLabel = NSTextField(labelWithString: "")
-    private let healthMetaLabel = NSTextField(labelWithString: "")
+    private let healthHero = TabStatusHeroView()
     private let healthFindingsContainer = NSStackView()
-    private let healthStatusIcon = NSImageView()
     private let healthFanStatusLabel = NSTextField(labelWithString: "")
     private var lastAdvisorResult: AdvisorResult?
     private var advisorDismissalStore = AdvisorDismissalStore()
@@ -618,6 +617,7 @@ final class PopoverController: NSViewController {
     private var comp: [String: NSTextField] = [:]
     private var installBtn = GlassButton(title: L("Установить хелпер…"), symbol: "arrow.down.circle")
     private let sensorsView = HardwareView(frame: .zero)
+    private let hardwareHero = TabStatusHeroView()
     private let sensorDetail = NSTextField(labelWithString: "")
     private let privacyView = PrivacyView(frame: .zero)   // вкладка «Приватность» — радар соединений
     private var vpnChipRefresh: (() -> Void)?             // обновление VPN-чипа (при показе вкладки/после действия)
@@ -862,11 +862,11 @@ final class PopoverController: NSViewController {
         graph.heightAnchor.constraint(equalToConstant: 60).isActive = true   // выше — место под оси/сетку/подписи
         graph.widthAnchor.constraint(equalToConstant: FW).isActive = true
         flowView.translatesAutoresizingMaskIntoConstraints = false
-        flowView.heightAnchor.constraint(equalToConstant: 292).isActive = true   // V4 компакт: −48 (полоса ужата, воздух схемы уплотнён)
+        flowView.heightAnchor.constraint(equalToConstant: 188).isActive = true
         flowView.widthAnchor.constraint(equalToConstant: FW).isActive = true
         flowView.detailSink = { [weak self] detail in self?.flowDetail = detail; self?.applyThermalLabel() }
         flowInfoBar.translatesAutoresizingMaskIntoConstraints = false
-        flowInfoBar.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        flowInfoBar.heightAnchor.constraint(equalToConstant: 58).isActive = true
         flowInfoBar.widthAnchor.constraint(equalToConstant: FW).isActive = true
         flowInfoBar.detailSink = { [weak self] detail in
             // полоса делит сток-подпись со схемой: её разбор перебивает термо-сводку, как и разбор узла
@@ -917,8 +917,8 @@ final class PopoverController: NSViewController {
     /// тяжёлые секции (flow/hardware/apps) — через сегмент-контрол, по одной за раз.
     /// Обновить подписи статических элементов при смене языка. Вызывается из buildModules().
     private func relocalizeStatic() {
-        statSysCap.stringValue = L("Ватт")
-        statBatCap.stringValue = L("АКБ")
+        statSysCap.stringValue = "CPU"
+        statBatCap.stringValue = "RAM"
         statTempCap.stringValue = L("Темп")
         statFanCap.stringValue = L("Кулер")
         installBtn.title = L("Установить хелпер…")
@@ -1271,8 +1271,7 @@ final class PopoverController: NSViewController {
         return glassTile(stack)
     }
 
-    /// V2 витальные: ОБРАМЛЁННАЯ ПОЛОСА-ПРИБОР (rounded панель + хайрлайн-делители между 4 ячейками
-    /// Ватт/Темп/Кулер/В АКБ) — читается как приборная панель, а не числа враздрай. Ячейки равной ширины.
+    /// Витальные: компактная полоса CPU/Темп/Кулер/RAM с равными ячейками и hairline-разделителями.
     private func buildVitalsStrip() -> NSView {
         let pairs: [(NSTextField, NSTextField)] = [(statSysVal, statSysCap), (statTempVal, statTempCap),
                                                    (statFanVal, statFanCap), (statBatVal, statBatCap)]
@@ -1353,7 +1352,7 @@ final class PopoverController: NSViewController {
         hero.alignment = .centerY; hero.spacing = 14
         hero.translatesAutoresizingMaskIntoConstraints = false
         hero.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        // витальные-приборы Ватт/Темп/Кулер/В АКБ (без бордюра, хайрлайн-делители).
+        // Витальные CPU/Темп/Кулер/RAM без бордюра, только с hairline-разделителями.
         let vitals = buildVitalsStrip()
         // строка режима заряда Выкл/Лимит/Парус — ЧИСТЫЙ сегмент; жирная полоса-дубль (ChargeTrack.bar,
         // дублировала % кольца — владелец звал её «ползунком») убрана из ChargeTrack.
@@ -1382,10 +1381,9 @@ final class PopoverController: NSViewController {
         ])
     }
     private func buildFlowTile() -> NSView {
-        // схема — почти на всю ширину плитки (узкое поле 6px).
-        // V6: заголовок «Питание · расход» УБРАН (дублировал таб-тайтл «Питание» через строку),
-        // термострока CPU°/GPU°/кулеров УБРАНА как сводка (дублировала шапку поповера и «Железо») —
-        // thermalLabel остаётся ПУСТОЙ строкой-стоком для живого разбора узла под курсором.
+        // Energy canvas занимает почти всю ширину. В нём нет компонентных ватт CPU/GPU/DRAM:
+        // только один общий сигнал, его источник, динамика и состояние батареи.
+        // thermalLabel остаётся строкой точного разбора по наведению.
         glassTile(vstack([flowView, flowInfoBar,
                           padLeading(thermalLabel, 10, width: FW)], 8), hInset: 6, fill: true)
     }
@@ -1523,6 +1521,16 @@ final class PopoverController: NSViewController {
     /// Вкладка «Обслуживание» — read-only постура (XProtect/SIP/FileVault), всё без root.
     /// Строки-плейсхолдеры синхронно (высота корректна), постура читается В ФОНЕ и заполняет их на main.
     private func buildMaintenanceTile() -> NSView {
+        let hero = TabStatusHeroView()
+        hero.set(
+            symbol: "checkmark.shield.fill",
+            eyebrow: L("Системная проверка"),
+            title: L("Проверяем защиту и стабильность"),
+            subtitle: L("Собираем факты macOS"),
+            metric: "…",
+            tint: Design.Color.accent(isDark),
+            animated: false
+        )
         struct Row { let view: NSView; let icon: NSImageView; let value: NSTextField }
         func makeRow(_ title: String) -> Row {
             let iv = NSImageView(); iv.imageScaling = .scaleProportionallyDown
@@ -1633,9 +1641,51 @@ final class PopoverController: NSViewController {
             let crashVal = crashed ? "\(p.crashes7d)" + (p.latestCrash.map { " · " + $0 } ?? "") : "0"
             setRow(crash, crashVal, nil,
                    symbol: crashed ? "exclamationmark.triangle" : "checkmark.circle", neutral: crashed)
+
+            var attention = 0
+            if p.sip.level != nil { attention += 1 }
+            if p.fileVault == false { attention += 1 }
+            if p.pendingUpdates.contains(where: { !$0.major }) { attention += 1 }
+            switch p.memory.pressure {
+            case .warning, .critical: attention += 1
+            case .normal, .unknown: break
+            }
+            if p.thermal.level != nil { attention += 1 }
+            if !p.sleepBlockers.isEmpty { attention += 1 }
+            if p.crashes7d > 0 { attention += 1 }
+            let critical = p.sip.level == .crit || p.memory.pressure == .critical || p.thermal.level == .crit
+            let unknown = p.xprotect == nil || p.fileVault == nil
+            let heroTitle: String
+            let heroMetric: String
+            let heroTint: NSColor
+            let heroSymbol: String
+            if attention > 0 {
+                heroTitle = String(format: L("Требуют внимания: %d"), attention)
+                heroMetric = "\(attention)"
+                heroTint = critical ? Design.Color.levelCrit : Design.Color.levelWarn
+                heroSymbol = critical ? "exclamationmark.shield.fill" : "checkmark.shield.fill"
+            } else if unknown {
+                heroTitle = L("Проверка частично недоступна")
+                heroMetric = "—"
+                heroTint = .secondaryLabelColor
+                heroSymbol = "questionmark.shield"
+            } else {
+                heroTitle = L("Защита и стабильность в норме")
+                heroMetric = "OK"
+                heroTint = Design.Color.levelOK
+                heroSymbol = "checkmark.shield.fill"
+            }
+            hero.set(
+                symbol: heroSymbol,
+                eyebrow: L("Системная проверка"),
+                title: heroTitle,
+                subtitle: L("Защита · память · обновления"),
+                metric: heroMetric,
+                tint: heroTint
+            )
         }
         return glassTile(vstack([
-            Self.sectionLabel(L("Обслуживание · защита")), xp.view, sip.view, fv.view, boot.view, upd.view,
+            hero, Self.sectionLabel(L("Обслуживание · защита")), xp.view, sip.view, fv.view, boot.view, upd.view,
             Self.sectionLabel(L("Здоровье и стабильность")), mem.view, therm.view, sleep.view, crash.view,
             note,
         ], 10), fill: true)
@@ -1844,39 +1894,27 @@ final class PopoverController: NSViewController {
     /// Вкладка «Здоровье» — Центр здоровья Mac (Kelvin Advisor).
     /// Показывает общий статус и список рекомендаций.
     private func buildHealthTile() -> NSView {
-        healthStatusIcon.image = NSImage(systemSymbolName: "checkmark.shield.fill", accessibilityDescription: L("Здоровье Mac"))
-        healthStatusIcon.contentTintColor = Design.Color.levelOK
-        healthStatusIcon.imageScaling = .scaleProportionallyUpOrDown
-        healthStatusIcon.translatesAutoresizingMaskIntoConstraints = false
-        healthStatusIcon.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        healthStatusIcon.heightAnchor.constraint(equalToConstant: 28).isActive = true
-
-        healthVerdictLabel.font = Design.Font.sys(15, .semibold)
-        healthVerdictLabel.textColor = .labelColor
-        healthVerdictLabel.lineBreakMode = .byWordWrapping
-        healthVerdictLabel.maximumNumberOfLines = 2
-        healthVerdictLabel.preferredMaxLayoutWidth = IW - 52
-        healthVerdictLabel.translatesAutoresizingMaskIntoConstraints = false
-        
-        healthMetaLabel.font = Design.Font.sys(10, .medium)
-        healthMetaLabel.textColor = .secondaryLabelColor
-        healthMetaLabel.lineBreakMode = .byTruncatingTail
-        healthMetaLabel.maximumNumberOfLines = 1
-
-        let verdictText = NSStackView(views: [healthVerdictLabel, healthMetaLabel])
-        verdictText.orientation = .vertical
-        verdictText.spacing = 3
-        let hero = NSStackView(views: [healthStatusIcon, verdictText, spacer()])
-        hero.alignment = .centerY
-        hero.spacing = 12
-        hero.edgeInsets = NSEdgeInsets(top: 4, left: 2, bottom: 8, right: 2)
-        hero.translatesAutoresizingMaskIntoConstraints = false
-        hero.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        healthHero.set(
+            symbol: "heart.text.square.fill",
+            eyebrow: L("Центр здоровья"),
+            title: L("Проверяем Mac"),
+            subtitle: L("Собираем рекомендации"),
+            metric: "…",
+            tint: Design.Color.accent(isDark),
+            animated: false
+        )
         
         healthFindingsContainer.orientation = .vertical
         healthFindingsContainer.spacing = 0
         healthFindingsContainer.translatesAutoresizingMaskIntoConstraints = false
         healthFindingsContainer.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        healthFindingsContainer.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        healthFindingsContainer.addArrangedSubview(healthMessageRow(
+            symbol: "ellipsis.circle",
+            title: L("Анализ продолжается"),
+            detail: L("Рекомендации появятся после проверки"),
+            tint: Design.Color.accent(isDark)
+        ))
         
         let refreshBtn = GlassButton(title: "", symbol: "arrow.clockwise", cornerRadius: Design.Radius.chip)
         refreshBtn.toolTip = L("Обновить")
@@ -1890,8 +1928,44 @@ final class PopoverController: NSViewController {
         sectionRow.translatesAutoresizingMaskIntoConstraints = false
         sectionRow.widthAnchor.constraint(equalToConstant: IW).isActive = true
 
-        let content = vstack([hero, sectionRow, healthFindingsContainer], 6)
+        let content = vstack([healthHero, sectionRow, healthFindingsContainer], 8)
         return glassTile(content, fill: false)
+    }
+
+    private func healthMessageRow(symbol: String, title: String, detail: String, tint: NSColor) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+        icon.contentTintColor = tint
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 20).isActive = true
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = Design.Font.sys(11, .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        let detailLabel = NSTextField(labelWithString: detail)
+        detailLabel.font = Design.Font.sys(9.5, .regular)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byTruncatingTail
+        let text = vstack([titleLabel, detailLabel], 2)
+        text.alignment = .leading
+
+        let row = NSStackView(views: [icon, text, spacer()])
+        row.alignment = .centerY
+        row.spacing = 9
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        row.wantsLayer = true
+        row.layer?.cornerRadius = 11
+        row.layer?.cornerCurve = .continuous
+        row.layer?.backgroundColor = (isDark
+            ? NSColor.white.withAlphaComponent(0.032)
+            : NSColor.black.withAlphaComponent(0.022)).cgColor
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        row.heightAnchor.constraint(equalToConstant: 50).isActive = true
+        row.setAccessibilityLabel(title + " · " + detail)
+        return row
     }
 
     /// Современное управление охлаждением прямо в «Здоровье» — без перехода в старое окно настроек.
@@ -2071,13 +2145,14 @@ final class PopoverController: NSViewController {
     /// вердикт-вывод + три крупных числа (Здоровье/Циклы/Тренд) + ОДИН маленький график заряда за
     /// сегодня + экспорт CSV/PDF. Данные в SQLite пишутся как прежде (90 дней — для PDF и тренда).
     private func buildHistoryTile() -> NSView {
-        // Вердикт — главный вывод, читается первым (как в «Приложениях»).
-        historyVerdict.font = Design.Font.headline
-        historyVerdict.textColor = .labelColor
-        historyVerdict.lineBreakMode = .byWordWrapping; historyVerdict.maximumNumberOfLines = 2
-        historyVerdict.preferredMaxLayoutWidth = IW
-        historyVerdict.translatesAutoresizingMaskIntoConstraints = false
-        historyVerdict.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        historyHero.set(
+            symbol: "clock.arrow.circlepath",
+            eyebrow: L("История батареи"),
+            title: L("Собираем локальную историю"),
+            subtitle: L("До 90 дней · локально"),
+            tint: Design.Color.accent(isDark),
+            animated: false
+        )
 
         // Три крупных числа — та же miniStat-грамматика, что футер «Приложений»/консоль.
         let numsRow = NSStackView(views: [miniStat(histCardHealth, NSTextField(labelWithString: L("Здоровье"))),
@@ -2115,7 +2190,7 @@ final class PopoverController: NSViewController {
         btnRow.spacing = 8
 
         refreshHistory()
-        return glassTile(vstack([Self.sectionLabel(L("Батарея · история")), historyVerdict, numsRow,
+        return glassTile(vstack([historyHero, numsRow,
                                  chartCap, chart, historyDegrade, historyFooter, btnRow], 10), fill: true)
     }
 
@@ -2165,6 +2240,13 @@ final class PopoverController: NSViewController {
             historyDegrade.stringValue = ""; historyDegrade.isHidden = true
             historyVerdict.stringValue = ""; historyVerdict.isHidden = true
             histCardHealth.stringValue = "—"; histCardCycles.stringValue = "—"; histCardTrend.stringValue = "—"
+            historyHero.set(
+                symbol: "battery.0",
+                eyebrow: L("История батареи"),
+                title: L("Батарея не обнаружена"),
+                subtitle: L("История появится после накопления данных"),
+                tint: .secondaryLabelColor
+            )
             return
         }
         historyDegrade.isHidden = false
@@ -2188,6 +2270,15 @@ final class PopoverController: NSViewController {
         } else {
             historyVerdict.stringValue = L("Вывод о деградации появится через ~2 недели наблюдений")
         }
+        let historyTint: NSColor = h < 60 ? Design.Color.levelCrit
+            : (h < 80 ? Design.Color.levelWarn : Design.Color.accent(isDark))
+        historyHero.set(
+            symbol: h < 80 ? "battery.50" : "battery.100",
+            eyebrow: L("История батареи"),
+            title: historyVerdict.stringValue,
+            subtitle: L("До 90 дней · локально"),
+            tint: historyTint
+        )
         // Детали под графиком: ресурс циклов (числа Здоровье/Циклы/Тренд уже вынесены крупно — не дублируем)
         if let cy = ins.cycles, let rated = ins.ratedCycles, rated > 0 {
             historyDegrade.stringValue = String(format: L("Ресурс: %d из ~%d циклов (%.0f%%)"), cy, rated, Double(cy) / Double(rated) * 100)
@@ -2230,7 +2321,7 @@ final class PopoverController: NSViewController {
     
     /// Обновить Advisor (Центр здоровья Mac) — собрать снимок данных, проанализировать, отрисовать.
     @objc private func refreshAdvisor() {
-        guard healthVerdictLabel.superview != nil else { return }  // плитка не построена
+        guard healthHero.superview != nil else { return }  // плитка не построена
         let battery = latestAdvisorBattery
         let energy = latestAdvisorEnergy
         let sensors = latestAdvisorSensors
@@ -2293,43 +2384,47 @@ final class PopoverController: NSViewController {
                 )
                 self.lastAdvisorResult = visibleResult
                 
-                // Обновляем вердикт
+                // Обновляем вердикт героя
                 let rawStatus = visibleResult.statusText.lowercased()
-                self.healthVerdictLabel.stringValue = rawStatus.prefix(1).uppercased() + rawStatus.dropFirst()
-                self.healthVerdictLabel.textColor = {
+                let verdict = rawStatus.prefix(1).uppercased() + rawStatus.dropFirst()
+                let heroTint: NSColor = {
                     switch visibleResult.maxSeverity {
                     case .critical: return Design.Color.levelCrit
                     case .warning: return Design.Color.levelWarn
                     case .notice: return Design.Color.levelWarn
-                    case .info: return .labelColor
-                    }
-                }()
-                self.healthStatusIcon.image = NSImage(
-                    systemSymbolName: visibleResult.findings.isEmpty ? "checkmark.shield.fill" : "heart.text.square.fill",
-                    accessibilityDescription: visibleResult.statusText
-                )
-                self.healthStatusIcon.contentTintColor = {
-                    switch visibleResult.maxSeverity {
-                    case .critical: return Design.Color.levelCrit
-                    case .warning, .notice: return Design.Color.levelWarn
                     case .info: return Design.Color.levelOK
                     }
                 }()
-                
-                // Мета-информация
                 let count = visibleResult.findings.count
                 let timeFormatted = DateFormatter.localizedString(from: result.analyzedAt, dateStyle: .none, timeStyle: .short)
-                self.healthMetaLabel.stringValue = count > 0
+                let meta = count > 0
                     ? String(format: L("%d рекомендаций · %@"), count, timeFormatted)
                     : String(format: L("Анализ: %@"), timeFormatted)
+                self.healthHero.set(
+                    symbol: visibleResult.findings.isEmpty ? "checkmark.shield.fill" : "heart.text.square.fill",
+                    eyebrow: L("Центр здоровья"),
+                    title: String(verdict),
+                    subtitle: meta,
+                    metric: visibleResult.findings.isEmpty ? "OK" : "\(count)",
+                    tint: heroTint
+                )
                 
                 // Очищаем контейнер
                 self.healthFindingsContainer.arrangedSubviews.forEach { $0.removeFromSuperview() }
                 
                 // Popover — краткая сводка, а не отчёт: только три наиболее важные находки.
-                for finding in visibleResult.findings.prefix(3) {
-                    let card = self.buildAdvisorCard(finding)
-                    self.healthFindingsContainer.addArrangedSubview(card)
+                if visibleResult.findings.isEmpty {
+                    self.healthFindingsContainer.addArrangedSubview(self.healthMessageRow(
+                        symbol: "checkmark.circle.fill",
+                        title: L("Рекомендаций нет"),
+                        detail: L("Сейчас всё выглядит хорошо"),
+                        tint: Design.Color.levelOK
+                    ))
+                } else {
+                    for finding in visibleResult.findings.prefix(3) {
+                        let card = self.buildAdvisorCard(finding)
+                        self.healthFindingsContainer.addArrangedSubview(card)
+                    }
                 }
                 if visibleResult.findings.count > 3 {
                     let more = NSTextField(labelWithString: String(
@@ -2495,19 +2590,16 @@ final class PopoverController: NSViewController {
     private func buildHardwareTile() -> NSView {
         // ватты CPU/GPU/DRAM приходят из хелпера; температуры/вентиляторы/нагрузка — без него.
         comp = [:]
-        hardwareStatus.font = Design.Font.caption
-        hardwareStatus.textColor = .secondaryLabelColor
-        hardwareStatus.alignment = .right
-        hardwareStatus.lineBreakMode = .byTruncatingTail
-        hardwareStatus.translatesAutoresizingMaskIntoConstraints = false
-        let title = Self.sectionLabel(L("Обзор"))
-        let titleRow = NSStackView(views: [title, spacer(), hardwareStatus])
-        titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.translatesAutoresizingMaskIntoConstraints = false
-        titleRow.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        hardwareHero.set(
+            symbol: "cpu",
+            eyebrow: L("Тепловая картина"),
+            title: L("Собираем данные датчиков"),
+            subtitle: L("Температуры · частоты · охлаждение"),
+            tint: Design.Color.accent(isDark),
+            animated: false
+        )
         let sensorsTitle = Self.sectionLabel(L("Датчики"))
-        let hw: [NSView] = [titleRow, gpuStatusView(), sensorsTitle, sensorsView,
+        let hw: [NSView] = [hardwareHero, gpuStatusView(), sensorsTitle, sensorsView,
                             compStatus, installBtn]
         return glassTile(vstack(hw, 8), fill: true)
     }
@@ -2536,7 +2628,30 @@ final class PopoverController: NSViewController {
         // execute is misleading and used to produce serviceUnavailable on
         // every click from the popover.
         GPUController.shared.refreshServiceState()
-        guard GPUController.shared.canSwitch else { return gpuLine }
+        guard GPUController.shared.canSwitch else {
+            let approvalRequired: Bool
+            if case .approvalRequired = GPUController.shared.serviceState {
+                approvalRequired = true
+            } else {
+                approvalRequired = false
+            }
+            let setup = GlassButton(
+                title: approvalRequired
+                    ? L("Разрешить переключение графики…")
+                    : L("Подключить переключение графики…"),
+                symbol: approvalRequired ? "checkmark.shield" : "gearshape"
+            )
+            setup.onClick = {
+                if approvalRequired {
+                    MacSystemSettings.openLoginItems()
+                } else {
+                    SettingsCoordinator.open(section: "cooling")
+                }
+            }
+            setup.translatesAutoresizingMaskIntoConstraints = false
+            setup.widthAnchor.constraint(equalToConstant: IW).isActive = true
+            return vstack([gpuLine, setup], 6)
+        }
 
         // Компактный селектор: Встроенная / Дискретная / Авто.
         let labels = GPUMode.allCases.map { $0.shortTitle }
@@ -2897,7 +3012,14 @@ final class PopoverController: NSViewController {
         latestAdvisorBattery = b
         latestAdvisorEnergy = e
         latestAdvisorSensors = sensors
-        flowView.update(e, components: c, hasBattery: b.present)
+        flowView.update(
+            e,
+            components: c,
+            hasBattery: b.present,
+            batteryCharge: b.present ? b.charge : nil,
+            externalPower: b.present ? b.external : nil,
+            batteryCharging: b.present ? b.charging : nil
+        )
         var feed = FlowInfoBar.Feed()
         feed.hasBattery = b.present
         feed.cycleCount = b.cycleCount
@@ -2905,6 +3027,8 @@ final class PopoverController: NSViewController {
         feed.capacityWh = b.capacityWh
         feed.onBattery = b.present && !e.plugged
         feed.topApp = appsLast.first?.name
+        feed.screenBrightness = e.screenBrightness
+        feed.brightnessDelta = e.brightnessDelta
         flowInfoBar.update(feed)
         // (V6: термосводка удалена — строка под схемой несёт только живой разбор под курсором)
         applyThermalLabel()
@@ -2917,10 +3041,14 @@ final class PopoverController: NSViewController {
 
         // Сенсоры раз в тик — ЕДИНЫЙ источник и для витальных ячеек, и для вкладки «Железо»
         // (раньше снимок брался ниже, а «Темп» кормилась из e.cpuTemp=TC0P — иного датчика, чем герой).
-        // Витальные Ватт/Темп/Кулер + спарклайн НЕ зависят от наличия АКБ — обновляем всегда
+        // Витальные CPU/Темп/Кулер/RAM + спарклайн НЕ зависят от наличия АКБ — обновляем всегда
         // (десктоп без батареи иначе оставался бы с пустой полосой и мёртвым графом навсегда;
         //  и разовый провал чтения батареи не должен замораживать расход/термику).
-        statSysVal.stringValue = e.systemWatts > 0.1 ? String(format: "%.0f", e.systemWatts) : "—"  // нет замера → «—», не фейковый «0»
+        // Единственный общий ватт теперь живёт во вкладке «Питание». В шапке показываем
+        // универсальную нагрузку CPU — она доступна без SMC/powermetrics и не спорит с энергобалансом.
+        let cpuLoad = sensors.loads.first(where: { $0.id == "cpuload" })?.value
+            ?? SystemUsage.shared.cpuHistory.last
+        statSysVal.stringValue = cpuLoad.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
         statSysVal.textColor = .labelColor
         let cpuTempSensor = sensors.temps.first { $0.id == "cpu" }        // тот же PECI-датчик, что и герой «Железа»
         statTempVal.stringValue = cpuTempSensor.map { String(format: "%.0f°", $0.value) } ?? "—"
@@ -2932,13 +3060,10 @@ final class PopoverController: NSViewController {
         graph.accentColor = chargeAccent        // спарклайн всегда бренд-бирюза (состояние несёт кольцо)
         graph.setHistory(history)
 
-        // «АКБ» — знак берём из СТАБИЛЬНОГО battFlow (гистерезис), а не из сырого b.charging: иначе
-        // на удержании лимита/кратком спайке B0AP выдавал фантомный «−N», противореча схеме Питания.
-        switch b.present ? e.battFlow : .idle {
-        case .charging:    statBatVal.stringValue = String(format: "+%.0f", e.battWatts); statBatVal.textColor = chargeAccent
-        case .discharging: statBatVal.stringValue = "\u{2212}" + String(format: "%.0f", e.battWatts); statBatVal.textColor = .labelColor
-        case .idle:        statBatVal.stringValue = b.present ? "0" : "—"; statBatVal.textColor = .labelColor
-        }
+        let ramLoad = sensors.loads.first(where: { $0.id == "ramload" })?.value
+            ?? SystemUsage.shared.ramHistory.last
+        statBatVal.stringValue = ramLoad.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
+        statBatVal.textColor = .labelColor
 
         if b.present {
             // «Спокойный прибор»: кольцо несёт ТОЛЬКО состояние ЗАРЯДА — тепло живёт в ячейке «Темп» и в
@@ -2983,7 +3108,7 @@ final class PopoverController: NSViewController {
                 statusSub.stringValue = validMin(b.timeToEmpty).map { String(format: L("ещё %@"), fmtHM($0)) }
                     ?? String(format: L("АКБ %.0f°"), b.temperature)
             }
-            // (Ватт/Темп/Кулер/АКБ + спарклайн уже обновлены ВЫШЕ — не зависят от батарейной ветки.)
+            // (CPU/Темп/Кулер/RAM + спарклайн уже обновлены ВЫШЕ — не зависят от батарейной ветки.)
 
             metric["Здоровье"]?.stringValue = String(format: "%.0f%%", b.health)
             // Здоровье = один канонический дом (из футера Flow здоровье убрано в L4). >100% делаем
@@ -3044,6 +3169,34 @@ final class PopoverController: NSViewController {
             }
             hardwareStatus.textColor = Design.Color.levelCrit
         }
+        let hardwareTitle: String
+        let hardwareSubtitle: String
+        let hardwareTint: NSColor
+        let hardwareSymbol: String
+        switch hardwareSignal.level {
+        case .ok:
+            hardwareTitle = hardwareSignal.sensor == nil ? L("Собираем данные датчиков") : L("Температуры в норме")
+            hardwareTint = hardwareSignal.sensor == nil ? Design.Color.accent(isDark) : Design.Color.levelOK
+            hardwareSymbol = hardwareSignal.sensor == nil ? "cpu" : "thermometer.medium"
+        case .warn:
+            hardwareTitle = L("Высокая температура")
+            hardwareTint = Design.Color.levelWarn
+            hardwareSymbol = "thermometer.high"
+        case .crit:
+            hardwareTitle = L("Перегрев")
+            hardwareTint = Design.Color.levelCrit
+            hardwareSymbol = "thermometer.sun.fill"
+        }
+        hardwareSubtitle = hardwareSignal.sensor?.name
+            ?? L("Температуры · частоты · охлаждение")
+        hardwareHero.set(
+            symbol: hardwareSymbol,
+            eyebrow: L("Тепловая картина"),
+            title: hardwareTitle,
+            subtitle: hardwareSubtitle,
+            metric: hardwareSignal.sensor?.text,
+            tint: hardwareTint
+        )
         // живая смена GPU (дискретная↔встроенная) — перекрашиваем строку, пока видна вкладка «Железо»
         if currentTab < tabOrder.count, tabOrder[currentTab] == "hardware" { paintGPU() }
         refreshAppsUpdatedLabel()      // «обновлено N с назад» в футере Приложений тикает каждую секунду
@@ -3108,7 +3261,7 @@ final class PopoverController: NSViewController {
         let critCharge = b.present && !b.charging && b.charge <= 15      // как кольцо/алерты: критический заряд
         // «Спокойный прибор» (совет по дизайну): ни высокий расход (40–70 Вт норма на ноуте), ни forced-кулеры
         // (у владельца с fan-кривой это ПОСТОЯННО) — НЕ фолт. Вердикт-warn остаётся ТОЛЬКО за реальной жарой
-        // (Греется/Перегрев) → кольцо амбер редко и честно; ватты/обороты видны информативно в витальных.
+        // (Греется/Перегрев) → кольцо амбер редко и честно; температура/обороты видны в витальных.
 
         // worst-of: сначала crit, затем warn, иначе ok. КАПСУЛА = короткое слово (никогда не «…»),
         // ТУЛТИП (detail) = полная фраза с цифрой/сенсором — наведение раскрывает деталь (фикс «скрыто, наводишь — пусто»).
@@ -5098,11 +5251,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if let t = menuBarExtraToken(id, b, energy) { cells.append((id, t)) }
             }
             // подпись включает флаг иконок И стиль — переключение обязано перерисовать картинку
-            let sig = "combined|\(icons ? "i" : "t")|\(SettingsStore.menuBarIconStyle)|" + cells.map { $0.token }.joined(separator: "|")
+            let sig = "combined|\(icons ? "i" : "t")|\(SettingsStore.menuBarIconStyle)|\(SettingsStore.mainIconStyle)|\(prim.imgKey)|"
+                + cells.map { $0.token }.joined(separator: "|")
             if sig != lastMenuTitle {
                 lastMenuTitle = sig
                 lastMenuImgKey = "combined"
-                btn.image = combinedMenuImage(cells, icons: icons)
+                btn.image = combinedMenuImage(cells, icons: icons, primaryImage: prim.image)
                 btn.imagePosition = .imageOnly
                 btn.attributedTitle = NSAttributedString(string: "")
             }
@@ -5135,7 +5289,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// во время зарядки и не запускает повторное чтение железа.
     private func advanceStatusAnimation() {
         guard SettingsStore.menuBarMotion, !Motion.reduced,
-              !SettingsStore.menuBarCombined,
               SettingsStore.menuBarMode == "battery",
               lastStatusBattery.present, lastStatusBattery.charging,
               SettingsStore.mainIconStyle == "kelvin" || SettingsStore.mainIconStyle == "ring",
@@ -5339,12 +5492,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// цвет нагрузки — корректный размен ради чёткого OS-тинта.
     /// При icons=true перед значением рисуется ведущий SF-глиф; ширину ячейки расширяем РОВНО на измеренную
     /// ширину глифа+зазор, чтобы инвариант «строка не дёргается» сохранялся.
-    private func combinedMenuImage(_ cells: [(id: String?, token: String)], icons: Bool) -> NSImage {
+    private func combinedMenuImage(
+        _ cells: [(id: String?, token: String)],
+        icons: Bool,
+        primaryImage: NSImage? = nil
+    ) -> NSImage {
         let font = Design.Font.mono(13, .semibold)
         let h: CGFloat = 22, padX: CGFloat = 5, gap: CGFloat = 8, iconGap: CGFloat = 3
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
         // глиф ячейки (если иконки включены и для id есть символ) + его картинка/ширина
-        func glyph(_ id: String?) -> (img: NSImage, w: CGFloat)? {
+        func glyph(_ id: String?, at index: Int) -> (img: NSImage, w: CGFloat)? {
+            if icons, index == 0, let primaryImage {
+                return (primaryImage, ceil(primaryImage.size.width))
+            }
             guard icons, let id = id, let img = menuBarGlyph(forID: id) else { return nil }
             return (img, ceil(img.size.width))
         }
@@ -5360,7 +5520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             let b = (probe as NSString).size(withAttributes: attrs).width
             return ceil(max(a, b))
         }
-        let glyphs = cells.map { glyph($0.id) }
+        let glyphs = cells.enumerated().map { glyph($0.element.id, at: $0.offset) }
         let texts = cells.map(text)
         let tWidths = texts.map(textWidth)
         // полная ширина ячейки = глиф + зазор + текст (если глиф есть)

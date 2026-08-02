@@ -1,7 +1,7 @@
 #!/bin/bash
 # Собирает распространяемый DMG из Kelvin.app: перетащи-в-Программы.
-# По умолчанию — функциональный DMG (app + симлинк /Applications + иконка тома), без Finder.
-# STYLE_DMG=1 — дополнительно раскладывает иконки и ставит фон через Finder (для финального релиза).
+# По умолчанию — DMG с оформлением Finder (фон окна, раскладка иконок, иконка тома).
+# STYLE_DMG=0 — отключает Finder-оформление (голое окно, для CI/тестов).
 set -e
 cd "$(dirname "$0")"
 
@@ -18,6 +18,15 @@ echo "→ Готовлю содержимое ($VERSION)…"
 mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
+# Деинсталлятор старой версии — как .command (двойной клик → Terminal).
+CMD="Remove old Kelvin.command"
+if [ -f clean-old-version.sh ]; then
+    cp clean-old-version.sh "$STAGE/$CMD"
+    chmod +x "$STAGE/$CMD"
+else
+    echo "  (внимание: clean-old-version.sh не найден — $CMD не добавлен)"
+    CMD=""
+fi
 if [ -f Resources/dmg-bg.png ]; then
     mkdir -p "$STAGE/.background"
     cp Resources/dmg-bg.png "$STAGE/.background/bg.png"
@@ -38,9 +47,15 @@ if [ -f Resources/AppIcon.icns ] && command -v SetFile >/dev/null 2>&1; then
     SetFile -a C "$MNT" 2>/dev/null || true
 fi
 
-# опциональная Finder-стилизация (окно/иконки/фон). Драйвит Finder — поэтому только по флагу.
-if [ "$STYLE_DMG" = "1" ]; then
+# Finder-стилизация (окно/иконки/фон) — по умолчанию. Отключается через STYLE_DMG=0.
+if [ "$STYLE_DMG" != "0" ]; then
     echo "→ Раскладываю окно через Finder…"
+    # позиция деинсталлятора — отдельной строкой, только если он добавлен
+    if [ -n "$CMD" ]; then
+        CMD_POS="set position of item \"$CMD\" of container window to {330, 390}"
+    else
+        CMD_POS=""
+    fi
     osascript <<EOF || echo "  (стилизация пропущена)"
 tell application "Finder"
     tell disk "$VOL"
@@ -48,13 +63,14 @@ tell application "Finder"
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set the bounds of container window to {200, 120, 860, 520}
+        set the bounds of container window to {200, 120, 860, 600}
         set vopts to the icon view options of container window
         set arrangement of vopts to not arranged
         set icon size of vopts to 110
         set background picture of vopts to file ".background:bg.png"
         set position of item "$APP" of container window to {165, 200}
         set position of item "Applications" of container window to {495, 200}
+        $CMD_POS
         update without registering applications
         delay 1
         close

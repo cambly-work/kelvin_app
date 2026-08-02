@@ -1,171 +1,192 @@
 import AppKit
 import QuartzCore
 
-/// Нижняя инфо-полоса вкладки «Поток»: ряд мини-виджетов (CAPS-подпись над моно-числом), каждый —
-/// кликабельный пин/анпин. Дефолт-набор виден всегда; «доступные» добавляются пином. Механика пинов —
-/// точная копия HardwareView.flow→hardware.pinned + fly-to-pin (UserDefaults "flow.pinned"). Полоса
-/// заполняет пустое место под схемой, не раздувая FlowView (отдельный подвью в vstack плитки).
+/// Три спокойных факта под energy scene.
 ///
-/// ЧЕСТНОСТЬ: на десктопе (нет АКБ) батарейные виджеты (циклы/здоровье/время-от-батареи) скрыты —
-/// нечего показывать. Энергия/пик/время — «за сессию», БЕЗ диск-персиста (так подписано в тултипе).
+/// Это контекст расхода, а не ещё одна панель приборов: яркость экрана,
+/// накопленная энергия и наиболее активное приложение.
 final class FlowInfoBar: NSView {
 
-    /// Снимок данных для полосы — собирается хостом раз в тик (battery + session + topApp).
     struct Feed {
         var hasBattery = true
         var cycleCount = 0
-        var health = 0.0          // %
-        var capacityWh = 0.0      // Вт·ч
-        var onBattery = false     // сейчас на батарее (для «время от батареи»)
-        var topApp: String?       // имя главного потребителя (или nil)
+        var health = 0.0
+        var capacityWh = 0.0
+        var onBattery = false
+        var topApp: String?
+        var screenBrightness: Float = -1
+        var brightnessDelta: Float = 0
     }
 
-    /// Каждый виджет — id + локализованный caps-заголовок + замыкание-значение (живое, читается в render).
-    private struct Widget {
-        let id: String
-        let cap: () -> String
-        let value: () -> String?           // nil → виджет недоступен сейчас (на десктопе и т.п.) → не показываем
-        let needsBattery: Bool
-    }
+    var detailSink: ((String?) -> Void)?
 
     private final class Cell: NSView {
         let id: String
-        let cap = CATextLayer()
-        let val = CATextLayer()
-        var onClick: ((String) -> Void)?
+        let icon = CALayer()
+        let caption = CATextLayer()
+        let value = CATextLayer()
         var onHover: ((String?) -> Void)?
-        var axLabel = ""
-        var pinned = false
-        private let scale: CGFloat = 2
+        var detail = ""
+
+        private var hovering = false
+        private var tracking: NSTrackingArea?
+
         init(id: String) {
             self.id = id
             super.init(frame: .zero)
             wantsLayer = true
-            layer?.cornerRadius = Design.Radius.infoBar; layer?.cornerCurve = .continuous; layer?.masksToBounds = false   // B3: было 7
-            // V6: пары весов зеркалят узлы схемы (имя 9 regular / число моно-12 semibold) —
-            // одноранговые элементы вкладки набраны ОДНОЙ парой, а не двумя
-            cap.contentsScale = scale; cap.alignmentMode = .center; cap.truncationMode = .end
-            cap.font = NSFont.systemFont(ofSize: 9, weight: .regular); cap.fontSize = 9
-            val.contentsScale = scale; val.alignmentMode = .center; val.truncationMode = .end
-            val.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold); val.fontSize = 12
-            layer?.addSublayer(cap); layer?.addSublayer(val)
-            focusRingType = .default
-            applyResolvedColors()
+            layer?.cornerRadius = 11
+            layer?.cornerCurve = .continuous
+            icon.contentsGravity = .resizeAspect
+            layer?.addSublayer(icon)
+            layer?.addSublayer(caption)
+            layer?.addSublayer(value)
+            applyTypography()
+            restyle()
         }
-        required init?(coder: NSCoder) { fatalError() }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
         override var isFlipped: Bool { true }
-        private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+
+        private var isDark: Bool {
+            effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }
+
         private func resolved(_ color: NSColor) -> NSColor {
             Design.Color.resolved(color, dark: isDark)
         }
-        private func applyResolvedColors() {
-            cap.foregroundColor = resolved(.secondaryLabelColor).cgColor
-            val.foregroundColor = resolved(.labelColor).cgColor
+
+        private func applyTypography() {
+            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+            caption.font = NSFont.systemFont(ofSize: 8.5, weight: .medium)
+            caption.fontSize = 8.5
+            caption.contentsScale = scale
+            caption.truncationMode = .end
+            caption.foregroundColor = resolved(.tertiaryLabelColor).cgColor
+
+            value.font = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+            value.fontSize = 10.5
+            value.contentsScale = scale
+            value.truncationMode = .end
+            value.foregroundColor = resolved(.labelColor).cgColor
+            icon.contentsScale = scale
         }
-        override func viewDidChangeEffectiveAppearance() {
-            super.viewDidChangeEffectiveAppearance()
-            applyResolvedColors()
-        }
+
         override func layout() {
             super.layout()
-            let w = bounds.width, h = bounds.height
-            cap.frame = CGRect(x: 2, y: 4, width: w - 4, height: 11)
-            val.frame = CGRect(x: 2, y: h - 18, width: w - 4, height: 15)
+            icon.frame = CGRect(x: 9, y: 9, width: 13, height: 13)
+            caption.frame = CGRect(x: 27, y: 9, width: bounds.width - 35, height: 12)
+            value.frame = CGRect(x: 9, y: 29, width: bounds.width - 18, height: 15)
         }
-        func set(cap c: String, value v: String, pinned: Bool, tint: NSColor) {
-            self.pinned = pinned
-            // V6 де-КАПС: обычный регистр без трекинга — последний остаточный КАПС вкладки снят
-            // (закон «подписи обычным регистром»); ранг серого = secondaryLabel (один на все подписи).
-            cap.string = NSAttributedString(string: c,
-                attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                             .foregroundColor: pinned ? tint : resolved(.secondaryLabelColor)])
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            val.foregroundColor = resolved(.labelColor).cgColor
-            val.string = v
-            CATransaction.commit()
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            applyTypography()
+            restyle()
         }
+
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
-            trackingAreas.forEach(removeTrackingArea)
-            addTrackingArea(NSTrackingArea(rect: bounds,
-                options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect], owner: self))
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                owner: self
+            )
+            addTrackingArea(area)
+            tracking = area
         }
-        override func mouseEntered(with e: NSEvent) { setHover(true); onHover?(id) }
-        override func mouseExited(with e: NSEvent) { setHover(false); onHover?(nil) }
-        override func mouseDown(with e: NSEvent) { onClick?(id) }
-        private func setHover(_ on: Bool) {
-            CATransaction.begin(); CATransaction.setAnimationDuration(Motion.reduced ? 0 : Design.Motion.durFast)
-            layer?.backgroundColor = on ? Design.Color.accent(isDark).withAlphaComponent(isDark ? 0.10 : 0.12).cgColor
-                                        : NSColor.clear.cgColor
+
+        override func mouseEntered(with event: NSEvent) {
+            hovering = true
+            restyle(animated: true)
+            onHover?(id)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            hovering = false
+            restyle(animated: true)
+            onHover?(nil)
+        }
+
+        func set(caption captionText: String, value valueText: String, symbol: String, tint: NSColor, detail: String) {
+            caption.string = captionText
+            value.string = valueText
+            value.foregroundColor = resolved(valueText == "—" ? .tertiaryLabelColor : .labelColor).cgColor
+            icon.contents = Self.symbol(symbol, color: tint, pointSize: 12)
+            self.detail = detail
+            setAccessibilityLabel(captionText + " " + valueText)
+            toolTip = detail
+        }
+
+        private func restyle(animated: Bool = false) {
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(animated && !Motion.reduced ? Design.Motion.durFast : 0)
+            let base = isDark ? NSColor.white.withAlphaComponent(0.032) : NSColor.black.withAlphaComponent(0.022)
+            let hover = Design.Color.accent(isDark).withAlphaComponent(isDark ? 0.10 : 0.075)
+            layer?.backgroundColor = (hovering ? hover : base).cgColor
+            layer?.borderWidth = 0.5
+            layer?.borderColor = (hovering
+                ? Design.Color.accent(isDark).withAlphaComponent(0.28)
+                : (isDark ? NSColor.white.withAlphaComponent(0.075) : NSColor.black.withAlphaComponent(0.055))).cgColor
             CATransaction.commit()
         }
-        override var acceptsFirstResponder: Bool { true }
-        override func becomeFirstResponder() -> Bool { onHover?(id); return true }
-        override func keyDown(with e: NSEvent) {
-            if e.keyCode == 49 || e.keyCode == 36 { onClick?(id) } else { super.keyDown(with: e) }
-        }
-        override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: Design.Radius.infoBar, yRadius: Design.Radius.infoBar).fill() }   // B3: было 7
-        override var focusRingMaskBounds: NSRect { bounds }
+
         override func isAccessibilityElement() -> Bool { true }
-        override func accessibilityRole() -> NSAccessibility.Role? { .button }
-        override func accessibilityLabel() -> String? {
-            axLabel + " · " + (pinned ? L("открепить") : L("закрепить"))
+        override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
+
+        private static func symbol(_ name: String, color: NSColor, pointSize: CGFloat) -> CGImage? {
+            guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+            let configuration: NSImage.SymbolConfiguration
+            if #available(macOS 12, *) {
+                configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+                    .applying(.init(paletteColors: [color]))
+            } else {
+                configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+            }
+            let image = base.withSymbolConfiguration(configuration) ?? base
+            var rect = CGRect(origin: .zero, size: image.size)
+            return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
         }
-        override func accessibilityPerformPress() -> Bool { onClick?(id); return true }
     }
 
-    /// Разбор наведённого виджета — для подписи под схемой (тот же сток, что у узлов).
-    var detailSink: ((String?) -> Void)?
-
     private var feed = Feed()
-    private var cells: [String: Cell] = [:]
     private let row = NSStackView()
-    /// pinned = id опциональных виджетов, добавленных ПОВЕРХ дефолта (как hardware.pinned).
-    private var pinned: [String] = (UserDefaults.standard.array(forKey: "flow.pinned") as? [String]) ?? []
-    private var hovered: String?
+    private let brightnessCell = Cell(id: "brightness")
+    private let energyCell = Cell(id: "energy")
+    private let topAppCell = Cell(id: "topapp")
+    private var hoveredID: String?
 
-    // дефолт-набор (виден всегда) + доступные (по пину).
-    // Дедуп (L4): ЦИКЛЫ/ЗДОРОВЬЕ убраны из дефолта — они дублируют консоль батареи, а здоровье>100%
-    // должно жить в ОДНОМ доме (батарея-дриллдаун). Взамен в дефолт — «Потребитель» (топ-приложение
-    // по расходу): высокий ватт становится действенным прямо тут (инлайн-виновник из брифа). Циклы/
-    // здоровье остаются доступны по пину.
-    private let defaultIDs = ["uptime", "energy", "topapp"]
-    private let optionalIDs = ["cycles", "health", "peaktemp", "onbattery"]
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        commonInit()
+    }
 
-    private lazy var widgets: [String: Widget] = [
-        "uptime": Widget(id: "uptime", cap: { L("Аптайм") }, value: { Self.uptimeStr() }, needsBattery: false),
-        "cycles": Widget(id: "cycles", cap: { L("Циклы") },
-            value: { [weak self] in self.map { String($0.feed.cycleCount) } }, needsBattery: true),
-        "health": Widget(id: "health", cap: { L("Здоровье") },
-            value: { [weak self] in self.map { String(format: "%.0f%%", $0.feed.health) } }, needsBattery: true),
-        "energy": Widget(id: "energy", cap: { L("За сессию") },
-            // мёртвый ноль честнее тире: «0.0 Вт·ч» на видном месте читался как сломанный счётчик
-            value: { SessionEnergy.wattHours < 0.1 ? "—" : String(format: L("%.1f Вт·ч"), SessionEnergy.wattHours) },
-            needsBattery: false),
-        "peaktemp": Widget(id: "peaktemp", cap: { L("Пик °C") },
-            value: { SessionEnergy.peakTemp.map { String(format: "%.0f°", $0) } }, needsBattery: false),
-        "onbattery": Widget(id: "onbattery", cap: { L("От батареи") },
-            value: { Self.durStr(SessionEnergy.onBatterySeconds) }, needsBattery: true),
-        "topapp": Widget(id: "topapp", cap: { L("Потребитель") },
-            // честное «—» до первого замера ВМЕСТО скрытия: иначе колонки полосы прыгали
-            // по центрам, когда виджет появлялся со вторым тиком
-            value: { [weak self] in self.flatMap { $0.feed.topApp } ?? "—" }, needsBattery: false),
-    ]
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
 
-    override init(frame: NSRect) { super.init(frame: frame); commonInit() }
-    required init?(coder: NSCoder) { super.init(coder: coder); commonInit() }
-    override var isFlipped: Bool { true }
-    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { L("Сводка за сессию") }
 
+    private var isDark: Bool {
+        effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
     private func commonInit() {
-        wantsLayer = true; layer?.masksToBounds = false
+        wantsLayer = true
         row.orientation = .horizontal
         row.distribution = .fillEqually
-        row.spacing = 2
+        row.spacing = 7
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
+        for cell in [brightnessCell, energyCell, topAppCell] {
+            cell.translatesAutoresizingMaskIntoConstraints = false
+            cell.onHover = { [weak self] id in self?.hover(id) }
+            row.addArrangedSubview(cell)
+        }
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor),
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -174,103 +195,69 @@ final class FlowInfoBar: NSView {
         ])
     }
 
-    /// id виджетов в текущем порядке: дефолт + закреплённые (только доступные сейчас).
-    private func activeIDs() -> [String] {
-        var ids = defaultIDs + pinned.filter { optionalIDs.contains($0) }
-        // на десктопе батарейные виджеты опускаем честно
-        if !feed.hasBattery { ids = ids.filter { !(widgets[$0]?.needsBattery ?? false) } }
-        // у недоступных значений (nil) виджет тоже не показываем (например topApp ещё не пришёл)
-        return ids.filter { widgets[$0]?.value() != nil }
+    func update(_ newFeed: Feed) {
+        feed = newFeed
+        let accent = Design.Color.accent(isDark)
+
+        let brightnessAvailable = newFeed.screenBrightness.isFinite && newFeed.screenBrightness >= 0
+        let brightness = brightnessAvailable
+            ? "\(Int((min(1, newFeed.screenBrightness) * 100).rounded()))%"
+            : "—"
+        let brightnessTrend: String
+        if newFeed.brightnessDelta > 0.02 { brightnessTrend = L("Растёт") }
+        else if newFeed.brightnessDelta < -0.02 { brightnessTrend = L("Снижается") }
+        else { brightnessTrend = L("Стабильно") }
+        brightnessCell.set(
+            caption: L("Экран"),
+            value: brightness,
+            symbol: "sun.max.fill",
+            tint: brightnessAvailable ? .systemYellow : Design.Color.resolved(.tertiaryLabelColor, dark: isDark),
+            detail: brightness == "—"
+                ? L("Яркость экрана недоступна")
+                : L("Яркость экрана") + " · " + brightness + " · " + brightnessTrend
+        )
+
+        let app = newFeed.topApp?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let appText = (app?.isEmpty == false) ? app! : "—"
+        topAppCell.set(
+            caption: L("Потребитель"),
+            value: appText,
+            symbol: "app.fill",
+            tint: accent,
+            detail: appText == "—" ? L("Ждём первый снимок приложений") : L("Активнее всего сейчас") + " · " + appText
+        )
+
+        let energy = SessionEnergy.wattHours >= 0.1
+            ? String(format: L("%.1f Вт·ч"), SessionEnergy.wattHours)
+            : "—"
+        energyCell.set(
+            caption: L("За сессию"),
+            value: energy,
+            symbol: "bolt.fill",
+            tint: accent,
+            detail: energy == "—" ? L("Собираем расход за текущую сессию") : L("Энергия за текущую сессию") + " · " + energy
+        )
+
+        if hoveredID != nil { emitDetail() }
     }
 
-    /// Хост подаёт свежий снимок раз в тик — пересобираем ряд, если состав сменился, иначе обновляем значения.
-    func update(_ f: Feed) {
-        feed = f
-        let ids = activeIDs()
-        let want = Set(ids)
-        // создаём недостающие ячейки, прячем лишние
-        for id in ids where cells[id] == nil {
-            let c = Cell(id: id)
-            c.translatesAutoresizingMaskIntoConstraints = false
-            c.onClick = { [weak self] in self?.togglePin($0) }
-            c.onHover = { [weak self] in self?.setHover($0) }
-            cells[id] = c
-        }
-        // перестроить порядок стека под ids (дёшево — ≤7 вью)
-        let current = row.arrangedSubviews.compactMap { ($0 as? Cell)?.id }
-        if current != ids {
-            row.arrangedSubviews.forEach { row.removeArrangedSubview($0); $0.removeFromSuperview() }
-            for id in ids { if let c = cells[id] { row.addArrangedSubview(c) } }
-        }
-        let pinnedSet = Set(pinned)
-        let tint = Design.Color.accent(isDark)
-        for id in ids {
-            guard let c = cells[id], let w = widgets[id], let v = w.value() else { continue }
-            c.set(cap: w.cap(), value: v, pinned: pinnedSet.contains(id), tint: tint)
-            c.axLabel = w.cap() + " " + v
-        }
-        _ = want   // (порядок уже синхронизирован выше)
-        // эмитим ТОЛЬКО когда курсор реально над ячейкой полосы: безусловный emitDetail() слал nil
-        // в ОБЩИЙ flowDetail-сток каждый тик и стирал живой разбор узла схемы под курсором
-        if hovered != nil { emitDetail() }
+    private func hover(_ id: String?) {
+        hoveredID = id
+        emitDetail()
     }
 
-    private func togglePin(_ id: String) {
-        guard optionalIDs.contains(id) || pinned.contains(id) else {
-            // тап по ДЕФОЛТ-виджету — даём «доступные» добавить через… сам дефолт не пинуется/анпинуется.
-            // Семантика: дефолт всегда виден; пином управляются только опциональные.
+    private func emitDetail() {
+        guard let hoveredID else {
+            detailSink?(nil)
             return
         }
-        if let i = pinned.firstIndex(of: id) { pinned.remove(at: i) }
-        else { pinned.append(id); flyToPin(id) }
-        UserDefaults.standard.set(pinned, forKey: "flow.pinned")
-        update(feed)
-    }
-
-    /// fly-to-pin: дубль-ячейки летит на её место (клон HardwareView.flyToPin). Под reduced — мгновенно.
-    private func flyToPin(_ id: String) {
-        guard !Motion.reduced, let c = cells[id], let host = layer else { return }
-        let ghost = CALayer()
-        ghost.frame = c.frame.isEmpty ? bounds : c.frame
-        ghost.backgroundColor = Design.Color.accent(isDark).withAlphaComponent(0.18).cgColor
-        ghost.cornerRadius = Design.Radius.infoBar   // B3: было 7 (совпадает со скруглением капсулы-источника)
-        host.addSublayer(ghost)
-        let a = CABasicAnimation(keyPath: "transform.scale")
-        a.fromValue = 0.6; a.toValue = 1.0
-        a.duration = Design.Motion.durBase
-        a.timingFunction = Design.Motion.overshoot
-        let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0.7; fade.toValue = 0
-        fade.duration = Design.Motion.durBase
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { ghost.removeFromSuperlayer() }
-        ghost.opacity = 0
-        ghost.add(a, forKey: "fly"); ghost.add(fade, forKey: "fade")
-        CATransaction.commit()
-    }
-
-    private func setHover(_ id: String?) {
-        guard id != hovered else { return }
-        hovered = id; emitDetail()
-    }
-    private func emitDetail() {
-        guard let id = hovered, let w = widgets[id], let v = w.value() else { detailSink?(nil); return }
-        let hint = optionalIDs.contains(id) ? " · " + (pinned.contains(id) ? L("открепить") : L("закрепить")) : ""
-        let suffix = (id == "energy" || id == "peaktemp" || id == "onbattery") ? " · " + L("за сессию") : ""
-        detailSink?(w.cap() + " · " + v + suffix + hint)
-    }
-
-    // — форматтеры —
-    private static func uptimeStr() -> String? {
-        guard let s = SystemUptime.seconds() else { return nil }
-        return durStr(s)
-    }
-    /// «N дн M ч» / «N ч M мин» / «N мин» — компактно, без лишних нулей.
-    private static func durStr(_ seconds: Double) -> String? {
-        guard seconds >= 0 else { return nil }
-        let total = Int(seconds)
-        let d = total / 86400, h = (total % 86400) / 3600, m = (total % 3600) / 60
-        if d > 0 { return String(format: L("%d дн %d ч"), d, h) }
-        if h > 0 { return String(format: L("%d ч %d мин"), h, m) }
-        return String(format: L("%d мин"), m)
+        let cell: Cell?
+        switch hoveredID {
+        case "brightness": cell = brightnessCell
+        case "topapp": cell = topAppCell
+        case "energy": cell = energyCell
+        default: cell = nil
+        }
+        detailSink?(cell?.detail)
     }
 }

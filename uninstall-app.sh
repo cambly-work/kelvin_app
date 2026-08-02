@@ -2,6 +2,10 @@
 # Удаляет приложение и автозапуск. Хелпер (root-демон) удаляется отдельно:
 #   sudo /Applications/Kelvin.app/Contents/Resources/uninstall-helper.sh
 # Миграция BatteryMeter → Kelvin: подчищаем старый бинарь/агент/бандл под прежним именем.
+#
+# Это точечный деинсталлятор из приложения. Для ПОЛНОЙ чистой переустановки со всеми
+# службами (powerd/fand/privileged + legacy BatteryMeter) и проверками используйте
+# clean-old-version.sh в корне репозитория — единый источник правды для списка целей.
 AGENT="$HOME/Library/LaunchAgents/com.local.batterymeter.plist"
 pkill -x Kelvin 2>/dev/null || true
 pkill -x BatteryMeter 2>/dev/null || true

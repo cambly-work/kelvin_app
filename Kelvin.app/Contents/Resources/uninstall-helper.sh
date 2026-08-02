@@ -1,5 +1,8 @@
 #!/bin/bash
 # Полностью удаляет root-демон powermetrics. Запускать через sudo.
+#
+# Точечный деинсталлятор только для powerd. Полная очистка всех служб Kelvin/BatteryMeter
+# (включая этот) — см. clean-old-version.sh в корне репозитория (единый allowlist целей).
 if [ "$(id -u)" != "0" ]; then
     echo "Запусти через sudo:  sudo \"$0\"" ; exit 1
 fi
