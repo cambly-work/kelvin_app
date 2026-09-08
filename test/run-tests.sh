@@ -16,6 +16,20 @@ else
 fi
 rm -rf "$TMP"
 
+echo "→ URLSession crash uploader (completion-handler compatibility)"
+TMP=$(mktemp -d)
+cp test/units/crash_uploader_session_tests.swift "$TMP/main.swift"
+if xcrun swiftc -O -framework AppKit \
+    Sources/AppConfig.swift Sources/Log.swift Sources/CrashBreadcrumb.swift \
+    Sources/CrashReportSanitizer.swift Sources/CrashReportStore.swift \
+    Sources/CrashReportUploader.swift "$TMP/main.swift" \
+    -o "$TMP/crash-uploader-session" 2>"$TMP/err"; then
+    "$TMP/crash-uploader-session" || fail=1
+else
+    echo "  ✗ не скомпилировался CrashReportUploader session-тест:"; sed 's/^/    /' "$TMP/err"; fail=1
+fi
+rm -rf "$TMP"
+
 echo "→ Юнит-тесты (чистая логика)"
 TMP=$(mktemp -d)
 # fmtRate компилируется с настоящим Sources/NetUsage.swift (тестируем код, не копию)

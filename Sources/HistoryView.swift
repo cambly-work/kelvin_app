@@ -419,7 +419,7 @@ final class HistoryChart: NSView {
         let text = emptyText.isEmpty ? L("Накопление данных") : emptyText
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: NSColor.tertiaryLabelColor
+            .foregroundColor: NSColor.secondaryLabelColor
         ]
         let attributed = NSAttributedString(string: text, attributes: attrs)
         let size = attributed.size()
@@ -497,7 +497,7 @@ final class HistoryChart: NSView {
                 ))
             }
 
-            let fill = line.copy() as! NSBezierPath
+            guard let fill = line.copy() as? NSBezierPath else { continue }
             if let last = segment.last {
                 fill.line(to: NSPoint(
                     x: model.xPosition(last.x),
@@ -537,7 +537,7 @@ final class HistoryChart: NSView {
         ]
         let xAttrs: [NSAttributedString.Key: Any] = [
             .font: xFont,
-            .foregroundColor: NSColor.tertiaryLabelColor
+            .foregroundColor: NSColor.secondaryLabelColor
         ]
 
         for (index, tick) in model.axis.ticks.enumerated() {

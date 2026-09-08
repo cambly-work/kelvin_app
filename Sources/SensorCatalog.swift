@@ -134,8 +134,9 @@ enum SensorCatalog {
     static let curated: [String: String] = [
         // температуры
         "TCXC": "CPU", "TC0P": "CPU корпус",   // TCXC — агрегат PECI (его же берёт первым SensorsModel для героя)
-        "TG0D": "GPU",
-        "TM0P": "Память",
+        "Tp01": "CPU Apple Silicon",
+        "TG0D": "GPU", "Tg05": "GPU Apple Silicon",
+        "TM0P": "Память", "Tm02": "Память Apple Silicon",
         "TPCD": "Платформа",
         "TW0P": "Wi-Fi",
         "TB0T": "Батарея",

@@ -53,6 +53,8 @@ final class SMC {
     // через перечисление по индексу и кэшируем. НЕ дёргать в горячем 1Гц-тике: ~200 syscall'ов.
     private var keyCatalog: [String]?
 
+    // SMCReader компилируется в standalone fand-target (без AppConfig) — литерал bundleID
+    // намеренно дублируется здесь. app-target читает тот же bundleID через AppConfig.
     private static let log = Logger(subsystem: "com.trykelvin.kelvin", category: "SMC")
 
     init() {

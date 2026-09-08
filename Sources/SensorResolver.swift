@@ -127,14 +127,15 @@ enum SensorResolver {
             modelPatterns: ["MacBookAir10,1"],
             architecture: "arm64",
             roles: [
-                // CPU temperature: TCXC/TC0E — ядра, TC0P — корпус.
-                // На M1 Air TCXC может отсутствовать — fallback на TC0P.
-                .cpuTemperature: ["TC0P"],
-                .cpuPackageTemperature: ["TC0P"],
-                // GPU: на M1 SoC GPU интегрирован, отдельного TG0D может не быть.
-                // Используем тот же TC0P как proxy.
-                .gpuTemperature: ["TC0P"],
-                // Battery: TB0T — основной датчик.
+                // Apple Silicon не использует Intel-группу TC* для температур ядер.
+                // M1 публикует CPU как Tp*, GPU как Tg*, память как Tm*; конкретный
+                // набор зависит от варианта SoC, поэтому resolver оставляет только
+                // реально присутствующие и физически валидные ключи каталога.
+                .cpuTemperature: ["Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "Tp0H", "Tp0L", "Tp0P", "Tp0X", "Tp0b"],
+                .cpuPackageTemperature: ["Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "Tp0H", "Tp0L", "Tp0P", "Tp0X", "Tp0b"],
+                .gpuTemperature: ["Tg05", "Tg0D", "Tg0L", "Tg0T"],
+                .memoryTemperature: ["Tm02", "Tm06", "Tm08", "Tm09"],
+                // На части M1 этот ключ отсутствует; отсутствие не превращаем в 0°.
                 .batteryTemperature: ["TB0T"],
             ],
             cooling: .passive
@@ -177,9 +178,58 @@ enum SensorResolver {
         catalog: [CatalogKey],
         readValue: @escaping (String) -> Double?
     ) -> ResolvedSensorSet {
+        // Кеш resolved set: ключи для данной модели практически статичны, но validateKeys
+        // фильтрует по живым значениям (датчик может временно не отвечать). TTL 8с — баланс:
+        // повторные вызовы в рамках одного alert-tick/preview-взаимодействия не пересобирают,
+        // а реальные изменения набора валидных датчиков подхватываются.
+        // Один hw.model недостаточен: SMC может быть временно недоступен, а тестовые/
+        // диагностические readers передают разные каталоги для той же машины.
+        let catalogSignature = catalog
+            .map { "\($0.fourCC):\($0.smcType):\($0.decodable ? 1 : 0)" }
+            .sorted()
+            .joined(separator: "|")
+        cacheLock.lock()
+        let now = Date()
+        if let entry = cacheEntry, now.timeIntervalSince(entry.time) < 8,
+           entry.model == model, entry.architecture == architecture,
+           entry.catalogSignature == catalogSignature {
+            cacheLock.unlock()
+            return entry.set
+        }
+        cacheLock.unlock()
+
+        let result = resolveUncached(model: model, architecture: architecture, catalog: catalog, readValue: readValue)
+        cacheLock.lock()
+        cacheEntry = CacheEntry(
+            set: result,
+            model: model,
+            architecture: architecture,
+            catalogSignature: catalogSignature,
+            time: now
+        )
+        cacheLock.unlock()
+        return result
+    }
+
+    private static let cacheLock = NSLock()
+    private struct CacheEntry {
+        let set: ResolvedSensorSet
+        let model: String
+        let architecture: String
+        let catalogSignature: String
+        let time: Date
+    }
+    private static var cacheEntry: CacheEntry?
+
+    private static func resolveUncached(
+        model: String,
+        architecture: String,
+        catalog: [CatalogKey],
+        readValue: @escaping (String) -> Double?
+    ) -> ResolvedSensorSet {
         let catalogKeys = Set(catalog.map { $0.fourCC })
         let catalogMap = Dictionary(uniqueKeysWithValues: catalog.map { ($0.fourCC, $0) })
-        
+
         // Поиск подходящего маппинга.
         let mapping = findMapping(for: model, architecture: architecture)
         

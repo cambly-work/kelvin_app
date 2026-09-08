@@ -70,21 +70,17 @@ struct CrashUploadConfig {
     )
 }
 
-/// Протокол делегата для уведомлений о статусе загрузки
-protocol CrashUploadDelegate: AnyObject {
-    func uploadQueueDidChange(_ queue: CrashReportUploader)
-    func uploadDidStart(_ item: UploadQueueItem)
-    func uploadDidComplete(_ item: UploadQueueItem, result: Result<String, Error>)
-}
-
 /// Загрузчик отчётов о сбоях с очередью и retry logic
 final class CrashReportUploader {
     static let shared = CrashReportUploader()
-    weak var delegate: CrashUploadDelegate?
-    
+
     private let config: CrashUploadConfig
     private let queue = DispatchQueue(label: "kelvin.crash.uploader", attributes: .concurrent)
     private var uploadQueue: [UploadQueueItem] = []
+    /// Элементы, уже захваченные одним worker, но ещё не зарегистрировавшие URLSessionTask.
+    /// Нужен отдельно от activeTasks: подготовка payload выполняется до создания task и
+    /// без атомарного claim два параллельных processQueueIfNeeded отправляли один отчёт дважды.
+    private var claimedItemIDs: Set<String> = []
     
     private let session: URLSession
     private var activeTasks: [String: URLSessionTask] = [:]
@@ -96,6 +92,18 @@ final class CrashReportUploader {
     var autoSendEnabled: Bool {
         UserDefaults.standard.bool(forKey: "CrashReports.AutoSendEnabled")
     }
+
+    /// Completion-handler dataTask запрещён для background URLSession и падает
+    /// через NSException. Фабрика оставлена internal для regression-теста.
+    static func makeSessionConfiguration(for config: CrashUploadConfig) -> URLSessionConfiguration {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.urlCache = nil
+        sessionConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
+        sessionConfig.timeoutIntervalForRequest = config.requestTimeout
+        sessionConfig.waitsForConnectivity = true
+        sessionConfig.httpMaximumConnectionsPerHost = 2
+        return sessionConfig
+    }
     
     init(
         config: CrashUploadConfig = .default,
@@ -104,15 +112,17 @@ final class CrashReportUploader {
         self.config = config
         self.fileManager = fileManager
         
-        // Настройка URLSession с отдельной конфигурацией
-        let sessionConfig = URLSessionConfiguration.background(withIdentifier: "kelvin.crash.upload")
-        sessionConfig.timeoutIntervalForRequest = config.requestTimeout
-        sessionConfig.waitsForConnectivity = true
-        sessionConfig.httpMaximumConnectionsPerHost = 2
+        // Completion-handler API несовместим с background URLSession и бросает
+        // необрабатываемый NSException уже при создании dataTask. Очередь Kelvin сама
+        // персистентна, поэтому используем ephemeral session без cookies/cache.
+        let sessionConfig = Self.makeSessionConfiguration(for: config)
         self.session = URLSession(configuration: sessionConfig, delegate: nil, delegateQueue: nil)
         
-        // Путь к хранилищу очереди
-        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        // Путь к хранилищу очереди. Guard вместо force-unwrap: в санboxed/edge-кейсах
+        // lookup может вернуть пустой массив; force-unwrap здесь крашнул бы shared init —
+        // т.е. в худший момент (при обработке краша). Fallback на ~/Library/Application Support.
+        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         let kelvinDir = applicationSupport.appendingPathComponent("Kelvin", isDirectory: true)
         let queueDir = kelvinDir.appendingPathComponent("CrashUploadQueue", isDirectory: true)
         try? fileManager.createDirectory(at: queueDir, withIntermediateDirectories: true)
@@ -130,7 +140,7 @@ final class CrashReportUploader {
             guard let self = self else { return }
             
             // Проверяем, нет ли уже такого отчёта в очереди
-            if self.uploadQueue.contains(where: { $0.reportID == reportID && !$0.state.isTerminal }) {
+            if self.uploadQueue.contains(where: { $0.reportID == reportID }) {
                 return
             }
             
@@ -138,9 +148,6 @@ final class CrashReportUploader {
             self.uploadQueue.append(item)
             self.saveQueue()
             
-            DispatchQueue.main.async {
-                self.delegate?.uploadQueueDidChange(self)
-            }
             
             DispatchQueue.global(qos: .utility).async {
                 self.processQueueIfNeeded(force: true)
@@ -159,7 +166,7 @@ final class CrashReportUploader {
     func waitForCompletion(timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if queue.sync(execute: { activeTasks.isEmpty }) { return }
+            if queue.sync(execute: { activeTasks.isEmpty && claimedItemIDs.isEmpty }) { return }
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
     }
@@ -177,12 +184,10 @@ final class CrashReportUploader {
                     task.cancel()
                     self.activeTasks.removeValue(forKey: itemID)
                 }
+                self.claimedItemIDs.remove(itemID)
                 
                 self.saveQueue()
                 
-                DispatchQueue.main.async {
-                    self.delegate?.uploadQueueDidChange(self)
-                }
             }
         }
     }
@@ -212,9 +217,6 @@ final class CrashReportUploader {
             if self.uploadQueue.count != beforeCount {
                 self.saveQueue()
                 
-                DispatchQueue.main.async {
-                    self.delegate?.uploadQueueDidChange(self)
-                }
             }
         }
     }
@@ -231,8 +233,29 @@ final class CrashReportUploader {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             uploadQueue = try decoder.decode([UploadQueueItem].self, from: data)
+            // После завершения процесса background completion-handler восстановить
+            // невозможно. Любой сохранённый .sending — фактически незавершённая попытка;
+            // возвращаем её в retrying, иначе элемент застрянет навсегда.
+            var recoveredInterruptedItem = false
+            for index in uploadQueue.indices where uploadQueue[index].state == .sending {
+                uploadQueue[index].state = .retrying
+                uploadQueue[index].nextRetry = nil
+                recoveredInterruptedItem = true
+            }
+            if recoveredInterruptedItem { saveQueue() }
+
+            // Закрываем маленькое crash-window между сохранением terminal state очереди
+            // и обновлением CrashReportStore. Иначе .failed/.sent мог снова попасть в
+            // queuedReports на следующем запуске и отправиться повторно.
+            for item in uploadQueue where item.state == .sent || item.state == .failed {
+                guard let report = CrashReportStore.report(id: item.reportID) else { continue }
+                try? CrashReportStore.updateState(
+                    for: report.fingerprint,
+                    to: item.state == .sent ? .sent : .failed
+                )
+            }
         } catch {
-            print("Failed to load upload queue: \(error)")
+            Log.app.error("Failed to load upload queue: \(error.localizedDescription, privacy: .public)")
             uploadQueue = []
         }
     }
@@ -245,7 +268,7 @@ final class CrashReportUploader {
             let data = try encoder.encode(uploadQueue)
             try data.write(to: queueStorageURL)
         } catch {
-            print("Failed to save upload queue: \(error)")
+            Log.app.error("Failed to save upload queue: \(error.localizedDescription, privacy: .public)")
         }
     }
     
@@ -260,11 +283,15 @@ final class CrashReportUploader {
             if let nextRetry = item.nextRetry, nextRetry > Date() {
                 continue
             }
-            
-            // Проверяем, нет ли уже активной задачи для этого элемента
-            if activeTasks[item.id] == nil {
-                sendItem(item)
+
+            // Атомарно захватываем элемент ещё ДО санитизации и создания task.
+            // Раздельные check/insert оставляли окно гонки для двух worker'ов.
+            let claimed = queue.sync(flags: .barrier) { () -> Bool in
+                guard activeTasks[item.id] == nil, !claimedItemIDs.contains(item.id) else { return false }
+                claimedItemIDs.insert(item.id)
+                return true
             }
+            if claimed { sendItem(item) }
         }
     }
     
@@ -301,9 +328,6 @@ final class CrashReportUploader {
         // Обновляем состояние
         updateItemState(itemID: item.id, state: .sending)
         
-        DispatchQueue.main.async {
-            self.delegate?.uploadDidStart(item)
-        }
         
         // Создаём запрос
         var request = URLRequest(url: config.endpoint)
@@ -354,10 +378,14 @@ final class CrashReportUploader {
             }
         }
         
-        queue.async(flags: .barrier) { [weak self] in
+        // Регистрируем task в activeTasks СИНХРОННО (под barrier) ДО resume().
+        // Раньше вставка диспатчилась async, а resume() шёл сразу — два вызова
+        // processQueueIfNeeded могли оба пройти alreadyActive-проверку до вставки
+        // и отправить дублирующие POST одного отчёта.
+        queue.sync(flags: .barrier) { [weak self] in
             self?.activeTasks[item.id] = task
         }
-        
+
         task.resume()
     }
     
@@ -377,17 +405,27 @@ final class CrashReportUploader {
             if let index = self.uploadQueue.firstIndex(where: { $0.id == itemID }) {
                 self.uploadQueue[index].retryCount += 1
                 self.uploadQueue[index].lastAttempt = Date()
-                self.uploadQueue[index].nextRetry = Date().addingTimeInterval(300) // 5 минут
-                self.uploadQueue[index].state = .retrying
+                let terminal = self.uploadQueue[index].retryCount >= self.config.maxRetries
+                self.uploadQueue[index].nextRetry = terminal ? nil : Date().addingTimeInterval(300)
+                self.uploadQueue[index].state = terminal ? .failed : .retrying
                 self.uploadQueue[index].errorMessage = "Rate limited by server"
                 self.activeTasks.removeValue(forKey: itemID)
+                self.claimedItemIDs.remove(itemID)
                 self.saveQueue()
-                
-                DispatchQueue.main.async {
-                    self.delegate?.uploadQueueDidChange(self)
+
+                let reportID = self.uploadQueue[index].reportID
+                if let report = CrashReportStore.report(id: reportID) {
+                    try? CrashReportStore.recordSendError(
+                        for: report.fingerprint,
+                        error: "Rate limited by server",
+                        terminal: terminal
+                    )
                 }
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 300) { [weak self] in
-                    self?.processQueueIfNeeded()
+
+                if !terminal {
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 300) { [weak self] in
+                        self?.processQueueIfNeeded()
+                    }
                 }
             }
         }
@@ -401,6 +439,7 @@ final class CrashReportUploader {
                 var item = self.uploadQueue[index]
                 item.retryCount += 1
                 self.activeTasks.removeValue(forKey: itemID)
+                self.claimedItemIDs.remove(itemID)
                 var retryDelay: TimeInterval?
                 
                 if item.retryCount >= self.config.maxRetries {
@@ -421,10 +460,15 @@ final class CrashReportUploader {
                 
                 self.uploadQueue[index] = item
                 self.saveQueue()
-                
-                DispatchQueue.main.async {
-                    self.delegate?.uploadQueueDidChange(self)
+
+                if let report = CrashReportStore.report(id: item.reportID) {
+                    try? CrashReportStore.recordSendError(
+                        for: report.fingerprint,
+                        error: error.localizedDescription,
+                        terminal: item.state == .failed
+                    )
                 }
+
                 
                 // Планируем следующую попытку
                 if let delay = retryDelay {
@@ -454,25 +498,20 @@ final class CrashReportUploader {
     private func markItemSent(itemID: String, serverID: String) {
         queue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
-            
+
             if let index = self.uploadQueue.firstIndex(where: { $0.id == itemID }) {
                 self.uploadQueue[index].state = .sent
                 self.uploadQueue[index].lastAttempt = Date()
                 self.activeTasks.removeValue(forKey: itemID)
+                self.claimedItemIDs.remove(itemID)
                 self.saveQueue()
-                
-                // Обновляем статус в хранилище
+
                 let reportID = self.uploadQueue[index].reportID
+
                 if let report = CrashReportStore.report(id: reportID) {
                     try? CrashReportStore.recordSendSuccess(for: report.fingerprint, serverReportID: serverID)
                 }
-                
-                DispatchQueue.main.async {
-                    if let item = self.uploadQueue[index] as UploadQueueItem? {
-                        self.delegate?.uploadDidComplete(item, result: .success(serverID))
-                    }
-                    self.delegate?.uploadQueueDidChange(self)
-                }
+
             }
         }
     }
@@ -480,20 +519,24 @@ final class CrashReportUploader {
     private func markItemFailed(itemID: String, error: Error) {
         queue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
-            
+
             if let index = self.uploadQueue.firstIndex(where: { $0.id == itemID }) {
                 self.uploadQueue[index].state = .failed
                 self.uploadQueue[index].errorMessage = error.localizedDescription
                 self.uploadQueue[index].lastAttempt = Date()
                 self.activeTasks.removeValue(forKey: itemID)
+                self.claimedItemIDs.remove(itemID)
                 self.saveQueue()
-                
-                DispatchQueue.main.async {
-                    if let item = self.uploadQueue[index] as UploadQueueItem? {
-                        self.delegate?.uploadDidComplete(item, result: .failure(error))
-                    }
-                    self.delegate?.uploadQueueDidChange(self)
+
+                let reportID = self.uploadQueue[index].reportID
+                if let report = CrashReportStore.report(id: reportID) {
+                    try? CrashReportStore.recordSendError(
+                        for: report.fingerprint,
+                        error: error.localizedDescription,
+                        terminal: true
+                    )
                 }
+
             }
         }
     }

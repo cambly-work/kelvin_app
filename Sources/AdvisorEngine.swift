@@ -364,7 +364,7 @@ final class AdvisorEngine {
             category: .battery,
             severity: severity,
             title: L("Батарея нагревается"),
-            explanation: String(format: L("Температура батареи %.0f°C может ускорять износ."), temp),
+            explanation: L("Высокая температура ускоряет износ батареи."),
             metric: String(format: "%.0f°C", temp),
             action: action,
             detailsDestination: "power"
@@ -425,7 +425,7 @@ final class AdvisorEngine {
             category: .battery,
             severity: .notice,
             title: L("Постоянная зарядка"),
-            explanation: L("Mac долго подключён к сети на 100%. Лимит 80% продлит жизнь батареи."),
+            explanation: L("Лимит 80% поможет снизить износ батареи."),
             metric: "\(charge)%",
             action: s.chargeHelperInstalled ? .enableChargeLimit(percent: 80) : nil,
             detailsDestination: "power"
@@ -455,7 +455,7 @@ final class AdvisorEngine {
             category: .thermal,
             severity: severity,
             title: L("Высокая температура CPU"),
-            explanation: String(format: L("CPU нагрелся до %.0f°C. Проверьте нагрузку и вентиляцию."), temp),
+            explanation: L("Проверьте нагрузку и вентиляцию."),
             metric: String(format: "%.0f°C", temp),
             action: action,
             detailsDestination: nil  // Откроет раздел температур в popover
@@ -481,7 +481,7 @@ final class AdvisorEngine {
             category: .thermal,
             severity: severity,
             title: L("Высокая температура GPU"),
-            explanation: String(format: L("GPU нагрелся до %.0f°C. Проверьте нагрузку и вентиляцию."), temp),
+            explanation: L("Проверьте нагрузку и вентиляцию."),
             metric: String(format: "%.0f°C", temp),
             action: action,
             detailsDestination: nil
@@ -510,8 +510,8 @@ final class AdvisorEngine {
             category: .storage,
             severity: severity,
             title: L("Мало места на диске"),
-            explanation: String(format: L("Свободно %.1f ГБ (%.0f%%). Освободите место для стабильной работы."), freeGB, freePercent),
-            metric: String(format: "%.1f ГБ", freeGB),
+            explanation: L("Освободите место для стабильной работы."),
+            metric: String(format: "%.1f %@ · %.0f%%", freeGB, L("ГБ"), freePercent),
             action: .openSettings(section: "maintenance"),
             detailsDestination: "maintenance"
         )
@@ -533,7 +533,7 @@ final class AdvisorEngine {
         let swapMB = Double(s.memorySwapUsed) / 1_000_000.0
         var metric: String? = s.memoryPressure == .critical ? L("критическое") : L("повышенное")
         if swapMB > 100 {
-            metric = String(format: "%@ · swap %.0f МБ", metric!, swapMB)
+            metric = String(format: "%@ · swap %.0f %@", metric!, swapMB, L("МБ"))
         }
 
         return AdvisorFinding(
@@ -560,7 +560,7 @@ final class AdvisorEngine {
             category: .maintenance,
             severity: severity,
             title: L("Повторяющиеся сбои"),
-            explanation: String(format: L("Зафиксировано %d сбоев за неделю. Рекомендуется отправить отчёт."), s.recentCrashesCount),
+            explanation: L("Рекомендуется отправить диагностический отчёт."),
             metric: "\(s.recentCrashesCount) " + (s.recentCrashesCount == 1 ? L("сбой") : (s.recentCrashesCount < 5 ? L("сбоя") : L("сбоев"))),
             action: .openSettings(section: "about"),  // раздел About → диагностика
             detailsDestination: "about"

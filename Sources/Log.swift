@@ -4,7 +4,7 @@ import os
 /// Единая точка логирования: unified log (видно в Console.app / `log stream` по подсистеме = bundle id).
 /// LSUIElement-агент пишет `print` в никуда — для прода нужен структурный лог и причина краша.
 enum Log {
-    private static let subsystem = Bundle.main.bundleIdentifier ?? "com.trykelvin.kelvin"
+    private static let subsystem = Bundle.main.bundleIdentifier ?? AppConfig.bundleID
     static let app = Logger(subsystem: subsystem, category: "app")
     static let helper = Logger(subsystem: subsystem, category: "helper")
     static let lang = Logger(subsystem: subsystem, category: "lang")

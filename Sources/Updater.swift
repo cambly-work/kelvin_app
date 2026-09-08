@@ -71,7 +71,7 @@ enum Updater {
         #if DEBUG
         if let f = ProcessInfo.processInfo.environment["BM_FEED"] { return f }
         #endif
-        return "https://trykelvin.com/appcast.xml"
+        return AppConfig.appcastURL
     }
     
     struct Release: Decodable {

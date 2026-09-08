@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Встраивается build.sh в __TEXT,__info_plist standalone helper и копируется в
+      Contents/Library/LaunchServices для SMJobBless на macOS 11-12. В dev требование
+      заменяется на identifier-only; production-сборка подставляет Team ID.
+    -->
+    <key>CFBundleIdentifier</key>
+    <string>com.trykelvin.kelvin.privileged</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Kelvin Privileged Helper</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Кто из клиентов может bless'нуть этот helper. Должно совпадать с подписью app. -->
+    <key>SMAuthorizedClients</key>
+    <array>
+        <string>identifier "com.trykelvin.kelvin" and anchor apple generic and certificate leaf[subject.OU] = "TEAMIDHERE"</string>
+    </array>
+</dict>
+</plist>

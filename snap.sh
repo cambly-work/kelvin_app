@@ -19,11 +19,20 @@ EXE="./Kelvin.app/Contents/MacOS/Kelvin"
 if [[ ! -x "$EXE" ]]; then echo "нет бинаря $EXE — сначала ./build.sh"; exit 1; fi
 
 mkdir -p "$OUTDIR"
-rm -f "$OUTDIR"/*.png 2>/dev/null || true
+rm -f "$OUTDIR"/*.png(N)
 
 echo "→ снимаю поповер в $OUTDIR …"
 # perl-alarm вместо GNU timeout (его нет на macOS): жёсткий предел, если рендер зависнет
-BM_SNAP="$OUTDIR" ${LIGHT:+BM_LIGHT=1} perl -e 'alarm 60; exec @ARGV' "$EXE" || true
+if [[ -n "$LIGHT" ]]; then
+  BM_SNAP="$OUTDIR" BM_LIGHT=1 perl -e 'alarm 60; exec @ARGV' "$EXE" || true
+else
+  BM_SNAP="$OUTDIR" perl -e 'alarm 60; exec @ARGV' "$EXE" || true
+fi
 
 echo "✓ готово:"
-ls -1 "$OUTDIR"/*.png 2>/dev/null || echo "  (PNG не создались — см. вывод выше)"
+files=("$OUTDIR"/*.png(N))
+if (( ${#files} )); then
+  printf '%s\n' "${files[@]}"
+else
+  echo "  (PNG не создались — см. вывод выше)"
+fi

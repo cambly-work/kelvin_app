@@ -64,7 +64,7 @@ final class ChargeRing: NSView {
         bolt.isHidden = true                                         // видна только при зарядке
         layer?.addSublayer(bolt)
 
-        pct.font = Design.Font.numericHero        // V3: SF Pro Rounded (нативный «прибор»)
+        pct.font = Design.Font.rounded(22, .bold)
         pct.alignment = .center
         pct.translatesAutoresizingMaskIntoConstraints = false
         addSubview(pct)
@@ -152,8 +152,7 @@ final class ChargeRing: NSView {
         default:           mode = .discharging
         }
         self.accent = accent                                       // didSet применит heldAlpha по текущему mode
-        pct.stringValue = "\(charge)%"
-        pct.textColor = .labelColor
+        setPercentText(charge)
         // смена значения — неявная плавная анимация strokeEnd, под reduced — мгновенно (как HardwareView:104)
         CATransaction.begin()
         CATransaction.setAnimationDuration(Motion.reduced ? 0 : Design.Motion.durValue)
@@ -162,6 +161,32 @@ final class ChargeRing: NSView {
         bolt.isHidden = (mode != .charging)                        // молния — только на зарядке (.held/разряд — без неё)
         renderBolt()
         applyBeacon()                                              // шиммер живёт только на зарядке (gate Motion.reduced)
+    }
+
+    /// Число и единица — разные типографические роли. Строка `100%` одним 22-pt кеглем шире
+    /// внутреннего диаметра 70-pt кольца; компактный знак процента сохраняет крупное число и
+    /// не заставляет весь прибор менять размер в состоянии полного заряда.
+    private func setPercentText(_ value: Int) {
+        let clamped = max(0, min(100, value))
+        let numberSize: CGFloat = clamped == 100 ? 19.5 : 22
+        let result = NSMutableAttributedString(
+            string: "\(clamped)",
+            attributes: [
+                .font: Design.Font.rounded(numberSize, .bold),
+                .foregroundColor: NSColor.labelColor,
+                .kern: -0.25
+            ]
+        )
+        result.append(NSAttributedString(
+            string: "%",
+            attributes: [
+                .font: Design.Font.rounded(10, .semibold),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .baselineOffset: 4,
+                .kern: -0.4
+            ]
+        ))
+        pct.attributedStringValue = result
     }
 
     /// Шиммер — единственный декоративный жест маяка: на зарядке запускаем, иначе гасим.

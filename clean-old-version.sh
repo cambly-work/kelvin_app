@@ -131,7 +131,11 @@ ALLOWED_PURGE_FILES=(
 ALLOWED_PURGE_DIRS=(
     "$USER_APP_SUPPORT/Kelvin"
 )
-PURGE_KEYCHAIN_SERVICE="com.trykelvin.crashreportstore"
+PURGE_KEYCHAIN_SERVICES=(
+    "com.trykelvin.kelvin.trial"
+    "com.trykelvin.kelvin.license"
+)
+UNREGISTER_RESULT="not-attempted"
 
 # опасные корневые префиксы — rm-цель никогда не должна ими быть
 DANGER_PREFIXES=(/ /System /usr /bin /sbin /etc /var /private/var /dev /proc)
@@ -194,28 +198,59 @@ live() {  # live <описание> <команда> [аргументы...]
     fi
 }
 
-# безопасные операции удаления (каждая — с allowlist-проверкой)
-rm_file() {  # rm_file <путь>
-    local p="$1"
+# режим удаления: user — от текущего пользователя (без sudo),
+# root — через sudo (root_run). В KELVIN_TEST_ROOT sudo не используется,
+# а --dry-run вообще ничего не выполняет.
+is_rm_mode() { case "$1" in user|root) return 0 ;; *) return 1 ;; esac; }
+
+# безопасные операции удаления (каждая — с allowlist-проверкой ДО sudo).
+# allowlist един для обоих режимов; режим определяет только привилегию вызова.
+rm_file() {  # rm_file <user|root> <путь>
+    local mode="$1" p="$2"
+    is_rm_mode "$mode" || { fail "неизвестный режим rm_file: $mode"; return 1; }
     if ! is_allowed_file "$p"; then fail "отказ в удалении (нет в allowlist): $p"; return 1; fi
     if [ ! -e "$p" ] && [ ! -L "$p" ]; then note_missing "$p"; return 0; fi
-    if [ "$DRY_RUN" = "1" ]; then would "rm -f $p"; return 0; fi
     if [ -d "$p" ] && [ ! -L "$p" ]; then fail "не файл, пропуск: $p"; return 1; fi
-    if rm -f -- "$p"; then note_removed "$p"; else fail "не удалось удалить: $p"; return 1; fi
+    if [ "$DRY_RUN" = "1" ]; then
+        if [ "$mode" = "root" ]; then would "sudo rm -f -- $p"; else would "rm -f -- $p"; fi
+        return 0
+    fi
+    local ok
+    if [ "$mode" = "root" ]; then ok=$(root_run /bin/rm -f -- "$p" && echo ok); else ok=$(/bin/rm -f -- "$p" && echo ok); fi
+    if [ -n "$ok" ]; then note_removed "$p"; else fail "не удалось удалить: $p"; return 1; fi
 }
-rm_dir() {  # rm_dir <путь>   (recursive — только для каталогов из ALLOWED_DIRS)
-    local p="$1"
+rm_dir() {  # rm_dir <user|root> <путь>   (recursive — только для каталогов из ALLOWED_DIRS)
+    local mode="$1" p="$2"
+    is_rm_mode "$mode" || { fail "неизвестный режим rm_dir: $mode"; return 1; }
     if ! is_allowed_dir "$p"; then fail "отказ в удалении (нет в allowlist dir): $p"; return 1; fi
     if [ ! -e "$p" ] && [ ! -L "$p" ]; then note_missing "$p"; return 0; fi
-    if [ "$DRY_RUN" = "1" ]; then would "rm -rf $p"; return 0; fi
-    if rm -rf -- "$p"; then note_removed "$p"; else fail "не удалось удалить: $p"; return 1; fi
+    if [ "$DRY_RUN" = "1" ]; then
+        if [ "$mode" = "root" ]; then would "sudo rm -rf -- $p"; else would "rm -rf -- $p"; fi
+        return 0
+    fi
+    local ok
+    if [ "$mode" = "root" ]; then ok=$(root_run /bin/rm -rf -- "$p" && echo ok); else ok=$(/bin/rm -rf -- "$p" && echo ok); fi
+    if [ -n "$ok" ]; then note_removed "$p"; else fail "не удалось удалить: $p"; return 1; fi
 }
-rm_dir_if_empty() {  # rm_dir_if_empty <путь>   (rmdir, только из ALLOWED_RMDIR)
-    local p="$1"
+rm_dir_if_empty() {  # rm_dir_if_empty <user|root> <путь>   (rmdir, только из ALLOWED_RMDIR)
+    local mode="$1" p="$2"
+    is_rm_mode "$mode" || { fail "неизвестный режим rm_dir_if_empty: $mode"; return 1; }
     if ! is_allowed_rmdir "$p"; then fail "отказ в rmdir (нет в allowlist): $p"; return 1; fi
     if [ ! -d "$p" ]; then note_missing "$p"; return 0; fi
-    if [ "$DRY_RUN" = "1" ]; then would "rmdir $p"; return 0; fi
-    if rmdir -- "$p" 2>/dev/null; then note_removed "$p (был пуст)"; else note_kept "$p (не пуст — сохранён)"; fi
+    if [ "$DRY_RUN" = "1" ]; then
+        if [ "$mode" = "root" ]; then would "sudo rmdir -- $p"; else would "rmdir -- $p"; fi
+        return 0
+    fi
+    # Различаем «каталог непуст» (сохраняем) от ошибки доступа/другой ошибки.
+    local err
+    if [ "$mode" = "root" ]; then err=$(root_run /bin/rmdir -- "$p" 2>&1); else err=$(/bin/rmdir -- "$p" 2>&1); fi
+    if [ $? -eq 0 ]; then
+        note_removed "$p (был пуст)"
+    elif printf '%s' "$err" | grep -qiE 'not empty|не пуст|directory not empty|ENOTEMPTY'; then
+        note_kept "$p (не пуст — сохранён)"
+    else
+        fail "не удалось rmdir: $p ($err)"
+    fi
 }
 
 # ───────────────────────── существование системных объектов ─────────────────────────
@@ -279,7 +314,7 @@ phase_user() {
                 launchctl unload "$plist" 2>/dev/null || true
             fi
         fi
-        rm_file "$plist" || true
+        rm_file user "$plist" || true
     done
 }
 
@@ -300,12 +335,39 @@ phase_system() {
         sudo -v || { fail "не получены права администратора"; return 1; }
     fi
 
+    # 0) ДЕРЕГИСТРАЦИЯ SMAppService (macOS 13+) ЧЕРЕЗ УСТАНОВЛЕННОЕ ПРИЛОЖЕНИЕ.
+    # Из shell доступен только launchctl bootout; полная дерегистрация записи
+    # SMAppService требует SMAppService.unregister() из приложения. Вызываем
+    # узкий CLI-режим установленного Kelvin до его остановки/удаления.
+    # Если bundle уже удалён — пропускаем; bootout ниже — резервная остановка.
+    #
+    # БЕЗОПАСНОСТЬ: выполняем бинарник только если его код-подпись валидна. Если бандл
+    # подменён/бит — не запускаем потенциально чужой код от имени пользователя; bootout
+    # ниже остановит службу и без unregister (SMAppService-запись останется неактивной).
+    if [ "$LIVE_LAUNCHCTL" = "1" ] && [ -x "$APPS_DIR/Kelvin.app/Contents/MacOS/Kelvin" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            would "$APPS_DIR/Kelvin.app/Contents/MacOS/Kelvin --unregister-privileged-service"
+        elif codesign --verify --deep --strict "$APPS_DIR/Kelvin.app" >/dev/null 2>&1; then
+            # Запуск от текущего пользователя (unregister не требует root).
+            if "$APPS_DIR/Kelvin.app/Contents/MacOS/Kelvin" --unregister-privileged-service >/dev/null 2>&1; then
+                UNREGISTER_RESULT="success"
+            else
+                UNREGISTER_RESULT="failed"
+                say "  (unregister вернул ненулевой код — продолжаю; bootout уберёт службу)"
+            fi
+        else
+            UNREGISTER_RESULT="invalid-signature"
+            say "  (подпись Kelvin повреждена — unregister пропущен; bootout уберёт службу)"
+        fi
+    elif [ "$LIVE_LAUNCHCTL" = "1" ] && [ "$DRY_RUN" = "0" ]; then
+        UNREGISTER_RESULT="no-bundle"
+    fi
+
     # 1) ОСТАНОВКА СЛУЖБ — ДО удаления bundle. Важно для privileged (KeepAlive).
     say "  Останавливаю launchd-службы…"
 
-    # privileged GPU-демон (SMAppService, macOS 13+): из shell доступен только bootout.
-    # Полная дерегистрация требует SMAppService.unregister() из приложения; без него —
-    # рекомендован перезагруз после удаления bundle (см. отчёт).
+    # privileged GPU-демон (SMAppService, macOS 13+): bootout как резервная остановка,
+    # если unregister выше не выполнился (bundle отсутствует / macOS <13).
     live "launchctl bootout system/com.trykelvin.kelvin.privileged" launchctl bootout system/com.trykelvin.kelvin.privileged
     # legacy (macOS 11–12) — полноценные launchd-задачи:
     live "launchctl bootout system/com.trykelvin.kelvin.powerd"     launchctl bootout system/com.trykelvin.kelvin.powerd
@@ -322,33 +384,34 @@ phase_system() {
     # fand: дать SIGTERM-обработчику восстановить вентиляторы в auto (как в uninstall-fan-helper.sh)
     if [ "$DRY_RUN" = "0" ]; then sleep 1; else would "sleep 1 (восстановление вентиляторов)"; fi
 
-    # 2) УДАЛЕНИЕ BUNDLE — после остановки служб (иначе KeepAlive respawn по отсутствующему пути)
+    # 2) УДАЛЕНИЕ BUNDLE — после остановки служб (иначе KeepAlive respawn по отсутствующему пути).
+    # /Applications/* — root-режим: bundle может принадлежать root или иметь root-владельца.
     say "  Удаляю установленные приложения…"
-    rm_dir "$APPS_DIR/Kelvin.app" || true
-    rm_dir "$APPS_DIR/BatteryMeter.app" || true
+    rm_dir root "$APPS_DIR/Kelvin.app" || true
+    rm_dir root "$APPS_DIR/BatteryMeter.app" || true
 
-    # 3) УДАЛЕНИЕ PLIST И PAYLOAD (system, allowlisted)
+    # 3) УДАЛЕНИЕ PLIST И PAYLOAD (system, allowlisted) — всё под /Library через root.
     say "  Удаляю launchd-конфиги и payload…"
-    rm_file "$SYS_LAUNCHDAEMONS/com.trykelvin.kelvin.powerd.plist" || true
-    rm_file "$SYS_LAUNCHDAEMONS/com.trykelvin.kelvin.fand.plist" || true
-    rm_file "$SYS_LAUNCHDAEMONS/com.local.batterymeter.powerd.plist" || true
-    rm_file "$SYS_LAUNCHDAEMONS/com.local.batterymeter.fand.plist" || true
-    rm_file "$SYS_LAUNCHDAEMONS/com.trykelvin.kelvin.privileged.plist" || true  # legacy 11–12
-    rm_file "$PRIV_HELPER_TOOLS/com.trykelvin.kelvin.privileged" || true         # legacy 11–12
+    rm_file root "$SYS_LAUNCHDAEMONS/com.trykelvin.kelvin.powerd.plist" || true
+    rm_file root "$SYS_LAUNCHDAEMONS/com.trykelvin.kelvin.fand.plist" || true
+    rm_file root "$SYS_LAUNCHDAEMONS/com.local.batterymeter.powerd.plist" || true
+    rm_file root "$SYS_LAUNCHDAEMONS/com.local.batterymeter.fand.plist" || true
+    rm_file root "$SYS_LAUNCHDAEMONS/com.trykelvin.kelvin.privileged.plist" || true  # legacy 11–12
+    rm_file root "$PRIV_HELPER_TOOLS/com.trykelvin.kelvin.privileged" || true         # legacy 11–12
 
-    rm_file "$SYS_KELVIN_SUPPORT/kelvin-powerd.sh" || true
-    rm_file "$SYS_KELVIN_SUPPORT/kelvin-powerd.sh.version" || true
-    rm_file "$SYS_KELVIN_SUPPORT/power.txt" || true
-    rm_file "$SYS_KELVIN_SUPPORT/power.txt.tmp" || true
-    rm_file "$SYS_KELVIN_SUPPORT/powermetrics.err" || true
-    rm_file "$SYS_KELVIN_SUPPORT/kelvin-fand" || true
-    rm_file "$SYS_KELVIN_SUPPORT/kelvin-fand.version" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/kelvin-powerd.sh" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/kelvin-powerd.sh.version" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/power.txt" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/power.txt.tmp" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/powermetrics.err" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/kelvin-fand" || true
+    rm_file root "$SYS_KELVIN_SUPPORT/kelvin-fand.version" || true
 
     # legacy каталог BatteryMeter — целиком
-    rm_dir "$SYS_BATTERY_SUPPORT" || true
+    rm_dir root "$SYS_BATTERY_SUPPORT" || true
 
     # системный Kelvin-каталог — только если пуст (никогда rm -rf)
-    rm_dir_if_empty "$SYS_KELVIN_SUPPORT" || true
+    rm_dir_if_empty root "$SYS_KELVIN_SUPPORT" || true
 }
 
 # ═════════════════════════ ФАЗА 3: purge пользовательских данных (опционально) ═════════════════════════
@@ -359,7 +422,7 @@ phase_purge() {
     say "  Будут удалены:"
     say "    • $USER_PREFS/com.trykelvin.kelvin.plist"
     say "    • $USER_APP_SUPPORT/Kelvin  (профили, CrashReports и т.д.)"
-    say "    • keychain-запись сервиса: $PURGE_KEYCHAIN_SERVICE"
+    say "    • keychain-записи триала и лицензии Kelvin"
     say "  НЕ затрагивается: TCC (Accessibility/Notifications), keychain других приложений."
 
     if [ "$ASSUME_YES" != "1" ]; then
@@ -376,25 +439,28 @@ phase_purge() {
         fi
     fi
 
-    rm_file "$USER_PREFS/com.trykelvin.kelvin.plist" || true
-    note_purge "$USER_PREFS/com.trykelvin.kelvin.plist"
+    rm_file user "$USER_PREFS/com.trykelvin.kelvin.plist" || true
     # defaults тоже сбрасываем, чтобы не осталось в кэше cfprefsd
     if [ "$LIVE_LAUNCHCTL" = "1" ]; then
         if [ "$DRY_RUN" = "1" ]; then would "defaults delete com.trykelvin.kelvin"; else
             defaults delete com.trykelvin.kelvin 2>/dev/null || true
         fi
     fi
-    rm_dir "$USER_APP_SUPPORT/Kelvin" || true
-    note_purge "$USER_APP_SUPPORT/Kelvin"
+    rm_dir user "$USER_APP_SUPPORT/Kelvin" || true
 
-    # keychain: удаляем только конкретную запись по имени сервиса (мягко). TCC не трогаем.
+    # Keychain: удаляем реальные сервисы TrialVault и LicenseVault. Прежнее значение
+    # com.trykelvin.crashreportstore было лишь label DispatchQueue и ничего не удаляло.
     if [ "$LIVE_LAUNCHCTL" = "1" ]; then
-        if [ "$DRY_RUN" = "1" ]; then
-            would "security delete-generic-password -s $PURGE_KEYCHAIN_SERVICE"
-        else
-            security delete-generic-password -s "$PURGE_KEYCHAIN_SERVICE" >/dev/null 2>&1 || true
-            note_purge "keychain: $PURGE_KEYCHAIN_SERVICE (если была)"
-        fi
+        local service
+        for service in "${PURGE_KEYCHAIN_SERVICES[@]}"; do
+            if [ "$DRY_RUN" = "1" ]; then
+                would "security delete-generic-password -s $service"
+            else
+                if security delete-generic-password -s "$service" >/dev/null 2>&1; then
+                    note_purge "keychain: $service"
+                fi
+            fi
+        done
     fi
 }
 
@@ -420,14 +486,16 @@ print_report() {
         say "Ошибки:"; printf '  • %s\n' "${REPORT_ERRORS[@]}"
     fi
 
-    # рекомендация по privileged/SMAppService
+    # Рекомендация по privileged/SMAppService основана на сохранённом результате,
+    # а не на наличии app ПОСЛЕ его штатного удаления.
     if [ "$DRY_RUN" = "0" ] && [ "$LIVE_LAUNCHCTL" = "1" ]; then
-        say ""
-        say "Примечание: привилегированный GPU-демон (com.trykelvin.kelvin.privileged)"
-        say "регистрируется через SMAppService. Из shell выполнен launchctl bootout —"
-        say "служба остановлена и не будет respawn по удалённому bundle. Для финальной"
-        say "очистки записи SMAppService рекомендуется перезагрузка (macOS уберёт"
-        say " orphan-регистрацию сама) — либо переустановите и выключите службу в приложении."
+        if [ "$UNREGISTER_RESULT" != "success" ]; then
+            say ""
+            say "Примечание: полная дерегистрация SMAppService"
+            say "(com.trykelvin.kelvin.privileged) не подтверждена: $UNREGISTER_RESULT."
+            say "Выполнен launchctl bootout — служба остановлена. Возможна orphan-запись"
+            say "SMAppService; перезагрузка уберёт её окончательно."
+        fi
     fi
 
     if [ ${#REPORT_ERRORS[@]} -gt 0 ]; then

@@ -52,7 +52,7 @@ runtime → DMG → нотаризация → staple → генерация app
 
 ```sh
 xcrun notarytool store-credentials "kelvin-notary" \
-    --apple-id cambly.studio@gmail.com \
+    --apple-id <твой-apple-id> \
     --team-id <ТВОЙ_TEAM_ID> \
     --password <app-specific-пароль>
 ```
@@ -162,7 +162,7 @@ static let expectedTeamID: String? = "ABCDE12345"
 ## 7. Где и как раздавать
 
 - **Хостинг:** свой сайт или **GitHub Releases** — прямая ссылка на нотаризованный `Kelvin-X.Y.dmg`.
-  Проще всего GitHub Pages из папки `docs/` (там уже лежат лендинг и `appcast.json` для автообновлений).
+  Проще всего GitHub Pages из папки `docs/` (там уже лежат лендинг и `appcast.xml` для автообновлений).
 - Раздавай **только нотаризованный DMG**. Никаких «снимите карантин» в инструкции.
 - **SHA-256 чек-сумма.** Опубликуй рядом с ссылкой — чтобы пользователь мог проверить, что скачал именно
   твой файл, а не подменённый:

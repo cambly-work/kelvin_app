@@ -47,7 +47,7 @@
 **Решение**: Только `stable` на первом этапе.
 
 - `beta` канал отложить до появления публичной beta-программы
-- Один appcast: `https://trykelvin.com/appcast.json`
+- Один appcast: `https://trykelvin.com/appcast.xml`
 - При необходимости beta будет отдельный feed: `appcast-beta.json`
 
 ### 2. Автоустановка
@@ -114,7 +114,7 @@
 ```xml
 <!-- Feed URL -->
 <key>SUFeedURL</key>
-<string>https://trykelvin.com/appcast.json</string>
+<string>https://trykelvin.com/appcast.xml</string>
 
 <!-- Public EdDSA key (будет сгенерирован) -->
 <key>SUPublicEDKey</key>

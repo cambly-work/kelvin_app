@@ -42,6 +42,7 @@ enum PrivilegedServiceState: Equatable {
     case notInstalled
     case approvalRequired            // macOS 13+: SMAppService requiresApproval
     case installing
+    case starting                    // SMAppService .enabled, но XPC-handshake ещё не подтверждён
     case healthy(PrivilegedServiceInfo)
     case updateRequired              // Service version != app expected version
     case incompatible                // Protocol version mismatch

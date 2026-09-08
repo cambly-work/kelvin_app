@@ -95,13 +95,31 @@ enum HelperInstall {
 
     /// Не передаём root выполнение из изменённого после сборки bundle. Это не заменяет
     /// будущую проверку клиента в XPC service, но закрывает главный риск legacy installer.
+    ///
+    /// В production (когда `expectedDeveloperTeamID` настроен) дополнительно проверяем,
+    /// что подпись выдана нашим Team ID — иначе атакующий мог переподписать ad-hoc
+    /// изменённый bundle, и `codesign --verify` подтвердил бы лишь внутреннюю
+    /// целостность, а не авторство. При настроенном Team ID_DR-проверка отвергает
+    /// ad-hoc/переподписанные копии (fail-closed).
     private static func bundleSignatureValid() -> Bool {
         guard Bundle.main.bundleURL.pathExtension == "app" else { return false }
-        return ProcessRunner.succeeds(
+        var ok = ProcessRunner.succeeds(
             "/usr/bin/codesign",
             ["--verify", "--deep", "--strict", Bundle.main.bundlePath],
             timeout: 12
         )
+        // В production: дополнительно проверяем DR с привязкой к Team ID.
+        // ВАЖНО: для верификации нужен заглавный -R (--test-requirement), НЕ строчный -r
+        // (--requirements используется при подписи; при verify он тихо игнорируется).
+        if ok, let team = AppConfig.expectedDeveloperTeamID, !team.isEmpty {
+            let req = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+            ok = ProcessRunner.succeeds(
+                "/usr/bin/codesign",
+                ["--verify", "--strict", "-R=\(req)", Bundle.main.bundlePath],
+                timeout: 12
+            )
+        }
+        return ok
     }
 
     /// Выполнить бандловый скрипт как root. Различает отмену пароля и реальный сбой.

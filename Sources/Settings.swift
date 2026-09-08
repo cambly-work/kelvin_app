@@ -18,10 +18,10 @@ enum PopoverModules {
         ("audio",        "Звук (вывод)"),
         ("health",       "Здоровье"),
     ]
-    // V2 макет-дефолт: шапка + тумблеры + звук + 6 доменов. БЕЗ большого блока Батарея-кратко/Диск/BT
-    // (в макете его нет; доступны по желанию через настройки). audio добавлен — в макете звук на месте.
-    // health добавлен — Центр здоровья Mac (Kelvin Advisor)
-    static let defaultOn: Set<String> = ["battery", "toggles", "audio", "flow", "hardware", "apps", "privacy", "maintenance", "history", "health"]
+    // Продуктовый дефолт отвечает на четыре основные задачи: расход, приложения,
+    // приватность и итоговая оценка здоровья. Диагностические экраны остаются
+    // доступными в настройках поповера, но не конкурируют за первый экран.
+    static let defaultOn: Set<String> = ["battery", "toggles", "audio", "flow", "apps", "privacy", "health"]
     static func title(_ id: String) -> String { L(all.first { $0.id == id }?.title ?? id) }
 }
 /// Одна запись раскладки поповера (модуль + видимость), сохраняется в UserDefaults.
@@ -81,12 +81,18 @@ enum SettingsStore {
         }
         set { if let data = try? JSONEncoder().encode(newValue) { d.set(data, forKey: "popover.layout") } }
     }
-    /// Непрозрачность фона поповера: 1.0 = плотный тёмный прибор, ниже = больше стекла/вибранси.
-    /// При 100% прозрачности оставляем лишь технические 0.02, чтобы vibrancy сохранял материал.
+    /// Непрозрачность фона поповера: 1.0 = плотный прибор, ниже = больше стекла.
+    /// Ниже 0.72 системные secondary/tertiary labels теряют читаемость на рабочем столе.
     /// на пересборке (BMPopoverChanged → buildModules). Слайдер «Прозрачность фона» в S19.
     static var popoverOpacity: Double {
-        get { d.object(forKey: "popover.opacity") as? Double ?? 0.80 }   // дефолт прозрачнее (V5: владелец «докрути»)
-        set { d.set(Swift.min(1.0, Swift.max(0.02, newValue)), forKey: "popover.opacity") }
+        get { Swift.min(1.0, Swift.max(0.72, d.object(forKey: "popover.opacity") as? Double ?? 0.88)) }
+        set { d.set(Swift.min(1.0, Swift.max(0.72, newValue)), forKey: "popover.opacity") }
+    }
+    /// Раскрыта ли компактная панель «Управление». По умолчанию закрыта, чтобы
+    /// активная вкладка начиналась сразу под шапкой; выбор пользователя запоминается.
+    static var popoverControlsExpanded: Bool {
+        get { d.bool(forKey: "popover.controlsExpanded") }
+        set { d.set(newValue, forKey: "popover.controlsExpanded") }
     }
     /// Свои кнопки-команды (id, подпись, иконка, shell-команда, цвет).
     static var customToggles: [CustomToggle] {
@@ -100,7 +106,7 @@ enum SettingsStore {
             let builtins = QuickToggleRegistry.availableDefs.map { $0.id }
             let customs = customToggles.map { "custom:\($0.id)" }
             let known = builtins + customs
-            let defaultOn: Set<String> = ["limit80", "topup", "turbofan", "caffeine"]   // root-firewall не маскируем под быстрый toggle
+            let defaultOn: Set<String> = ["limit80", "topup", "turbofan", "caffeine", "freeMemory"]   // root-firewall не маскируем под быстрый toggle
             let stored: [PopoverItem]
             if let data = d.data(forKey: "toggles.layout"),
                let arr = try? JSONDecoder().decode([PopoverItem].self, from: data) {
@@ -202,10 +208,57 @@ enum SettingsStore {
     /// пользователя больше не перезаписывается обновлениями.
     static func migrateNativeMenuBarIfNeeded() {
         guard !d.bool(forKey: "menubar.nativeV3") else { return }
-        menuBarIconStyle = "system"
-        mainIconStyle = "battery"
+        menuBarIconStyle = "kelvin"
+        mainIconStyle = "kelvin"
         if d.object(forKey: "menubar.motion") == nil { menuBarMotion = true }
         d.set(true, forKey: "menubar.nativeV3")
+    }
+
+    /// Возвращает фирменную иконку Kelvin пользователям, которым предыдущая
+    /// миграция автоматически подставила системную батарею.
+    static func migrateOriginalMenuBarIconIfNeeded() {
+        guard !d.bool(forKey: "menubar.originalIconV4") else { return }
+        menuBarIconStyle = "kelvin"
+        mainIconStyle = "kelvin"
+        d.set(true, forKey: "menubar.originalIconV4")
+    }
+
+    /// V4 могла отметить миграцию выполненной до того, как фирменный стиль реально
+    /// сохранился (у таких установок осталась пара system + battery). Повторяем
+    /// исправление новым ключом только для этой проблемной пары, не перезаписывая
+    /// остальные осознанно выбранные пользователем варианты.
+    static func repairOriginalMenuBarIconIfNeeded() {
+        guard !d.bool(forKey: "menubar.originalIconV5") else { return }
+        if menuBarIconStyle == "system", mainIconStyle == "battery" {
+            menuBarIconStyle = "kelvin"
+            mainIconStyle = "kelvin"
+        }
+        d.set(true, forKey: "menubar.originalIconV5")
+    }
+
+    /// Один раз переводит только нетронутый старый дефолт поповера на компактную
+    /// продуктовую раскладку. Любой пользовательский порядок или набор сохраняется.
+    static func migratePopoverProductLayoutIfNeeded() {
+        let migrationKey = "popover.productLayoutV1"
+        guard !d.bool(forKey: migrationKey) else { return }
+        defer { d.set(true, forKey: migrationKey) }
+
+        guard let data = d.data(forKey: "popover.layout"),
+              let stored = try? JSONDecoder().decode([PopoverItem].self, from: data)
+        else { return }
+
+        let legacyOn: Set<String> = [
+            "battery", "toggles", "audio", "flow", "hardware",
+            "apps", "privacy", "maintenance", "history", "health"
+        ]
+        let catalogOrder = PopoverModules.all.map(\.id)
+        guard stored.map(\.id) == catalogOrder,
+              Set(stored.filter(\.on).map(\.id)) == legacyOn
+        else { return }
+
+        popoverLayout = stored.map {
+            PopoverItem(id: $0.id, on: PopoverModules.defaultOn.contains($0.id))
+        }
     }
 
     static var idleBacklight: Bool {
@@ -377,7 +430,7 @@ enum SettingsStore {
         set { d.set(newValue, forKey: "fan.profileBattery") }
     }
     /// Стабильные id встроенных профилей (НЕ локализуемы) — ключи идентичности/персистенса/матча.
-    static let builtinFanIDs = ["auto", "balance", "turbo"]
+    static let builtinFanIDs = ["auto", "quiet", "balance", "turbo"]
     /// Легаси русские имена встроенных (для миграции persisted-значений V2/V3 и защиты имён userPreset).
     static let builtinFanNames = ["Авто", "Тихий", "Баланс", "Турбо"]
     /// id встроенного профиля → локализуемое отображаемое имя (L-ключ = русская строка по контракту).
@@ -600,8 +653,7 @@ final class SidebarButton: NSButton {
 
 
 
-/// Бренд-карточка героя Pro: бирюзовая заливка-токен + акцентная кромка, перекрашивается под тему.
-/// Используется только в разделе Kelvin Pro (CTA $19) — не общий бокс настроек.
+/// Бренд-карточка: бирюзовая заливка-токен + акцентная кромка, перекрашивается под тему.
 private final class HeroCardView: NSView {
     override var wantsUpdateLayer: Bool { true }
     override func updateLayer() {
@@ -635,7 +687,7 @@ private final class FWVerdictCardView: NSView {
 /// ПОСЛЕДНЕЕ окно (Настройки/Онбординг/О программе), чтобы не было мигания при закрытии одного из нескольких.
 enum WindowChrome {
     /// Переходим в обычное приложение: появляется свой app-меню (вместо чужого) и фокус.
-    /// Иконка в Dock на время открытого окна — принятый компромисс для платного приложения.
+    /// Иконка в Dock на время открытого окна нужна для фокуса и системного app-меню.
     static func becomeRegular() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)

@@ -70,8 +70,8 @@ func runAllTests() {
         failures += 1
     }
     
-    // Test 2: MacBook Air M1 fixture returns passive cooling
-    if case .failed = runTest("MBA M1 returns passive cooling", testMBAM1PassiveCooling) {
+    // Test 2: MacBook Air M1 uses Apple Silicon temperature keys and passive cooling
+    if case .failed = runTest("MBA M1 resolves Apple Silicon temperatures", testMBAM1PassiveCooling) {
         failures += 1
     }
     
@@ -146,7 +146,10 @@ func testIntelModelResolvesCPUKeys() throws {
 
 func testMBAM1PassiveCooling() throws {
     let catalog: [CatalogKey] = [
-        .mock("TC0P"), .mock("TB0T")
+        .mock("Tp09"), .mock("Tp0T"), .mock("Tp01"), .mock("Tp05"),
+        .mock("Tg05"), .mock("Tg0D"), .mock("Tm02"), .mock("TB0T"),
+        // Присутствующий Intel-ключ не должен становиться proxy CPU/GPU на M1.
+        .mock("TC0P")
         // No FNum, no fans on MBA M1
     ]
     
@@ -156,6 +159,13 @@ func testMBAM1PassiveCooling() throws {
         catalog: catalog,
         readValue: { key in
             switch key {
+            case "Tp09": return 42.0
+            case "Tp0T": return 43.0
+            case "Tp01": return 47.0
+            case "Tp05": return 48.0
+            case "Tg05": return 44.0
+            case "Tg0D": return 45.0
+            case "Tm02": return 39.0
             case "TC0P": return 45.0
             case "TB0T": return 32.0
             default: return nil
@@ -165,8 +175,13 @@ func testMBAM1PassiveCooling() throws {
     
     try assertEquals(result.isPassive, true, message: "MBA M1 should be passive")
     try assertEquals(result.fanIndices.count, 0, message: "No fans on MBA M1")
-    // CPU/GPU may share TC0P on M1
-    try assertEquals(result.cpuTemperature?.keys.contains("TC0P"), true)
+    try assertEquals(result.cpuTemperature?.keys.contains("Tp01"), true)
+    try assertEquals(result.gpuTemperature?.keys.contains("Tg05"), true)
+    try assertEquals(result.sensors[.memoryTemperature]?.keys.contains("Tm02"), true)
+    try assertEquals(result.cpuTemperature?.keys.contains("TC0P"), false,
+                     message: "Intel TC0P must not masquerade as an M1 CPU sensor")
+    try assertEquals(result.gpuTemperature?.keys.contains("TC0P"), false,
+                     message: "CPU proximity must not masquerade as an M1 GPU sensor")
 }
 
 func testUnknownModelNoFakeRoles() throws {
@@ -259,7 +274,7 @@ func testMissingFNumUnknownCooling() throws {
 
 func testFNumZeroOnFanlessPassive() throws {
     let catalog: [CatalogKey] = [
-        .mock("FNum"), .mock("TC0P")
+        .mock("FNum"), .mock("Tp01")
     ]
     
     let result = SensorResolver.resolve(
@@ -269,7 +284,7 @@ func testFNumZeroOnFanlessPassive() throws {
         readValue: { key in
             switch key {
             case "FNum": return 0.0
-            case "TC0P": return 40.0
+            case "Tp01": return 40.0
             default: return nil
             }
         }

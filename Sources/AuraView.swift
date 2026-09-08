@@ -240,16 +240,16 @@ final class AuraView: NSView {
 
         if dark {
             color = NSColor(
-                srgbRed: 0.050,
-                green: 0.066,
-                blue: 0.086,
+                srgbRed: 0.075,
+                green: 0.082,
+                blue: 0.096,
                 alpha: resolvedOpacity
             )
         } else {
             color = NSColor(
-                srgbRed: 0.920,
-                green: 0.930,
-                blue: 0.950,
+                srgbRed: 0.955,
+                green: 0.960,
+                blue: 0.970,
                 alpha: min(0.97, resolvedOpacity * 0.97)
             )
         }

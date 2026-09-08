@@ -78,6 +78,9 @@ final class PrivacyView: NSView {
     private var segCountryRect = CGRect.zero
     private var segAppRect = CGRect.zero
     private var segPortsRect = CGRect.zero
+    private let segCountryHit = NSButton()
+    private let segAppHit = NSButton()
+    private let segPortsHit = NSButton()
     private let toast = CATextLayer()             // всплывашка «Скопировано» при клике по IP
 
     // MARK: - Динамические слои (перестраиваются на смену модели)
@@ -105,6 +108,7 @@ final class PrivacyView: NSView {
     }
     private var nodes: [NodeUI] = []
     private var legend: [LegendUI] = []
+    private var legendHitRows: [PopoverActionRow] = []
 
     // MARK: - Служебное
     private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
@@ -200,7 +204,29 @@ final class PrivacyView: NSView {
         toast.cornerCurve = .continuous
         toast.isHidden = true
         root.addSublayer(toast)
+
+        configureSegmentHit(segCountryHit, label: L("Страны"), action: #selector(selectCountries))
+        configureSegmentHit(segAppHit, label: L("Приложения"), action: #selector(selectApps))
+        configureSegmentHit(segPortsHit, label: L("Порты"), action: #selector(selectPorts))
     }
+
+    private func configureSegmentHit(_ button: NSButton, label: String, action: Selector) {
+        button.title = ""
+        button.isBordered = false
+        button.isTransparent = true
+        button.focusRingType = .default
+        button.target = self
+        button.action = action
+        button.toolTip = label
+        button.setAccessibilityElement(true)
+        button.setAccessibilityRole(.radioButton)
+        button.setAccessibilityLabel(label)
+        addSubview(button)
+    }
+
+    @objc private func selectCountries() { setBasis(.country) }
+    @objc private func selectApps() { setBasis(.app) }
+    @objc private func selectPorts() { setBasis(.ports) }
 
     // MARK: - Приём данных
 
@@ -446,7 +472,7 @@ final class PrivacyView: NSView {
             ring.path = CGPath(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2), transform: nil)
             ring.fillColor = nil
             ring.lineWidth = 1
-            ring.strokeColor = Design.Color.hairline(isDark, isDark ? 0.14 : 0.10).cgColor
+            ring.strokeColor = Design.Color.hairline(isDark, isDark ? 0.22 : 0.13).cgColor
             ringsLayer.addSublayer(ring)
         }
         // тонкие оси-кресты для «прицела»
@@ -457,7 +483,7 @@ final class PrivacyView: NSView {
             p.addLine(to: CGPoint(x: center.x + maxR * dx, y: center.y + maxR * dy))
             axis.path = p
             axis.lineWidth = 1
-            axis.strokeColor = Design.Color.hairline(isDark, isDark ? 0.08 : 0.06).cgColor
+            axis.strokeColor = Design.Color.hairline(isDark, isDark ? 0.13 : 0.08).cgColor
             ringsLayer.addSublayer(axis)
         }
     }
@@ -493,6 +519,13 @@ final class PrivacyView: NSView {
         for (t, r, on) in [(segCountry, segCountryRect, basis == .country), (segApp, segAppRect, basis == .app), (segPorts, segPortsRect, basis == .ports)] {
             t.frame = CGRect(x: r.minX, y: r.midY - 6, width: r.width, height: 12)
             t.foregroundColor = resolved(on ? .labelColor : .secondaryLabelColor).cgColor
+        }
+        for (button, rect, on) in [(segCountryHit, segCountryRect, basis == .country),
+                                   (segAppHit, segAppRect, basis == .app),
+                                   (segPortsHit, segPortsRect, basis == .ports)] {
+            button.frame = rect
+            button.state = on ? .on : .off
+            button.setAccessibilityValue(NSNumber(value: on))
         }
     }
 
@@ -620,6 +653,8 @@ final class PrivacyView: NSView {
     }
 
     private func rebuildLegend() {
+        legendHitRows.forEach { $0.removeFromSuperview() }
+        legendHitRows.removeAll()
         legend.forEach { l in [l.flag, l.icon, l.name, l.stat].forEach { $0.removeFromSuperlayer() } }
         legend.removeAll()
         guard legendW > 0 else { return }
@@ -630,6 +665,44 @@ final class PrivacyView: NSView {
         } else {
             renderOverview()
         }
+        rebuildLegendHitRows()
+    }
+
+    /// Невидимые контролы над отрисованными CALayer-строками дают тем же действиям
+    /// нормальный mouse-up, Tab/Space/Return, фокус и VoiceOver вместо скрытого mouseDown.
+    private func rebuildLegendHitRows() {
+        let showingDetails = selected != nil
+        for item in legend {
+            let name = layerText(item.name)
+            let stat = layerText(item.stat)
+            guard item.key == Self.backKey || item.copyText != nil || (!showingDetails && !item.key.isEmpty) else { continue }
+
+            let hit = PopoverActionRow(frame: item.rect)
+            hit.accessibilityText = [name, stat].filter { !$0.isEmpty }.joined(separator: " · ")
+            if item.key == Self.backKey {
+                hit.onPress = { [weak self] in self?.setSelected(nil) }
+            } else if let copyText = item.copyText {
+                hit.onPress = { [weak self] in self?.copyPrivacyAddress(copyText, row: item.rect) }
+            } else {
+                let key = item.key
+                hit.onPress = { [weak self] in self?.setSelected(key) }
+            }
+            addSubview(hit)
+            legendHitRows.append(hit)
+        }
+    }
+
+    private func layerText(_ layer: CATextLayer) -> String {
+        if let value = layer.string as? String { return value }
+        if let value = layer.string as? NSAttributedString { return value.string }
+        return ""
+    }
+
+    private func copyPrivacyAddress(_ address: String, row: CGRect) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(address, forType: .string)
+        flashToast(at: CGPoint(x: row.midX, y: row.maxY))
     }
 
     /// Ведущий глиф строки: флаг-эмодзи (основа «Приложения» / страна) ИЛИ иконка (основа «Страны» / приложение).
@@ -685,7 +758,7 @@ final class PrivacyView: NSView {
             if i == slots - 1 && extra > 0 {
                 ui.flag.string = "…"
                 ui.name.string = String(format: L("ещё %d узлов"), extra + 1)
-                ui.name.foregroundColor = resolved(.tertiaryLabelColor).cgColor
+                ui.name.foregroundColor = resolved(.secondaryLabelColor).cgColor
                 ui.stat.string = ""
             } else if i < nds.count {
                 let nd = nds[i]
@@ -738,7 +811,7 @@ final class PrivacyView: NSView {
             } else if k == showN && overflow {
                 ui.flag.string = "…"
                 ui.name.string = String(format: L("ещё %d адресов"), rows.count - showN)
-                ui.name.foregroundColor = resolved(.tertiaryLabelColor).cgColor
+                ui.name.foregroundColor = resolved(.secondaryLabelColor).cgColor
             }
             addRow(ui)
         }
@@ -888,8 +961,7 @@ final class PrivacyView: NSView {
         if segPortsRect.contains(p) { setBasis(.ports); return }
         // клик по строке-адресу в разборе → копировать ip:port
         if selected != nil, let l = legend.first(where: { $0.copyText != nil && $0.rect.contains(p) }), let ip = l.copyText {
-            let pb = NSPasteboard.general; pb.clearContents(); pb.setString(ip, forType: .string)
-            flashToast(at: CGPoint(x: p.x, y: l.rect.maxY))
+            copyPrivacyAddress(ip, row: l.rect)
             return
         }
         var hit: String? = nil
@@ -962,7 +1034,7 @@ final class PrivacyView: NSView {
     /// VoiceOver: радар — статичный текст со сводкой и топ-направлениями (слои сами по себе немые).
     private func updateAccessibility() {
         setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
+        setAccessibilityRole(.group)
         setAccessibilityLabel(L("Приватность · радар"))
         let real = model.realDests
         let (c1, c2, c3) = basis == .ports
@@ -974,7 +1046,7 @@ final class PrivacyView: NSView {
         if basis == .ports { v += ". " + L("Видно в сети ≠ доступно из интернета") }
         let top = model.nodes.prefix(3).map { "\($0.title) \($0.conns)" }.joined(separator: ", ")
         if !top.isEmpty { v += ". " + top }
-        setAccessibilityValue(v)
+        setAccessibilityHelp(v)
     }
 
     // MARK: - Жизненный цикл слоёв
@@ -1016,7 +1088,7 @@ final class PrivacyView: NSView {
     }
     private func sepAttr() -> NSAttributedString {
         NSAttributedString(string: "   ·   ", attributes: [
-            .font: Design.Font.numericBody, .foregroundColor: resolved(.tertiaryLabelColor)])
+            .font: Design.Font.numericBody, .foregroundColor: resolved(.secondaryLabelColor)])
     }
 
     /// Микро-подпись радара (обычный регистр, без апперкейса/кернинга — единый V3-регистр, без «дашборд-CAPS»).

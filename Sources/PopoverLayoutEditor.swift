@@ -4,9 +4,9 @@ import AppKit
 /// слева — список модулей с галочками и перетаскиванием (настоящий drag-and-drop),
 /// справа — живой мини-превью поповера, который обновляется сразу при изменениях.
 final class PopoverLayoutEditor: NSView, NSTableViewDataSource, NSTableViewDelegate {
-    // ЗЕРКАЛО живого таб-бара поповера (main.swift ~596): все 6 = иконки-вкладки, остальное — верхние плитки.
-    // Держать в синхроне с реальным баром, иначе превью врёт (privacy/maintenance/history в defaultOn).
-    static let tabIDs: Set<String> = ["flow", "hardware", "apps", "privacy", "maintenance", "history"]
+    // ЗЕРКАЛО живого таб-бара поповера: все основные разделы = иконки-вкладки.
+    // Держать в синхроне с реальным баром, иначе превью врёт.
+    static let tabIDs: Set<String> = ["flow", "hardware", "apps", "privacy", "maintenance", "history", "health"]
     private static let rowType = NSPasteboard.PasteboardType("com.trykelvin.kelvin.popover.row")
 
     private var items: [PopoverItem] = SettingsStore.popoverLayout
@@ -78,7 +78,7 @@ final class PopoverLayoutEditor: NSView, NSTableViewDataSource, NSTableViewDeleg
 
     private func save() {
         SettingsStore.popoverLayout = items
-        NotificationCenter.default.post(name: Notification.Name("BMPopoverChanged"), object: nil)
+        NotificationCenter.default.post(name: AppNotifications.popoverChanged, object: nil)
         preview.render(items)
     }
 
@@ -134,9 +134,12 @@ final class PopoverLayoutEditor: NSView, NSTableViewDataSource, NSTableViewDeleg
     }
 }
 
-/// Лёгкий схематичный мини-превью поповера: верхние плитки стопкой + полоска вкладок,
-/// в порядке и видимости из текущей раскладки. Только для наглядности в настройках.
+/// Лёгкий схематичный мини-превью новой архитектуры поповера:
+/// шапка → свёрнутое управление → главный раздел → дополнительные показатели.
 final class PopoverMiniPreview: NSView {
+    private static let controlIDs: Set<String> = ["toggles", "audio"]
+    private static let auxiliaryIDs: Set<String> = ["batteryStats", "disk", "btbattery"]
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -157,8 +160,10 @@ final class PopoverMiniPreview: NSView {
         restyle()
 
         let enabled = items.filter { $0.on }
-        let tops = enabled.filter { !PopoverLayoutEditor.tabIDs.contains($0.id) }
+        let hasBattery = enabled.contains { $0.id == "battery" }
+        let controls = enabled.filter { Self.controlIDs.contains($0.id) }
         let tabs = enabled.filter { PopoverLayoutEditor.tabIDs.contains($0.id) }
+        let auxiliary = enabled.filter { Self.auxiliaryIDs.contains($0.id) }
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -170,10 +175,20 @@ final class PopoverMiniPreview: NSView {
         if enabled.isEmpty {
             stack.addArrangedSubview(label(L("ничего не выбрано")))
         } else {
-            for t in tops { stack.addArrangedSubview(block(PopoverModules.title(t.id), h: heightFor(t.id), accent: t.id == "battery")) }
+            if hasBattery {
+                stack.addArrangedSubview(block(PopoverModules.title("battery"), h: 34, accent: true))
+            }
+            if !controls.isEmpty {
+                stack.addArrangedSubview(block(L("Управление"), h: 24, accent: false))
+            }
             if !tabs.isEmpty {
                 stack.addArrangedSubview(tabStrip(tabs.map { $0.id }))
                 stack.addArrangedSubview(block(PopoverModules.title(tabs.first!.id), h: 46, accent: false))
+            }
+            if auxiliary.count == 1 {
+                stack.addArrangedSubview(block(PopoverModules.title(auxiliary[0].id), h: 22, accent: false))
+            } else if auxiliary.count > 1 {
+                stack.addArrangedSubview(block(L("Дополнительные показатели"), h: 22, accent: false))
             }
         }
 
@@ -184,10 +199,6 @@ final class PopoverMiniPreview: NSView {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-    }
-
-    private func heightFor(_ id: String) -> CGFloat {
-        switch id { case "battery": return 34; case "toggles": return 30; default: return 22 }
     }
 
     private func restyle() {
@@ -206,6 +217,7 @@ final class PopoverMiniPreview: NSView {
         case "privacy":     return "shield.lefthalf.filled"
         case "maintenance": return "wrench.and.screwdriver.fill"
         case "history":     return "chart.line.uptrend.xyaxis"
+        case "health":      return "heart.fill"
         default:            return "square"
         }
     }

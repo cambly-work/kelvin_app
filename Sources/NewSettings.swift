@@ -151,7 +151,7 @@ enum KelvinSettingsSection: String, CaseIterable, Identifiable {
         case .security:      return L("Сеть и защита")
         case .maintenance:   return L("Обслуживание")
         case .about:         return L("О Kelvin")
-        case .pro:           return "Kelvin Pro"
+        case .pro:           return L("Поддержать автора")
         }
     }
 
@@ -166,7 +166,7 @@ enum KelvinSettingsSection: String, CaseIterable, Identifiable {
         case .security:      return "lock.shield"
         case .maintenance:   return "wrench.and.screwdriver"
         case .about:         return "info.circle"
-        case .pro:           return "sparkles"
+        case .pro:           return "heart.fill"
         }
     }
 
@@ -197,6 +197,8 @@ final class KelvinSettingsModel: ObservableObject {
     @Published var vpnProfiles: [VPN.Profile] = []
     @Published var loginEnabled = false
     @Published var thermalLive: [AlertKind: Double] = [:]
+
+
     private var thermalTimer: Timer?
 
     func startThermalPolling() {
@@ -267,10 +269,10 @@ final class KelvinSettingsModel: ObservableObject {
     func changed(popover: Bool = false, menuBar: Bool = false) {
         revision &+= 1
         if popover {
-            NotificationCenter.default.post(name: Notification.Name("BMPopoverChanged"), object: nil)
+            NotificationCenter.default.post(name: AppNotifications.popoverChanged, object: nil)
         }
         if menuBar {
-            NotificationCenter.default.post(name: Notification.Name("BMMenuBarChanged"), object: nil)
+            NotificationCenter.default.post(name: AppNotifications.menuBarChanged, object: nil)
         }
     }
 
@@ -423,195 +425,11 @@ private struct KelvinSettingsPage: View {
         case .security:      SecuritySettingsPage(model: model)
         case .maintenance:   MaintenanceSettingsPage()
         case .about:         AboutSettingsPage()
-        case .pro:           ProSettingsPage()
+        case .pro:           SupportSettingsPage()
         }
     }
 }
 
-// MARK: - GPU Mode Card (in-app picker + setup)
-
-/// Карточка переключения GPU: показывает активную GPU, текущую политику,
-/// Picker Авто/Встроенная/Дискретная и статус привилегированного сервиса.
-private struct GPUModeCard: View {
-    @ObservedObject private var gpu = GPUController.shared
-    @State private var showSetupSheet = false
-
-    var body: some View {
-        KelvinCard(L("Графика")) {
-            // Активная GPU (живой индикатор)
-            if let active = GPUInfo.active() {
-                SettingsRow(active.integrated ? "checkmark.circle.fill" : "circle.fill",
-                            active.name,
-                            detail: active.kind + " · " + active.vramText) {
-                    EmptyView()
-                }
-                CardDivider()
-            }
-
-            // Текущая политика + Picker
-            SettingsRow("cpu", L("Режим графики")) {
-                if gpu.canSwitch {
-                    gpuPicker
-                } else {
-                    // Сервис не установлен — показываем setup CTA
-                    gpuSetupCTA
-                }
-            }
-
-            // Inline состояние применения
-            if gpu.isApplying {
-                CardDivider()
-                SettingsRow("arrow.triangle.2.circlepath", L("Применяется…")) {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                }
-            }
-
-            // Inline ошибка
-            if let err = gpu.lastError {
-                CardDivider()
-                SettingsRow("exclamationmark.triangle", L("Ошибка"),
-                            detail: err) {
-                    Button(L("Повторить")) {
-                        gpu.clearError()
-                    }
-                }
-            }
-        }
-        .onAppear {
-            gpu.refreshSupportState()
-            gpu.refreshServiceState()
-            gpu.refreshModeFromSystem()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            gpu.refreshServiceState()
-            gpu.refreshModeFromSystem()
-        }
-    }
-
-    /// Picker для выбора режима. Disabled во время применения.
-    private var gpuPicker: some View {
-        Picker(L("Режим графики"), selection: Binding(
-            get: { gpu.selectedMode ?? .automatic },
-            set: { gpu.setMode($0) }
-        )) {
-            ForEach(GPUMode.allCases, id: \.self) { mode in
-                Text(mode.shortTitle).tag(mode)
-            }
-        }
-        .pickerStyle(.segmented)
-        .disabled(gpu.isApplying)
-        .frame(width: 200)
-    }
-
-    /// CTA для установки привилегированного сервиса.
-    private var gpuSetupCTA: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            if case .notInstalled = gpu.serviceState {
-                Text(L("Не подключён"))
-                    .font(KelvinSwiftUITheme.Typography.detail)
-                    .foregroundColor(.secondary)
-                Button(L("Подключить")) {
-                    showSetupSheet = true
-                }
-            } else if case .approvalRequired = gpu.serviceState {
-                Text(L("Требует одобрения"))
-                    .font(KelvinSwiftUITheme.Typography.detail)
-                    .foregroundColor(.orange)
-                Button(L("Открыть настройки")) {
-                    MacSystemSettings.openLoginItems()
-                }
-            } else if case .repairNeeded = gpu.serviceState {
-                Text(L("Требует восстановления"))
-                    .font(KelvinSwiftUITheme.Typography.detail)
-                    .foregroundColor(.orange)
-                Button(L("Восстановить")) {
-                    showSetupSheet = true
-                }
-            } else {
-                Text(L("Подключение…"))
-                    .font(KelvinSwiftUITheme.Typography.detail)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .sheet(isPresented: $showSetupSheet) {
-            GPUSetupSheet(isPresented: $showSetupSheet)
-        }
-    }
-}
-
-/// Sheet установки/восстановления привилегированного сервиса GPU.
-private struct GPUSetupSheet: View {
-    @Binding var isPresented: Bool
-    @ObservedObject private var gpu = GPUController.shared
-    @State private var installing = false
-    @State private var result: PrivilegedServiceManager.InstallResult?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(L("Переключение графики"))
-                .font(.system(size: 16, weight: .semibold))
-
-            Text(L("Kelvin установит один системный компонент для переключения видеокарты. Пароль администратора понадобится только один раз — после этого переключение работает без пароля."))
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(L("Компонент умеет только переключать разрешённые режимы GPU (Авто, Встроенная, Дискретная) и не может выполнять другие команды."))
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let result {
-                switch result {
-                case .success:
-                    Label(L("Компонент подключён"), systemImage: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                case .approvalRequired:
-                    Label(L("Откройте Системные настройки → Общие → Объекты входа и разрешите компонент Kelvin"), systemImage: "info.circle")
-                        .foregroundColor(.orange)
-                case .failed(let msg):
-                    Label(msg, systemImage: "exclamationmark.triangle")
-                        .foregroundColor(.red)
-                case .cancelled:
-                    Label(L("Установка отменена"), systemImage: "xmark.circle")
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            HStack {
-                Spacer()
-                if installing {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                }
-                if result == .approvalRequired {
-                    Button(L("Открыть настройки")) {
-                        MacSystemSettings.openLoginItems()
-                    }
-                }
-                Button(L("Готово")) { isPresented = false }
-                    .keyboardShortcut(.cancelAction)
-                if result == nil || (result != nil && result != .success) {
-                    Button(L("Подключить")) {
-                        installing = true
-                        Task {
-                            let r = await gpu.installService()
-                            await MainActor.run {
-                                self.result = r
-                                self.installing = false
-                            }
-                        }
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(installing)
-                }
-            }
-        }
-        .padding(24)
-        .frame(width: 420)
-    }
-}
 
 private struct KelvinCard<Content: View>: View {
     let title: String?
@@ -865,7 +683,7 @@ private struct GeneralSettingsPage: View {
                         )) {
                             Text("Kelvin Live").tag("kelvin")
                             Text(L("Термометр")).tag("thermometer")
-                            Text(L("Батарея")).tag("battery")
+                            Text(L("Живая батарея")).tag("battery")
                             Text(L("Кольцо заряда")).tag("ring")
                         }
                         .labelsHidden()
@@ -877,7 +695,15 @@ private struct GeneralSettingsPage: View {
                             detail: L("Системные используют размеры и SF Symbols macOS; батарея показывает точный уровень заряда.")) {
                     Picker("", selection: settingBinding(
                         get: { SettingsStore.menuBarIconStyle },
-                        set: { SettingsStore.menuBarIconStyle = $0; model.changed(menuBar: true) }
+                        set: { style in
+                            SettingsStore.menuBarIconStyle = style
+                            // Этот переключатель описывает визуальную идентичность всей
+                            // строки меню, поэтому основная иконка должна меняться вместе
+                            // со вспомогательными глифами. Иначе system и kelvin могли
+                            // оба показывать одну и ту же сохранённую батарею.
+                            SettingsStore.mainIconStyle = style == "system" ? "battery" : "kelvin"
+                            model.changed(menuBar: true)
+                        }
                     )) {
                         Text(L("Системные macOS")).tag("system")
                         Text("Kelvin").tag("kelvin")
@@ -1234,11 +1060,6 @@ private struct CoolingSettingsPage: View {
                     if index < fans.count - 1 { CardDivider() }
                 }
             }
-            }
-
-            // MARK: - GPU
-            if GPUInfo.switchable {
-                GPUModeCard()
             }
 
             // MARK: - Thermal Rules
@@ -1698,7 +1519,7 @@ private struct InputSettingsPage: View {
                             }
                         case .tapStarting:
                             ProgressView().controlSize(.small)
-                        case .off, .unavailableByLicense:
+                        case .off:
                             EmptyView()
                         }
                     }
@@ -1838,7 +1659,7 @@ private struct InputSettingsPage: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             inputStatus = LangSwitcherStatus.current()
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("BMLangRuntimeChanged"))) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: AppNotifications.langRuntimeChanged)) { _ in
             inputStatus = LangSwitcherStatus.current()
         }
     }
@@ -1857,8 +1678,6 @@ private struct InputSettingsPage: View {
             return L("Kelvin запускает локальный обработчик ввода.")
         case .off:
             return L("Обработка ввода выключена.")
-        case .unavailableByLicense:
-            return L("Функция недоступна без активной лицензии Kelvin Pro.")
         }
     }
 }
@@ -1889,7 +1708,7 @@ private struct PopoverSettingsPage: View {
                     Slider(value: settingBinding(
                         get: { SettingsStore.popoverOpacity },
                         set: { SettingsStore.popoverOpacity = $0; model.changed(popover: true) }
-                    ), in: 0.18...1.0)
+                    ), in: 0.72...1.0)
                     .frame(width: 230)
                 }
             }
@@ -1991,32 +1810,22 @@ private struct PopoverSettingsPage: View {
 
 private func toggleIcon(_ id: String) -> String {
     if id.hasPrefix("custom:") {
-        if let ct = SettingsStore.customToggles.first(where: { $0.id == id }) { return ct.icon }
+        let customID = String(id.dropFirst("custom:".count))
+        if let ct = SettingsStore.customToggles.first(where: { $0.id == customID }) {
+            return ct.icon.isEmpty ? "bolt.fill" : ct.icon
+        }
         return "square"
     }
-    switch id {
-    case "limit80":  return "battery.75"
-    case "topup":    return "bolt.fill"
-    case "turbofan": return "fanblades"
-    case "panic":    return "exclamationmark.triangle"
-    case "caffeine": return "cup.and.saucer"
-    default:         return "toggleswitch"
-    }
+    return QuickToggleRegistry.def(id)?.icon ?? "toggleswitch"
 }
 
 private func toggleLabel(_ id: String) -> String {
     if id.hasPrefix("custom:") {
-        if let ct = SettingsStore.customToggles.first(where: { $0.id == id }) { return ct.label }
+        let customID = String(id.dropFirst("custom:".count))
+        if let ct = SettingsStore.customToggles.first(where: { $0.id == customID }) { return ct.label }
         return L("Пользовательский")
     }
-    switch id {
-    case "limit80":  return L("Лимит 80%")
-    case "topup":    return L("Дозарядка")
-    case "turbofan": return L("Турбо-кулеры")
-    case "panic":    return L("Аварийный режим")
-    case "caffeine": return L("Не засыпать")
-    default:         return id
-    }
+    return QuickToggleRegistry.def(id)?.label ?? id
 }
 
 private func moduleSymbol(_ id: String) -> String {
@@ -2259,11 +2068,6 @@ private struct AboutSettingsPage: View {
                 }
             }
             // MARK: - Support & Links
-            KelvinCard(L("Поддержка")) {
-                SettingsRow("heart.fill", L("Поддержать Kelvin"), detail: L("Kelvin бесплатен — и останется таким. Поддержка помогает развитию.")) {
-                    Button(L("Поддержать")) { AppConfig.openDonate() }
-                }
-            }
             KelvinCard {
                 SettingsRow("envelope", L("Обратная связь")) {
                     Button(L("Написать")) {
@@ -2275,7 +2079,7 @@ private struct AboutSettingsPage: View {
                     Button(L("Открыть")) { AppConfig.openWebsite() }
                 }
                 CardDivider()
-                SettingsRow("copyright", L("© Tim Blau / Kelvin")) {
+                SettingsRow("copyright", AppConfig.copyright) {
                     EmptyView()
                 }
             }
@@ -2283,274 +2087,62 @@ private struct AboutSettingsPage: View {
     }
 }
 
-private struct ProSettingsPage: View {
-    @State private var key = ""
-    @State private var status = ""
-    @State private var activating = false
-    @State private var showDeactivateConfirm = false
-    @State private var lastCheckDate: Date? = nil
-    
-    private let formatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
-    
+
+private struct SupportSettingsPage: View {
     var body: some View {
         VStack(spacing: 20) {
-            // MARK: Status Card
             KelvinCard {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 12) {
-                        Image(systemName: Licensing.shared.isPro ? "checkmark.seal.fill" : "sparkles")
+                        Image(systemName: "checkmark.seal.fill")
                             .font(.system(size: 28))
-                            .foregroundColor(Licensing.shared.isPro ? .green : .accentColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Kelvin Pro")
+                            .foregroundColor(.green)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(L("Kelvin бесплатен для всех"))
                                 .font(.system(size: 22, weight: .bold))
-                            Text(Licensing.shared.statusText)
+                            Text(L("Все функции открыты для всех, без подписки."))
                                 .font(.system(size: 13))
                                 .foregroundColor(.secondary)
                         }
                     }
-                    
+
                     Divider()
-                    
-                    // MARK: Status Details
-                    VStack(alignment: .leading, spacing: 8) {
-                        if !AppConfig.isCommerceEnabled {
-                            StatusRow(icon: "checkmark.circle.fill", text: L("Все Pro-функции доступны"), color: .green)
-                            StatusRow(icon: "wrench.and.screwdriver", text: L("Покупки включатся после настройки магазина"), color: .secondary)
-                        } else if Licensing.shared.activated {
-                            StatusRow(icon: "checkmark.circle.fill", text: L("Лицензия активирована"), color: .green)
-                            if let instance = Licensing.shared.instanceID {
-                                StatusRow(icon: "macbook", text: String(format: L("Mac ID: %@"), String(instance.prefix(8))), color: .secondary)
-                            }
-                            if let lastCheck = lastCheckDate ?? loadLastCheckDate() {
-                                StatusRow(icon: "clock", text: String(format: L("Последняя проверка: %@"), formatter.string(from: lastCheck)), color: .secondary)
-                            }
-                        } else if Licensing.shared.inTrial {
-                            StatusRow(icon: "hourglass", text: String(format: L("Осталось дней триала: %@"), "\(Licensing.shared.trialDaysLeft)"), color: .orange)
-                            StatusRow(icon: "calendar", text: String(format: L("До конца: %@"), "\(Licensing.shared.trialDays) \(Licensing.shared.plural(Licensing.shared.trialDays, L("день"), L("дня"), L("дней")))"), color: .secondary)
-                        } else {
-                            StatusRow(icon: "info.circle.fill", text: L("Мониторинг бесплатен навсегда"), color: .blue)
-                            StatusRow(icon: "lock.fill", text: L("Управление требует Pro"), color: .secondary)
+
+                    Text(L("Поддержка помогает развивать Kelvin в свободное время: новые датчики, языки интерфейса, совместимость со свежими Mac и macOS."))
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Button(action: AppConfig.openSupport) {
+                        HStack {
+                            Image(systemName: "heart.fill")
+                            Text(L("Поблагодарить автора"))
                         }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
                     }
-                    .font(.system(size: 13))
-                    
-                    // MARK: Purchase Button (only for non-Pro)
-                    if !Licensing.shared.isPro && !Licensing.shared.inTrial {
-                        Divider()
-                        Button(action: openCheckout) {
-                            HStack {
-                                Image(systemName: "bag.fill")
-                                Text(String(format: L("Купить за %@ — навсегда"), AppConfig.proPriceDisplay))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                        }
-                        .buttonStyle(DefaultButtonStyle())
-                        .disabled(!AppConfig.isCheckoutURLValid)
-                        
-                        if !AppConfig.isCheckoutURLValid {
-                            Text(L("Покупка временно недоступна"))
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-                        
-                        // Trial info
-                        VStack(spacing: 6) {
-                            Text(String(format: L("%@ на %@"), AppConfig.proPriceDisplay, L("2 Mac")))
-                                .font(.system(size: 12, weight: .medium))
-                            Text(L("Без подписки • Один платёж"))
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                            Text(
-                                String(
-                                    format: L("%@ %@"),
-                                    L("Включает"),
-                                    String(
-                                        format: L("триал %d дн."),
-                                        Licensing.shared.trialDays
-                                    )
-                                )
-                            )
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-                    }
+                    .buttonStyle(DefaultButtonStyle())
+
+                    Text(L("Донат полностью добровольный и не открывает скрытых платных функций."))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .padding(20)
             }
-            
-            // MARK: Activation Section (only for non-activated)
-            if !Licensing.shared.activated {
-                // MARK: Activate with Key
-                KelvinCard(L("Активация ключом")) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 8) {
-                            SecureField(L("Лицензионный ключ"), text: $key)
-                                .textFieldStyle(RoundedBorderTextFieldStyle())
-                                .font(.system(size: 13, design: .monospaced))
-                            
-                            Button(action: pasteFromClipboard) {
-                                Image(systemName: "doc.on.doc")
-                                    .frame(width: 32, height: 32)
-                            }
-                            .help(L("Вставить из буфера"))
-                            .disabled(key.isEmpty == false)
-                        }
-                        
-                        HStack {
-                            Button(action: activateLicense) {
-                                HStack {
-                                    if activating {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .progressViewStyle(.circular)
-                                    }
-                                    Text(activating ? L("Активация...") : L("Активировать"))
-                                }
-                                .frame(minWidth: 100)
-                            }
-                            .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || activating || !Licensing.isStoreConfigured)
-                            
-                            Spacer()
-                            
-                            if !status.isEmpty {
-                                Text(status)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(status.hasPrefix("✓") ? .green : .red)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.trailing)
-                            }
-                        }
-                        
-                        // Helper text
-                        Text(L("Ключ приходит на email после покупки в Lemon Squeezy"))
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary.opacity(0.7))
+
+            KelvinCard {
+                SettingsRow("envelope", L("Написать автору")) {
+                    Button(L("Написать")) {
+                        if let url = AppConfig.mailto(subject: "Kelvin") { NSWorkspace.shared.open(url) }
                     }
-                    .padding(16)
                 }
-                
-                // MARK: Restore / Links
-                KelvinCard {
-                    VStack(spacing: 10) {
-                        Button(L("Восстановить покупку / Активировать существующую лицензию")) {
-                            // Same as activate - user enters key
-                            NSApp.sendAction(#selector(NSResponder.selectAll(_:)), to: nil, from: nil)
-                        }
-                        .buttonStyle(.borderless)
-                        
-                        Divider()
-                        
-                        HStack(spacing: 16) {
-                            LinkButton(title: L("Privacy"), url: "https://trykelvin.com/privacy.html")
-                            LinkButton(title: L("EULA"), url: "https://trykelvin.com/eula.html")
-                            LinkButton(title: L("Support"), url: "mailto:support@trykelvin.com")
-                        }
-                    }
-                    .padding(16)
-                }
-            }
-            
-            // MARK: Deactivation (only for activated)
-            if Licensing.shared.activated {
-                KelvinCard {
-                    VStack(spacing: 12) {
-                        Text(L("Управление лицензией"))
-                            .font(.system(size: 14, weight: .semibold))
-                        
-                        HStack {
-                            Button(action: { showDeactivateConfirm = true }) {
-                                Text(L("Деактивировать этот Mac"))
-                                    .foregroundColor(.red)
-                            }
-                            .buttonStyle(.borderless)
-                            
-                            Spacer()
-                            
-                            Button(action: manualRevalidate) {
-                                Text(L("Проверить сейчас"))
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        
-                        Text(L("Деактивация освободит слот для активации на другом компьютере"))
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(16)
+                CardDivider()
+                SettingsRow("globe", L("Сайт Kelvin")) {
+                    Button(L("Открыть")) { AppConfig.openWebsite() }
                 }
             }
         }
-        .sheet(isPresented: $showDeactivateConfirm) {
-            DeactivationConfirmationSheet(
-                onConfirm: {
-                    showDeactivateConfirm = false
-                    performDeactivation()
-                },
-                onCancel: {
-                    showDeactivateConfirm = false
-                }
-            )
-        }
-        .onAppear {
-            lastCheckDate = loadLastCheckDate()
-        }
-    }
-    
-    // MARK: Actions
-    
-    private func openCheckout() {
-        if let url = Licensing.checkoutURL, let realURL = URL(string: url) {
-            NSWorkspace.shared.open(realURL)
-        }
-    }
-    
-    private func pasteFromClipboard() {
-        if let clipboard = NSPasteboard.general.string(forType: .string) {
-            key = clipboard.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-    
-    private func activateLicense() {
-        activating = true
-        status = ""
-        Licensing.shared.activate(key) { ok, message in
-            DispatchQueue.main.async {
-                activating = false
-                status = ok ? "✓ " + message : message
-                if ok {
-                    key = ""  // Clear sensitive data
-                    lastCheckDate = Licensing.shared.lastValidatedAt
-                    KelvinSettingsWindowController.shared.refresh()
-                }
-            }
-        }
-    }
-    
-    private func performDeactivation() {
-        Licensing.shared.deactivate()
-        status = L("Деактивировано")
-        lastCheckDate = nil
-        KelvinSettingsWindowController.shared.refresh()
-    }
-    
-    private func manualRevalidate() {
-        status = L("Проверка...")
-        Licensing.shared.revalidate { ok in
-            lastCheckDate = Licensing.shared.lastValidatedAt
-            status = ok ? L("Проверено") : L("Не удалось проверить лицензию")
-            KelvinSettingsWindowController.shared.refresh()
-        }
-    }
-    
-    private func loadLastCheckDate() -> Date? {
-        Licensing.shared.lastValidatedAt
     }
 }
 

@@ -1,7 +1,7 @@
 # Kelvin — playbook запуска
 
-Код, монетизация, DMG-пайплайн, лендинг и автообновления готовы. Ниже — что осталось сделать руками,
-чтобы начать продавать. Шаги 1–2 — длинные (аккаунты), запускать первыми.
+Код, DMG-пайплайн, лендинг и автообновления готовы. Kelvin распространяется бесплатно;
+оплата, активация и лицензионные ключи для релиза не нужны.
 
 Реквизиты проекта: **Artem Balabanov (MEI)** · CNPJ 53.294.776/0001-28 · cambly.studio@gmail.com
 
@@ -9,7 +9,7 @@
 
 ## 1. Apple Developer + нотаризация  ⏳ ~1–2 недели
 
-Без этого DMG неподписан и Gatekeeper заблокирует приложение у покупателя.
+Без этого DMG неподписан и Gatekeeper заблокирует приложение у пользователя.
 
 1. **D-U-N-S Number** на CNPJ — бесплатно: https://developer.apple.com/enroll/duns-lookup/ (выдача ~1–2 нед).
 2. **Apple Developer Program** как организация ($99/год): https://developer.apple.com/programs/enroll/
@@ -20,19 +20,10 @@
        --apple-id cambly.studio@gmail.com --team-id <TEAMID> --password <app-spec-pass>
    ```
 
-## 2. Магазин Lemon Squeezy  💳
+## 2. Добровольная поддержка
 
-1. Создать аккаунт → Store → продукт «Kelvin Pro», цена **$19**, тип **License keys** (single activation limit = 2).
-2. Записать **store_id** и **product_id** (видны в URL/настройках продукта).
-3. Вписать их в [Sources/Licensing.swift](Sources/Licensing.swift):
-   ```swift
-   static let storeID: Int? = <store_id>
-   static let productID: Int? = <product_id>
-   static let checkoutURL = "https://<твой-чекаут>.lemonsqueezy.com/checkout/..."
-   ```
-   После этого активация ключей в приложении заработает вживую (код готов, сейчас за `nil`-заглушкой).
-4. На лендинге заменить плейсхолдер `https://trykelvin.com` (помечен `BUY_URL` в [docs/index.html](docs/index.html))
-   на тот же checkout-URL.
+Если появится страница Boosty, Ko-fi, PayPal или Patreon, вписать её URL в `AppConfig.supportURL`.
+Пока ссылка не задана, кнопка «Поблагодарить автора» открывает письмо.
 
 ## 3. Домен и хостинг
 
@@ -61,7 +52,7 @@ STYLE_DMG=1 \
 ## 5. Опубликовать
 
 1. Залить `Kelvin-X.Y.zip`, `docs/appcast.xml`, обновлённый `docs/` на хостинг.
-2. Проверить ссылку «Купить» на лендинге и активацию тестовым ключом Lemon Squeezy.
+2. Проверить ссылки скачивания и добровольной благодарности на лендинге.
 3. Готово — можно вести трафик.
 
 ---
@@ -89,5 +80,4 @@ STYLE_DMG=1 \
 
 ## Чем проверять до релиза (dev-флаги)
 
-`BM_PRO` (активный Pro) · `BM_TRIAL_DAYS=N` · `BM_TRIALENDED` (прощальный оффер) ·
-`BM_FREE` (бесплатное состояние) · `BM_FEED=<url>` (стейджинг appcast) · `BM_NOBATT` (десктоп без АКБ).
+`BM_FEED=<url>` (стейджинг appcast) · `BM_NOBATT` (десктоп без АКБ) · `BM_SETTINGS=<section>` (прямое открытие настроек).

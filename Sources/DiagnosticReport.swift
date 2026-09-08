@@ -178,7 +178,6 @@ enum DiagnosticReport {
         let langStatus = LangSwitcherStatus.current()
         kv(L("Режим (сохранён)"), modeDisplayName(langStatus.savedMode))
         kv(L("Статус runtime"), langStatus.runtimeStatus.localizedDescription)
-        kv(L("Pro доступ"), langStatus.hasProAccess ? L("да") : L("нет"))
         kv(L("Accessibility"), langStatus.accessibilityTrusted ? L("разрешено") : L("запрещено"))
         kv(L("Event tap активен"), langStatus.tapActive ? L("да") : L("нет"))
         if langStatus.recoveries > 0 || langStatus.creationFailures > 0 {

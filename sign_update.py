@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Подпись update-архива для Sparkle с использованием EdDSA.
+"""Совместимая CLI-обёртка над официальным Sparkle bin/sign_update.
 
 Использование:
     python3 sign_update.py <path-to-update-archive> <private-key-base64>
@@ -9,56 +8,47 @@
     python3 sign_update.py Kelvin-1.0.0.zip AnrH0DpRa4DrD50GQG4dcA0a37LKeHVH7kJA6GYpsKI=
 
 Результат выводится в stdout в формате:
-    sparkle:edSignature="<signature>" length="<size>" version="<version>"
+    sparkle:edSignature="<signature>" length="<size>"
 """
 
-import nacl.signing
-import base64
-import hashlib
-import sys
 import os
+import re
+import subprocess
+import sys
 
 def sign_update(archive_path, private_key_b64):
     if not os.path.exists(archive_path):
         print(f"✗ Файл не найден: {archive_path}", file=sys.stderr)
         sys.exit(1)
     
-    # Декодируем приватный ключ
-    try:
-        private_key_bytes = base64.b64decode(private_key_b64)
-        signing_key = nacl.signing.SigningKey(private_key_bytes)
-    except Exception as e:
-        print(f"✗ Ошибка декодирования приватного ключа: {e}", file=sys.stderr)
+    if not private_key_b64.strip():
+        print("✗ Приватный ключ пуст", file=sys.stderr)
         sys.exit(1)
-    
-    # Читаем архив и вычисляем хеш
-    with open(archive_path, 'rb') as f:
-        archive_data = f.read()
-    
-    archive_size = len(archive_data)
-    archive_hash = hashlib.sha256(archive_data).digest()
-    
-    # Подписываем хеш
-    signature = signing_key.sign(archive_hash)
-    signature_b64 = base64.b64encode(signature.signature).decode('utf-8')
-    
-    # Извлекаем версию из имени файла (если возможно)
-    basename = os.path.basename(archive_path)
-    version = "unknown"
-    if "-" in basename and ".zip" in basename:
-        # Предполагаем формат Kelvin-1.0.0.zip
-        parts = basename.replace(".zip", "").split("-")
-        if len(parts) >= 2:
-            version = parts[-1]
-    
-    print(f"✓ Архив подписан успешно")
-    print(f"  Файл: {basename}")
-    print(f"  Размер: {archive_size} байт")
-    print(f"  Версия: {version}")
-    print(f"\nДобавьте в appcast.xml:")
-    print(f'  sparkle:edSignature="{signature_b64}" length="{archive_size}" version="{version}"')
-    
-    return signature_b64, archive_size, version
+
+    signer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "sign_update")
+    if not os.path.isfile(signer) or not os.access(signer, os.X_OK):
+        print(f"✗ Официальный Sparkle signer не найден: {signer}", file=sys.stderr)
+        sys.exit(1)
+
+    result = subprocess.run(
+        [signer, "--ed-key-file", "-", archive_path],
+        input=private_key_b64.strip(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(result.stderr.strip() or "✗ Sparkle sign_update завершился с ошибкой", file=sys.stderr)
+        sys.exit(result.returncode)
+
+    output = result.stdout.strip()
+    print(output)
+    signature_match = re.search(r'sparkle:edSignature="([^"]+)"', output)
+    length_match = re.search(r'length="(\d+)"', output)
+    if not signature_match or not length_match:
+        print("✗ Неожиданный вывод Sparkle sign_update", file=sys.stderr)
+        sys.exit(1)
+    return signature_match.group(1), int(length_match.group(1))
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:

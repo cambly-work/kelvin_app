@@ -10,6 +10,13 @@ let SERVICE_VERSION  = "1.0.0"
 let PMSET_PATH       = "/usr/bin/pmset"
 let COMMAND_TIMEOUT: TimeInterval = 10.0
 
+/// Ожидаемый Team ID подписи клиента для production-аутентификации.
+/// nil = dev/ad-hoc сборка → проверяется только bundle identifier.
+/// Для production вписать Team ID из сертификата Developer ID Application,
+/// с которым подписан клиент. Тогда подключение от ad-hoc/переподписанной
+/// копии будет отклонено.
+let EXPECTED_TEAM_ID: String? = nil
+
 // MARK: - Allowed GPUMode values
 
 /// pmset gpuswitch: 0 = integrated, 1 = discrete, 2 = automatic/dynamic.
@@ -73,8 +80,10 @@ private enum HelperError: Int, Error {
 /// validated Kelvin application and executes `pmset -a gpuswitch`.
 ///
 /// Security model:
-/// - Every incoming connection is validated against the connecting process's
-///   code-signing identity, bundle identifier, and (in production) Team ID.
+/// - Every incoming connection is validated against the connecting process's PID
+///   (resolved to a `SecCode`) and a designated requirement built from our bundle
+///   identifier and — in production — Team ID. The Team ID binding defeats the main
+///   spoofing vector (ad-hoc / re-signed copies) even though PID lookup is used.
 /// - The only external process executed is the fixed-path `/usr/bin/pmset`
 ///   with a hard-coded set of allowed arguments. No shell, no AppleScript,
 ///   no arbitrary command execution.
@@ -193,11 +202,20 @@ class KelvinPrivilegedService: NSObject, NSXPCListenerDelegate, PrivilegedXPCPro
     /// Validate the connecting process by checking its code signature,
     /// bundle identifier, and (in production) Team ID.
     ///
-    /// Steps:
-    ///  1. Get the connecting process's PID from `NSXPCConnection.processIdentifier`.
-    ///  2. Obtain a `SecCode` reference for that PID.
-    ///  3. Verify the code signature against a designated requirement for our bundle ID.
-    ///  4. Optionally verify the Team ID in production builds.
+    /// Security model:
+    ///  - Resolve a `SecCode` for the connecting process from its PID and verify it
+    ///    against a designated requirement built from our bundle identifier.
+    ///    (Audit-token binding — `kSecGuestAttributeAuditToken` — is the more robust
+    ///    primitive that resists PID-recycling TOCTOU, but it requires a bridging
+    ///    header with `xpc_connection_get_audit_token` and access to the private
+    ///    `NSXPCConnection.session`. This helper compiles standalone without one.
+    ///    To strengthen: add a bridging header + `xpc_connection_t` accessor and key
+    ///    on the audit token instead of the PID.)
+    ///  - When `EXPECTED_TEAM_ID` is set (production), the DR binds to that Team ID,
+    ///    so ad-hoc or re-signed copies with the same identifier are rejected
+    ///    (fail-closed). This defeats the main spoofing vector even under PID lookup.
+    ///  - When `EXPECTED_TEAM_ID` is `nil` (dev/ad-hoc), only the identifier is
+    ///    checked, matching the development build flow.
     private func validateClient(_ connection: NSXPCConnection) -> Bool {
 
         let pid = connection.processIdentifier
@@ -206,7 +224,7 @@ class KelvinPrivilegedService: NSObject, NSXPCListenerDelegate, PrivilegedXPCPro
             return false
         }
 
-        // Obtain SecCode for the connecting process by PID
+        // Obtain SecCode for the connecting process by PID.
         var code: SecCode?
         let attrs: [String: Any] = [kSecGuestAttributePid as String: pid]
         guard SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, [], &code) == errSecSuccess,
@@ -215,11 +233,15 @@ class KelvinPrivilegedService: NSObject, NSXPCListenerDelegate, PrivilegedXPCPro
             return false
         }
 
-        // Verify the code against a designated requirement for our bundle ID.
-        // This validates the connecting process is signed and matches our identifier.
-        let requirementString = "identifier \"\(BUNDLE_ID)\"" as CFString
+        // Build the designated requirement. In production the Team ID is bound in so
+        // that a re-signed / ad-hoc copy with the same identifier is rejected.
+        var requirementString = "identifier \"\(BUNDLE_ID)\""
+        if let teamID = EXPECTED_TEAM_ID, !teamID.isEmpty {
+            requirementString += " and certificate leaf[subject.OU] = \"\(teamID)\""
+        }
+        let requirementCF = requirementString as CFString
         var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(requirementString, [], &requirement) == errSecSuccess,
+        guard SecRequirementCreateWithString(requirementCF, [], &requirement) == errSecSuccess,
               let requirement else {
             NSLog("[\(SERVICE_NAME)] SecRequirementCreateWithString failed — rejecting")
             return false
@@ -231,18 +253,6 @@ class KelvinPrivilegedService: NSObject, NSXPCListenerDelegate, PrivilegedXPCPro
             NSLog("[\(SERVICE_NAME)] Code signature check failed for pid \(pid) — rejecting")
             return false
         }
-
-        // Production enforcement: require a Team ID (ad-hoc builds rejected).
-        // Uncomment the following block when expectedDeveloperTeamID is configured:
-        //
-        // var info: CFDictionary?
-        // guard SecCodeCopyDesignatedRequirement(secCode, [], &info) == errSecSuccess,
-        //       let signingInfo = info as? [String: Any],
-        //       let teamID = signingInfo[kSecCodeInfoTeamIdentifier as String] as? String,
-        //       teamID == EXPECTED_TEAM_ID else {
-        //     NSLog("[\(SERVICE_NAME)] Team ID mismatch for pid \(pid) — rejecting")
-        //     return false
-        // }
 
         NSLog("[\(SERVICE_NAME)] Client validated: pid=\(pid) bundleID=\(BUNDLE_ID)")
         return true

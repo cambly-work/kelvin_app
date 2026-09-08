@@ -1,7 +1,16 @@
 import AppKit
 import Foundation
 
-/// Единая точка входа в настройки и платные возможности.
+/// Типизированные имена нотификаций приложения. Заменяют magic-string NotificationCenter
+/// имена — опечатка в строке раньше ломала связь молча (пост/наблюдение расходились).
+enum AppNotifications {
+    static let popoverChanged       = Notification.Name("BMPopoverChanged")
+    static let langRuntimeChanged   = Notification.Name("BMLangRuntimeChanged")
+    static let menuBarChanged       = Notification.Name("BMMenuBarChanged")
+    static let helperStateChanged   = Notification.Name("BMHelperStateChanged")
+}
+
+/// Единая точка входа в настройки и системные возможности.
 ///
 /// Не наследуется от `NSWindowController`, поэтому обычное открытие настроек,
 /// Pro-проверка или запрос helper больше не создают тяжёлое legacy AppKit-окно.
@@ -24,30 +33,8 @@ enum SettingsCoordinator {
 
     @discardableResult
     static func requirePro(_ feature: ProFeature) -> Bool {
-        if Licensing.shared.isPro { return true }
-
-        let alert = NSAlert()
-        alert.messageText = I18n.proFeatureTitle(feature.title)
-        alert.informativeText = Licensing.shared.licenseKey != nil
-            ? L("Лицензия есть, но не подтверждена — проверьте соединение и переактивируйте ключ в разделе Pro.")
-            : String(
-                format: L("Мониторинг бесплатен навсегда. Управление и автоматизация — в Kelvin Pro: разовая покупка %@, %@ на лицензию, без подписки."),
-                AppConfig.proPriceDisplay,
-                L("2 Mac")
-            )
-        alert.addButton(withTitle: String(format: L("Купить за %@"), AppConfig.proPriceDisplay))
-        alert.addButton(withTitle: L("Ввести ключ"))
-        alert.addButton(withTitle: L("Позже"))
-
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            openCheckout()
-        case .alertSecondButtonReturn:
-            open(section: "pro")
-        default:
-            break
-        }
-        return false
+        _ = feature
+        return true
     }
 
     /// Единственная интерактивная точка установки/обновления control-service.
@@ -88,7 +75,7 @@ enum SettingsCoordinator {
             FanController.writeProfileFile(FanController.profile(named: SettingsStore.activeFanProfileName))
         }
         KelvinSettingsWindowController.shared.refresh()
-        NotificationCenter.default.post(name: Notification.Name("BMHelperStateChanged"), object: nil)
+        NotificationCenter.default.post(name: AppNotifications.helperStateChanged, object: nil)
         return ok
     }
 
@@ -108,17 +95,4 @@ enum SettingsCoordinator {
         }
     }
 
-    private static func openCheckout() {
-        guard let checkout = Licensing.checkoutURL,
-              let url = URL(string: checkout)
-        else {
-            let alert = NSAlert()
-            alert.messageText = L("Покупка временно недоступна")
-            alert.informativeText = L("Магазин Lemon Squeezy ещё не подключён. Пожалуйста, активируйте лицензию ключом или попробуйте позже.")
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            return
-        }
-        NSWorkspace.shared.open(url)
-    }
 }

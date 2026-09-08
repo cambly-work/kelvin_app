@@ -2,6 +2,26 @@ import Foundation
 import Security
 import os
 
+/// Одноразовый потокобезопасный затвор для гонки «XPC-ответ против таймаута».
+/// В отличие от `withTaskGroup`, он не ждёт зависшую дочернюю задачу после победы таймера:
+/// XPC callback может не прийти вообще, а UI всё равно обязан выйти из busy-состояния.
+private final class AsyncTimeoutGate<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value?, Never>?
+
+    init(_ continuation: CheckedContinuation<Value?, Never>) {
+        self.continuation = continuation
+    }
+
+    func resolve(_ value: Value?) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
+    }
+}
+
 /// Клиент XPC для KelvinPrivilegedService. Предоставляет типизированный API
 /// для отправки запросов к привилегированному сервису и получения ответов.
 actor PrivilegedServiceClient {
@@ -23,7 +43,7 @@ actor PrivilegedServiceClient {
 
     /// Логгер для диагностики XPC.
     private static let log = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.trykelvin.kelvin",
+        subsystem: Bundle.main.bundleIdentifier ?? AppConfig.bundleID,
         category: "privileged-xpc"
     )
 
@@ -33,15 +53,21 @@ actor PrivilegedServiceClient {
     func connect() async -> Bool {
         // Если уже подключены — повторный handshake для подтверждения живости.
         if connected, let proxy {
-            let result = await handshakeViaProxy(proxy)
-            if case .success = result { return true }
+            let result = await withTimeout(seconds: PrivilegedServiceConfig.connectionTimeout) {
+                await self.handshakeViaProxy(proxy)
+            }
+            if let result, case .success = result { return true }
             // Handshake не удался — сбрасываем соединение.
             resetConnection()
         }
 
-        return await withTimeout(seconds: PrivilegedServiceConfig.connectionTimeout) {
+        guard let connected = await withTimeout(seconds: PrivilegedServiceConfig.connectionTimeout, operation: {
             await self.performConnect()
-        } ?? false
+        }) else {
+            disconnect()
+            return false
+        }
+        return connected
     }
 
     /// Отключиться от сервиса.
@@ -70,9 +96,13 @@ actor PrivilegedServiceClient {
             return .failure(GPUModeError.serviceUnavailable)
         }
 
-        return await withTimeout(seconds: PrivilegedServiceConfig.commandTimeout) {
+        guard let result = await withTimeout(seconds: PrivilegedServiceConfig.commandTimeout, operation: {
             await self.callGetGPUMode(proxy)
-        } ?? .failure(GPUModeError.commandTimedOut)
+        }) else {
+            disconnect()
+            return .failure(GPUModeError.commandTimedOut)
+        }
+        return result
     }
 
     /// Установить режим GPU.
@@ -84,9 +114,13 @@ actor PrivilegedServiceClient {
         // Генерируем уникальный ID запроса для сериализации и dedup на стороне сервиса.
         let requestID = UUID().uuidString
 
-        return await withTimeout(seconds: PrivilegedServiceConfig.commandTimeout) {
+        guard let result = await withTimeout(seconds: PrivilegedServiceConfig.commandTimeout, operation: {
             await self.callSetGPUMode(proxy, rawMode: mode.rawValue, requestID: requestID)
-        } ?? .failure(GPUModeError.commandTimedOut)
+        }) else {
+            disconnect()
+            return .failure(GPUModeError.commandTimedOut)
+        }
+        return result
     }
 
     // MARK: - Private — Connection
@@ -289,35 +323,45 @@ actor PrivilegedServiceClient {
     // MARK: - Private — Identity Verification
 
     /// Проверить подпись кода процесса XPC-сервиса. Убеждаемся, что соединён именно
-    /// наш privileged helper, а не подмена. Используем SecCodeCopyGuestWithAttributes
-    /// с PID-поиском: находим helper-процесс по имени и проверяем его кодподпись.
+    /// наш privileged helper, а не подмена.
+    ///
+    /// Модель доверия:
+    ///  - Резолвим `SecCode` сервиса по PID соединения. (Audit-token через публичный
+    ///    API недоступен в Swift на текущем deployment target; PID-привязка принята
+    ///    с оговоркой ниже. Серверная сторона `helper/privileged/main.swift`
+    ///    дополнительно использует audit-token для проверки клиентов.)
+    ///  - Когда `expectedDeveloperTeamID` настроен (production) — проверка
+    ///    **fail-closed**: любая ошибка верификации отклоняет сервис. DR включает
+    ///    Team ID, поэтому подменённый/переподписанный ad-hoc helper отвергается.
+    ///  - Когда `expectedDeveloperTeamID == nil` (dev/ad-hoc) — проверяем identifier
+    ///    по возможности, но не блокируем dev-цикл (поведение как раньше).
     private func verifyServiceIdentity() -> Bool {
-        // Ищем процесс сервиса по имени Mach-сервиса (последний компонент).
-        // privileged helper обычно называется по label, но мы используем PID
-        // процесса с совпадающим именем.
-        let serviceName = PrivilegedServiceConfig.machServiceName
-        let helperName = (serviceName as NSString).lastPathComponent
+        let failClosed = AppConfig.isTeamIDConfigured
+        guard let conn = connection else {
+            Self.log.error("XPC: соединение отсутствует при верификации identity")
+            return false
+        }
 
-        guard let pid = findPID(processName: helperName) else {
-            Self.log.warning("XPC: процесс сервиса не найден (\(helperName)) — пропускаем верификацию")
-            return true  // при первой загрузке PID может быть ещё недоступен
+        let pid = conn.processIdentifier
+        guard pid > 0 else {
+            Self.log.error("XPC: нет PID соединения для верификации")
+            return failClosed ? false : true
         }
 
         var code: SecCode?
-        let pidDict: [String: Any] = [kSecGuestAttributePid as String: pid]
-
-        guard SecCodeCopyGuestWithAttributes(nil,
-                                              pidDict as CFDictionary,
-                                              [],
-                                              &code) == errSecSuccess,
+        let attrs: [String: Any] = [kSecGuestAttributePid as String: pid]
+        guard SecCodeCopyGuestWithAttributes(nil, attrs as CFDictionary, [], &code) == errSecSuccess,
               let code else {
-            Self.log.warning("XPC: SecCodeCopyGuestWithAttributes не удалось для PID \(pid)")
-            return true  // не блокируем при невозможности верифицировать
+            Self.log.warning("XPC: SecCodeCopyGuestWithAttributes (PID \(pid)) не удалось")
+            return failClosed ? false : true
         }
 
-        // Helper has its own signing identifier; the application bundle ID is
-        // checked in the opposite direction by the helper.
-        let requirement = "identifier \"\(PrivilegedServiceConfig.serviceName)\"" as CFString
+        // Designated requirement: identifier + (в production) Team ID.
+        var requirementString = "identifier \"\(PrivilegedServiceConfig.serviceName)\""
+        if let team = AppConfig.expectedDeveloperTeamID, !team.isEmpty {
+            requirementString += " and certificate leaf[subject.OU] = \"\(team)\""
+        }
+        let requirement = requirementString as CFString
         var req: SecRequirement?
         guard SecRequirementCreateWithString(requirement, [], &req) == errSecSuccess,
               let req else {
@@ -326,51 +370,26 @@ actor PrivilegedServiceClient {
         }
 
         let valid = SecCodeCheckValidity(code, [], req) == errSecSuccess
-        if !valid {
-            Self.log.error("XPC: код сервиса (PID \(pid)) не прошёл проверку подписи")
+        if valid {
+            Self.log.info("XPC: подпись сервиса подтверждена (PID \(pid, privacy: .public))")
+        } else {
+            Self.log.error("XPC: код сервиса (PID \(pid, privacy: .public)) не прошёл проверку подписи")
         }
         return valid
     }
 
-    /// Найти PID процесса по имени исполняемого файла через /proc или sysctl.
-    private func findPID(processName: String) -> pid_t? {
-        // Используем sysctl для получения списка процессов.
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
-        var size = 0
-        sysctl(&mib, UInt32(mib.count), nil, &size, nil, 0)
-        let entryCount = size / MemoryLayout<kinfo_proc>.stride
-        var procs = [kinfo_proc](repeating: kinfo_proc(), count: entryCount)
-        sysctl(&mib, UInt32(mib.count), &procs, &size, nil, 0)
-
-        for proc in procs {
-            let name = withUnsafePointer(to: proc.kp_proc.p_comm) { ptr -> String in
-                let buf = UnsafeRawBufferPointer(start: ptr, count: MemoryLayout<CChar>.size * Int(MAXCOMLEN))
-                let chars = buf.bindMemory(to: CChar.self)
-                return String(cString: chars.baseAddress!)
-            }
-            if name == processName || name.hasSuffix("/\(processName)") {
-                return proc.kp_proc.p_pid
-            }
-        }
-        return nil
-    }
-
     // MARK: - Private — Timeout Utility
 
-    /// Обёртка с таймаутом для async-операций. Возвращает nil при превышении.
+    /// Обёртка с настоящим дедлайном для XPC-операций. Возвращает nil при превышении,
+    /// даже если зависшая callback-continuation не поддерживает cooperative cancellation.
     private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async -> T) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
+        await withCheckedContinuation { continuation in
+            let gate = AsyncTimeoutGate<T>(continuation)
+            Task { gate.resolve(await operation()) }
+            Task {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
+                gate.resolve(nil)
             }
-            // Первый завершённый результат побеждает.
-            for await result in group {
-                group.cancelAll()
-                return result
-            }
-            return nil
         }
     }
 }

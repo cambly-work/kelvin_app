@@ -6,9 +6,26 @@ struct QuickToggleDef {
     let label: String
     let icon: String
     let accent: NSColor
+    let isMomentaryAction: Bool
+    let tooltip: String?
     let available: () -> Bool
     let isOn: () -> Bool
     let toggle: () -> Void
+
+    init(id: String, label: String, icon: String, accent: NSColor,
+         isMomentaryAction: Bool = false, tooltip: String? = nil,
+         available: @escaping () -> Bool, isOn: @escaping () -> Bool,
+         toggle: @escaping () -> Void) {
+        self.id = id
+        self.label = label
+        self.icon = icon
+        self.accent = accent
+        self.isMomentaryAction = isMomentaryAction
+        self.tooltip = tooltip
+        self.available = available
+        self.isOn = isOn
+        self.toggle = toggle
+    }
 }
 
 /// Реестр встроенных переключателей. Используется и поповером (для рендера),
@@ -25,7 +42,7 @@ enum QuickToggleRegistry {
     // Системные тумблеры (Wi-Fi/BT/тёмная тема/Night Shift/подсветка) УБРАНЫ отовсюду —
     // toggleLayout сам отбрасывает исчезнувшие id, миграция автоматическая.
     static let all: [QuickToggleDef] = [
-        QuickToggleDef(id: "limit80", label: L("Лимит 80%"), icon: "battery.75percent", accent: brand,
+        QuickToggleDef(id: "limit80", label: L("Лимит заряда"), icon: "battery.75percent", accent: brand,
                        available: { BatteryReader.read() != nil },
                        isOn: {
                            HelperInstall.fandInstalled
@@ -51,16 +68,18 @@ enum QuickToggleRegistry {
                            } else if !HelperInstall.fandInstalled {
                                SettingsCoordinator.open(section: "power")
                            } else {
-                               ChargeControl.topUp()                        // Pro-гейт внутри
+                               ChargeControl.topUp()
                            }
                        }),
         QuickToggleDef(id: "turbofan", label: L("Турбо-кулеры"), icon: "fanblades.fill", accent: brand,
                        available: { !FanController.fans().isEmpty },
                        isOn: { FanController.daemonInstalled && SettingsStore.activeFanProfileName == "turbo" },
                        toggle: {
-                           guard Licensing.shared.isPro else { _ = SettingsCoordinator.requirePro(.fans); return }
                            if SettingsStore.activeFanProfileName == "turbo" {
+                               // Повторное нажатие возвращает системный режим.
                                FanController.applyProfileHeadless(named: "auto")
+                           } else if !Licensing.shared.isPro {
+                               _ = SettingsCoordinator.requirePro(.fans)
                            } else if !FanController.daemonInstalled {
                                SettingsCoordinator.open(section: "cooling")
                            } else {
@@ -72,6 +91,34 @@ enum QuickToggleRegistry {
         // Он останется в явном разделе Security до переноса в typed privileged service.
         QuickToggleDef(id: "caffeine", label: L("Не засыпать"), icon: "cup.and.saucer.fill", accent: brand,
                        available: { true }, isOn: { Caffeine.active }, toggle: { Caffeine.toggle() }),
+        QuickToggleDef(
+            id: "freeMemory",
+            label: L("Освободить RAM"),
+            icon: "memorychip",
+            accent: brand,
+            isMomentaryAction: true,
+            tooltip: L("Освобождает файловый кэш в оперативной памяти. Память приложений и данные не удаляются; macOS может запросить пароль администратора."),
+            available: { FileManager.default.isExecutableFile(atPath: "/usr/sbin/purge") },
+            isOn: { false },
+            toggle: {
+                MemoryInfo.releaseFileCache { result in
+                    let alert = NSAlert()
+                    alert.alertStyle = result == .success ? .informational : .warning
+                    switch result {
+                    case .success:
+                        alert.messageText = L("Кэш памяти освобождён")
+                        alert.informativeText = L("macOS освободила доступный файловый кэш. Объём занятой RAM может быстро вырасти снова — это нормально.")
+                    case .alreadyRunning:
+                        alert.messageText = L("Очистка памяти уже выполняется")
+                        alert.informativeText = L("Дождитесь завершения текущей операции.")
+                    case .failed:
+                        alert.messageText = L("Не удалось освободить кэш памяти")
+                        alert.informativeText = L("Действие отменено или macOS не разрешила очистку.")
+                    }
+                    alert.runModal()
+                }
+            }
+        ),
         QuickToggleDef(id: "hidden", label: L("Скрытые файлы"), icon: "eye", accent: brand,
                        available: { true }, isOn: { hiddenTweak.map { FinderTweaks.isOn($0) } ?? false },
                        toggle: { if let t = hiddenTweak { FinderTweaks.toggle(t) } }),

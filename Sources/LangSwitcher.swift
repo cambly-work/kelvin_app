@@ -143,7 +143,7 @@ final class LangSwitcher {
 
     private func publishRuntimeChanged() {
         DispatchQueue.main.async {
-            NotificationCenter.default.post(name: Notification.Name("BMLangRuntimeChanged"), object: nil)
+            NotificationCenter.default.post(name: AppNotifications.langRuntimeChanged, object: nil)
         }
     }
 
@@ -257,7 +257,7 @@ final class LangSwitcher {
             if isTrusted {
                 startTap()
                 DispatchQueue.main.async {
-                    NotificationCenter.default.post(name: Notification.Name("BMLangRuntimeChanged"), object: nil)
+                    NotificationCenter.default.post(name: AppNotifications.langRuntimeChanged, object: nil)
                 }
             }
         }

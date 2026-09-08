@@ -62,9 +62,9 @@ enum Report {
 
         // — Тренды —
         stack.addArrangedSubview(lbl(L("Тренды за период"), 15, .semibold, .labelColor))
-        // cap/floor: заряд честно 0..100; здоровье НЕ кэпим (бывает 104% — не прячем), низ 0.
+        // Пользовательские проценты заряда и здоровья живут на системной шкале 0...100.
         let metrics: [(title: String, metric: History.Metric, unit: String, color: NSColor, cap: Double?, floor: Double?)] = [
-            (L("Здоровье АКБ"), .health,  "%",          .systemGreen,  nil, 0),
+            (L("Здоровье АКБ"), .health,  "%",          .systemGreen,  100, 0),
             (L("Заряд"),        .charge,  "%",          .systemBlue,   100, 0),
             (L("Температура CPU"), .cpuTemp, "°",       .systemOrange, nil, nil),
             (L("Потребление"),  .systemW, L(" Вт"),     .systemPurple, nil, 0),
@@ -89,13 +89,7 @@ enum Report {
 
         stack.addArrangedSubview(sep())
         let n = History.shared.countSince(since)               // точки ЗА ПЕРИОД отчёта, а не вся 90д база
-        let pts: String
-        switch I18n.current {
-        case .ru: pts = SettingsStore.plural(n, "точка", "точки", "точек")
-        case .uk: pts = SettingsStore.plural(n, "точка", "точки", "точок")
-        case .en: pts = n == 1 ? "point" : "points"
-        case .pt: pts = n == 1 ? "ponto" : "pontos"
-        }
+        let pts = I18n.pluralPoints(n)
         stack.addArrangedSubview(lbl(String(format: L("Данные сняты локально, раз в минуту · %d %@. Никакой сети и телеметрии."), n, pts), 9, .regular, .tertiaryLabelColor))
 
         // — Сборка канвы + рендер в PDF —
@@ -120,7 +114,7 @@ enum Report {
 
     private static func batteryLines(_ b: BatteryInfo, _ ins: BatteryHealth.Insight) -> String {
         var lines: [String] = []
-        var l1 = String(format: L("Здоровье %.0f%%"), b.health)
+        var l1 = String(format: L("Здоровье %.0f%%"), b.displayHealth)
         if let rated = b.ratedCycles, rated > 0 { l1 += String(format: L(" · %d циклов из ~%d"), b.cycleCount, rated) }
         else { l1 += String(format: L(" · %d циклов"), b.cycleCount) }
         lines.append(l1)

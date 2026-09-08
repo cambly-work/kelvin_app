@@ -10,6 +10,7 @@ final class GlassButton: NSView {
     private let label = NSTextField(labelWithString: "")
     private let cornerRadius: CGFloat
     private var hovering = false
+    private var pressed = false
     private var symbol: String?
 
     /// Подпись/иконка фирменной бирюзой (деструктив/CTA-акцент). Иначе — системный .labelColor.
@@ -26,8 +27,10 @@ final class GlassButton: NSView {
 
     var isEnabled = true {
         didSet {
+            if !isEnabled { pressed = false }
             alphaValue = isEnabled ? 1 : 0.45
             restyle()
+            window?.invalidateCursorRects(for: self)
         }
     }
 
@@ -108,6 +111,11 @@ final class GlassButton: NSView {
     override func mouseEntered(with event: NSEvent) { guard isEnabled else { return }; hovering = true; restyle() }
     override func mouseExited(with event: NSEvent) { hovering = false; restyle() }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+
     /// Активация (нажатие): press-микроанимация (gated Motion.reduced) + onClick. Общая для мыши/клавы/VO.
     private func activate() {
         guard isEnabled else { return }
@@ -121,7 +129,22 @@ final class GlassButton: NSView {
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         let p = convert(event.locationInWindow, from: nil)
-        if bounds.contains(p) { activate() }
+        guard bounds.contains(p) else { return }
+        window?.makeFirstResponder(self)
+        pressed = true
+        alphaValue = 0.72
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard pressed else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        alphaValue = bounds.contains(p) ? 0.72 : 1
+    }
+    override func mouseUp(with event: NSEvent) {
+        guard pressed else { return }
+        pressed = false
+        alphaValue = isEnabled ? 1 : 0.45
+        let p = convert(event.locationInWindow, from: nil)
+        if isEnabled, bounds.contains(p) { activate() }
     }
 
     // MARK: клавиатура — фокус + пробел/Enter
@@ -130,7 +153,7 @@ final class GlassButton: NSView {
     override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
     override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 49 || event.keyCode == 36 { activate() }   // Space / Return
+        if (event.keyCode == 49 || event.keyCode == 36), !event.isARepeat { activate() }   // Space / Return
         else { super.keyDown(with: event) }
     }
     override var focusRingMaskBounds: NSRect { bounds }
@@ -141,6 +164,10 @@ final class GlassButton: NSView {
     // MARK: VoiceOver — button с меткой (НЕ checkBox — это действие)
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { title }
-    override func accessibilityPerformPress() -> Bool { activate(); return true }
+    override func accessibilityLabel() -> String? { title.isEmpty ? toolTip : title }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        activate()
+        return true
+    }
 }

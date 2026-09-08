@@ -1,120 +1,53 @@
 import Foundation
 import AppKit
 
-// ════════════════════════════════════════════════════════════════════════════
-//  KELVIN — ЕДИНЫЙ ФАЙЛ НАСТРОЕК ПРИЛОЖЕНИЯ ДЛЯ ВЛАДЕЛЬЦА
-//
-//  Здесь собрана вся «инфа о приложении», которую можно менять руками.
-//  Поправь значения ниже (строки в кавычках) и пересобери:
-//        ./build.sh && ./install-app.sh
-//  Больше эти данные нигде искать не нужно — весь UI берёт их отсюда.
-// ════════════════════════════════════════════════════════════════════════════
+// Единое место для публичных данных Kelvin.
 enum AppConfig {
+    // Kelvin бесплатен: все функции доступны без ключа, триала и подписки.
+    // Для донатов вставь сюда Boosty / Ko-fi / PayPal / Patreon URL.
+    // Пока URL не задан, кнопка благодарности откроет письмо автору.
+    static let supportURL: String? = nil
 
-    // ─── КОММЕРЧЕСКАЯ КОНФИГУРАЦИЯ (Lemon Squeezy) ───────────────────────────
-    // Вписать store_id и product_id из настроек продукта Lemon Squeezy.
-    // nil → магазин не подключён, кнопка покупки disabled, активация ключей недоступна.
-    static let lemonSqueezyStoreID: Int? = nil              // ← store_id из Lemon Squeezy
-    static let lemonSqueezyProductID: Int? = nil            // ← product_id из Lemon Squeezy
-    static let lemonSqueezyCheckoutURL: String? = nil       // ← checkout URL (https://*.lemonsqueezy.com/checkout/...)
-    
-    /// Цена Kelvin Pro для отображения в UI.
-    static let proPriceDisplay: String = "$19"
-    
-    /// Лимит активаций на одну лицензию (для отображения).
-    static let activationLimitDisplay: Int = 2
-    
-    /// Длительность trial периода в днях.
-    static let trialDays: Int = 14
-    
-    /// Grace period для офлайн-валидации лицензии (дней после последней успешной проверки).
-    static let licenseGraceDays: Int = 7
-    
-    // ─── TEAM ID для self-validation (hardened runtime / notarization) ────────
-    // Вписать Team ID из сертификата Developer ID Application (скобки из строки подписи).
-    // Пример: "ABCDE12345" из "Developer ID Application: Artem Balabanov (ABCDE12345)"
-    // nil → self-validation выключена (ad-hoc сборка).
-    //
-    // ВАЖНО для Privileged GPU Service: Team ID является release blocker.
-    // Привилегированный XPC-сервис (KelvinPrivilegedService) проверяет подпись
-    // и bundle ID подключающегося приложения. Без настроенного Team ID:
-    //   - сервис принимает ad-hoc подпись (небезопасно для production)
-    //   - validation в клиенте не может проверить identity сервиса
-    // Для production необходимо:
-    //   1. Настроить Developer ID Application подпись
-    //   2. Вписать Team ID сюда
-    //   3. Включить проверку Team ID в helper/privileged/main.swift
-    //   4. Notarize итоговый bundle
-    static let expectedDeveloperTeamID: String? = nil       // ← Team ID из Apple Developer
-    
-    // ─── ССЫЛКА ДОНАТА («Поддержать автора») ──────────────────────────────────
-    // Сюда вставь свою ссылку: Boosty / Patreon / PayPal / Ko-fi / крипто-кошелёк…
-    // Пока стоит заглушка — кнопки доната откроют её. Замени на реальную.
-    static let donateURL = "https://example.com/support-kelvin"          // ← ВПИШИ СВОЮ ССЫЛКУ
+    // TEAM ID для hardened runtime / notarization и проверки privileged helper.
+    static let expectedDeveloperTeamID: String? = nil
 
-    // ─── ПОЧТА ДЛЯ СВЯЗИ ──────────────────────────────────────────────────────
-    // Кнопки «Написать автору» / «Обратная связь» открывают письмо на этот адрес.
-    static let contactEmail = "cambly.studio@gmail.com"                  // ← твоя почта
+    static let contactEmail = "cambly.studio@gmail.com"
+    static let website = "https://trykelvin.com"
 
-    // ─── САЙТ / СТРАНИЦА ПРИЛОЖЕНИЯ ───────────────────────────────────────────
-    static let website = "https://trykelvin.com"                         // ← твой сайт (или страница загрузки)
+    static let bundleID = "com.trykelvin.kelvin"
+    static let appcastURL = "\(website)/appcast.xml"
+    static let privacyURL = "\(website)/privacy.html"
+    static let eulaURL = "\(website)/eula.html"
 
-    // ─── ИМЯ И КОПИРАЙТ ───────────────────────────────────────────────────────
-    static let appName   = "Kelvin"                                      // имя в письмах/заголовках
-    static let copyright = "© 2026 Kelvin · Artem Balabanov"             // строка в «О программе»
+    static let appName = "Kelvin"
+    static let copyright = "© 2026 Kelvin · Artem Balabanov"
 
-    // ─── ВАЛИДАЦИЯ КОНФИГУРАЦИИ (fail-closed для release) ────────────────────
-    /// Магазин Lemon Squeezy реально настроен?
-    static var isStoreConfigured: Bool {
-        guard let store = lemonSqueezyStoreID, let product = lemonSqueezyProductID else { return false }
-        return store > 0 && product > 0
-    }
-    
-    /// Team ID настроен для production validation?
     static var isTeamIDConfigured: Bool {
         guard let team = expectedDeveloperTeamID else { return false }
         return !team.isEmpty && team.count >= 10
     }
-    
-    /// Checkout URL валиден (HTTPS, не заглушка)?
-    static var isCheckoutURLValid: Bool {
-        guard let url = lemonSqueezyCheckoutURL else { return false }
-        return url.hasPrefix("https://") && !url.contains("example.com")
+
+    static var supportConfigured: Bool {
+        guard let value = supportURL else { return false }
+        return value.hasPrefix("https://") && !value.contains("example.com")
     }
 
-    /// Paywall включается только когда одновременно готовы покупка и активация.
-    /// Это не даёт случайно заблокировать Pro-функции релизом с незаполненными nil.
-    static var isCommerceEnabled: Bool { isStoreConfigured && isCheckoutURLValid }
-    
-    /// Diagnostic message для DEBUG (почему магазин не готов).
-    static var storeDiagnosticMessage: String {
-        var issues: [String] = []
-        if lemonSqueezyStoreID == nil || lemonSqueezyStoreID! <= 0 {
-            issues.append("storeID не задан или ≤ 0")
+    static func openSupport() {
+        if supportConfigured, let supportURL {
+            open(supportURL)
+        } else if let message = mailto(subject: "Спасибо за Kelvin") {
+            NSWorkspace.shared.open(message)
         }
-        if lemonSqueezyProductID == nil || lemonSqueezyProductID! <= 0 {
-            issues.append("productID не задан или ≤ 0")
-        }
-        if lemonSqueezyCheckoutURL == nil {
-            issues.append("checkoutURL не задан")
-        } else if !lemonSqueezyCheckoutURL!.hasPrefix("https://") {
-            issues.append("checkoutURL должен начинаться с https://")
-        } else if lemonSqueezyCheckoutURL!.contains("example.com") {
-            issues.append("checkoutURL содержит example.com (заглушка)")
-        }
-        if issues.isEmpty { return "OK" }
-        return issues.joined(separator: "; ")
     }
 
-    // ─── (служебное, менять не нужно) ─────────────────────────────────────────
-    /// Донат реально настроен (ссылка не заглушка)?
-    static var donateConfigured: Bool { !donateURL.contains("example.com") }
-    static func openDonate()  { open(donateURL) }
     static func openWebsite() { open(website) }
-    /// Готовый mailto к автору с темой письма.
+
     static func mailto(subject: String) -> URL? {
         let s = subject.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         return URL(string: "mailto:\(contactEmail)?subject=\(s)")
     }
-    private static func open(_ s: String) { if let u = URL(string: s) { NSWorkspace.shared.open(u) } }
+
+    private static func open(_ string: String) {
+        if let url = URL(string: string) { NSWorkspace.shared.open(url) }
+    }
 }

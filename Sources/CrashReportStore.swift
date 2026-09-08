@@ -34,6 +34,8 @@ enum CrashReportStore {
         case queued
         /// Успешно отправлен.
         case sent
+        /// Отправка окончательно завершилась ошибкой.
+        case failed
         /// Пользователь отказался от отправки.
         case declined
         /// Истёк срок хранения.
@@ -132,10 +134,11 @@ enum CrashReportStore {
     
     // MARK: - Constants
     
-    private static let applicationSupportDirectory = FileManager.default.urls(
-        for: .applicationSupportDirectory,
-        in: .userDomainMask
-    ).first!.appendingPathComponent("Kelvin", isDirectory: true)
+    private static let applicationSupportDirectory = (
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+    ).appendingPathComponent("Kelvin", isDirectory: true)
     
     private static let crashReportsDirectory = applicationSupportDirectory
         .appendingPathComponent("CrashReports", isDirectory: true)
@@ -182,7 +185,13 @@ enum CrashReportStore {
     /// Просканировать системные DiagnosticReports и обновить локальное хранилище.
     /// Возвращает новые отчёты Kelvin за последние 7 дней.
     static func scan() -> ScanResult {
-        queue.sync {
+        do {
+            try initialize()
+        } catch {
+            Log.app.error("CrashReportStore: не удалось создать хранилище: \(error.localizedDescription, privacy: .public)")
+            return ScanResult(newReports: [], queuedReports: [], allReports: [])
+        }
+        return queue.sync {
             performScan()
         }
     }
@@ -224,13 +233,14 @@ enum CrashReportStore {
     }
     
     /// Записать ошибку отправки для отчёта.
-    static func recordSendError(for fingerprint: String, error: String) throws {
+    static func recordSendError(for fingerprint: String, error: String, terminal: Bool = false) throws {
         try queue.sync(flags: .barrier) {
             var metadata = loadMetadata()
             guard let index = metadata.firstIndex(where: { $0.fingerprint == fingerprint }) else {
                 throw StoreError.notFound
             }
             metadata[index].recordSendAttempt(error: error)
+            if terminal { metadata[index].transition(to: .failed) }
             saveMetadata(metadata)
         }
     }
@@ -242,6 +252,7 @@ enum CrashReportStore {
             guard let index = metadata.firstIndex(where: { $0.fingerprint == fingerprint }) else {
                 throw StoreError.notFound
             }
+            metadata[index].recordSendAttempt(error: nil)
             metadata[index].transition(to: .sent)
             metadata[index].setServerReportID(serverReportID)
             saveMetadata(metadata)
@@ -501,6 +512,12 @@ enum CrashReportStore {
         let metadataURL = crashReportsDirectory.appendingPathComponent(metadataFilename)
         
         do {
+            // Защита для всех call-site, не только scan(): updateState/recordSend*
+            // также обязаны работать на чистой установке.
+            try FileManager.default.createDirectory(
+                at: crashReportsDirectory,
+                withIntermediateDirectories: true
+            )
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

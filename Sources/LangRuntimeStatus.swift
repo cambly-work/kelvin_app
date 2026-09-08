@@ -7,8 +7,6 @@ import Carbon.HIToolbox
 enum LangRuntimeStatus: Equatable {
     /// Автоязык выключен пользователем
     case off
-    /// Нужна лицензия Pro (trial истёк или не активирован)
-    case unavailableByLicense
     /// Отсутствует разрешение Accessibility
     case accessibilityDenied
     /// Не удалось создать/запустить event tap для мониторинга ввода
@@ -26,8 +24,6 @@ enum LangRuntimeStatus: Equatable {
         switch self {
         case .off:
             return L("Выключено")
-        case .unavailableByLicense:
-            return L("Недоступно по лицензии")
         case .accessibilityDenied:
             return L("Нужен Универсальный доступ")
         case .inputMonitoringUnavailable:
@@ -55,8 +51,6 @@ struct LangSwitcherStatus {
     let savedMode: LangSwitcher.Mode
     /// Фактический runtime status
     let runtimeStatus: LangRuntimeStatus
-    /// Доступность Pro/trial
-    let hasProAccess: Bool
     /// Разрешение Accessibility
     let accessibilityTrusted: Bool
     /// Event tap активен
@@ -75,7 +69,6 @@ struct LangSwitcherStatus {
     init(
         savedMode: LangSwitcher.Mode,
         runtimeStatus: LangRuntimeStatus,
-        hasProAccess: Bool,
         accessibilityTrusted: Bool,
         tapActive: Bool,
         recoveries: Int,
@@ -86,7 +79,6 @@ struct LangSwitcherStatus {
     ) {
         self.savedMode = savedMode
         self.runtimeStatus = runtimeStatus
-        self.hasProAccess = hasProAccess
         self.accessibilityTrusted = accessibilityTrusted
         self.tapActive = tapActive
         self.recoveries = recoveries
@@ -96,16 +88,13 @@ struct LangSwitcherStatus {
         self.conversionPairs = conversionPairs
     }
     
-    /// Сформировать текущий статус из LangSwitcher и Licensing.
+    /// Сформировать текущий статус из LangSwitcher и системных разрешений.
     static func current() -> LangSwitcherStatus {
         let switcher = LangSwitcher.shared
         let savedMode = switcher.mode
         let wanted = savedMode != .off
             || SettingsStore.snippetsEnabled
             || SettingsStore.spellFixEnabled
-        
-        // Лицензия
-        let hasProAccess = Licensing.shared.isPro
         
         // Accessibility
         let accessibilityTrusted = switcher.isTrusted
@@ -120,8 +109,6 @@ struct LangSwitcherStatus {
         let runtimeStatus: LangRuntimeStatus
         if !wanted {
             runtimeStatus = .off
-        } else if !hasProAccess {
-            runtimeStatus = .unavailableByLicense
         } else if !accessibilityTrusted {
             runtimeStatus = .accessibilityDenied
         } else if !tapActive && creationFailures > 0 {
@@ -162,7 +149,6 @@ struct LangSwitcherStatus {
         return LangSwitcherStatus(
             savedMode: savedMode,
             runtimeStatus: runtimeStatus,
-            hasProAccess: hasProAccess,
             accessibilityTrusted: accessibilityTrusted,
             tapActive: tapActive,
             recoveries: recoveries,

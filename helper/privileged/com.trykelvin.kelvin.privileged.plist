@@ -22,9 +22,9 @@
     <true/>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/kelvin-privileged.log</string>
+    <string>/var/log/kelvin-privileged.log</string>
 
     <key>StandardOutPath</key>
-    <string>/tmp/kelvin-privileged.log</string>
+    <string>/var/log/kelvin-privileged.log</string>
 </dict>
 </plist>

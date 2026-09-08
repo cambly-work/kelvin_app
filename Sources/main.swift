@@ -1,494 +1,8 @@
 import AppKit
 import CoreAudio   // AudioDeviceID для плитки «Звук · вывод» (переключение системного вывода)
+import ServiceManagement  // SMAppService.unregister() для --unregister-privileged-service
 
 // MARK: - UI поповера
-
-/// Статус-спайн: 2pt вертикальный шов у левой внутренней кромки поповера вдоль колонки данных.
-/// Покой — еле заметный hairline; warn/crit — светящийся 32pt сегмент у проблемного модуля
-/// (мягкая accentInk-тень, не грязный ореол). Если позицию сегмента чисто вычислить нельзя —
-/// деградирует к плоскому hairline во всю высоту (всё ещё безель-шов). Второй потребитель
-/// worst-of из refreshHealthVerdict — НЕ пересчитывает сигналы.
-final class StatusSpine: NSView {
-    private let track = CALayer()      // покой: hairline во всю высоту
-    private let glow = CALayer()       // warn/crit: короткий светящийся сегмент
-    private let segH: CGFloat = 32     // высота сегмента (фиксированная 32pt)
-    private var level: Design.Level = .ok
-    private var anchorCenterY: CGFloat?    // центр сегмента в координатах спайна (nil → деградация к hairline)
-    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
-
-    override init(frame: NSRect) { super.init(frame: frame); commonInit() }
-    required init?(coder: NSCoder) { fatalError() }
-    private func commonInit() {
-        wantsLayer = true
-        layer?.masksToBounds = false
-        layer?.isGeometryFlipped = true        // y растёт вниз — как экранные координаты модулей
-        track.cornerRadius = 1
-        track.anchorPoint = CGPoint(x: 0.5, y: 0)   // верхняя кромка — для top-down прорисовки
-        glow.cornerRadius = 1
-        glow.opacity = 0
-        glow.masksToBounds = false
-        glow.shadowOffset = .zero
-        glow.shadowRadius = 5
-        layer?.addSublayer(track)
-        layer?.addSublayer(glow)
-        restyle()
-    }
-    override var isFlipped: Bool { true }     // y растёт вниз — как экранные координаты модулей
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); restyle() }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        // track anchor (0.5,0): bounds полной высоты, position у верхней кромки (geometryFlipped → y 0 = верх)
-        track.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
-        track.position = CGPoint(x: bounds.width/2, y: 0)
-        layoutGlow()
-        CATransaction.commit()
-    }
-    private func layoutGlow() {
-        let cy = anchorCenterY ?? bounds.midY
-        let y = max(0, min(bounds.height - segH, cy - segH/2))
-        glow.frame = CGRect(x: 0, y: y, width: bounds.width, height: segH)
-    }
-    private func restyle() {
-        let dark = isDark
-        track.backgroundColor = Design.Color.hairline(dark, 0.10).cgColor
-        // та же светлая-тема −18% затемнение, что у всех семантических поверхностей (точки вкладок,
-        // вердикт-точка, чип-трасса): спайн и вердикт-точка — один worst-of, должны читаться одним цветом.
-        let raw = level == .crit ? Design.Color.levelCrit : Design.Color.levelWarn
-        let c = dark ? raw : (raw.blended(withFraction: 0.18, of: .black) ?? raw)
-        glow.backgroundColor = c.withAlphaComponent(0.55).cgColor
-        glow.shadowColor = Design.Color.accentInk(dark).cgColor   // мягкая глубинная тень, НЕ грязный цветной ореол
-        glow.shadowOpacity = 0.5
-    }
-
-    /// Второй потребитель worst-of: уровень + центр проблемного модуля (в КООРДИНАТАХ спайна).
-    /// nil-центр → деградация к плоскому hairline (сегмент скрыт). Gate Motion.reduced на появление.
-    func apply(level: Design.Level, centerY: CGFloat?) {
-        self.level = level
-        self.anchorCenterY = (level == .ok) ? nil : centerY
-        restyle()
-        let show = (level != .ok) && (centerY != nil)
-        if Motion.reduced {
-            CATransaction.begin(); CATransaction.setDisableActions(true)
-            layoutGlow(); glow.opacity = show ? 1 : 0
-            CATransaction.commit()
-            return
-        }
-        CATransaction.begin(); CATransaction.setDisableActions(true); layoutGlow(); CATransaction.commit()
-        let anim = CABasicAnimation(keyPath: "opacity")
-        anim.fromValue = glow.opacity; anim.toValue = show ? 1 : 0
-        anim.duration = Design.Motion.durBase
-        anim.timingFunction = Design.Motion.easeStandard
-        glow.opacity = show ? 1 : 0
-        glow.add(anim, forKey: "spineGlow")
-    }
-
-    /// Анимация открытия: шов прорисовывается сверху вниз (scale.y 0→1 вокруг верхней кромки).
-    /// anchorPoint (0.5,0) уже задан в commonInit. Gate Motion.reduced. Если apply() уже зажёг
-    /// warn/crit-свечение (open на проблеме), пере-заводим его reveal с beginTime = длительность
-    /// прорисовки шва — чтобы цветной сегмент проявлялся ПОСЛЕ шва, на котором сидит, а не до него.
-    func animateIn() {
-        guard !Motion.reduced else { return }
-        let dur = Design.Motion.durBase
-        let a = CABasicAnimation(keyPath: "transform.scale.y")
-        a.fromValue = 0; a.toValue = 1
-        a.duration = dur
-        a.timingFunction = Design.Motion.easeOut
-        track.add(a, forKey: "spineDraw")
-        if glow.opacity > 0 {                                        // свечение уже целится в 1 → отложить его проявление за шов
-            let g = CABasicAnimation(keyPath: "opacity")
-            g.fromValue = 0; g.toValue = 1
-            g.beginTime = CACurrentMediaTime() + dur                 // ждём, пока шов дорисуется сверху вниз
-            g.duration = dur
-            g.timingFunction = Design.Motion.easeStandard
-            g.fillMode = .backwards                                  // до beginTime держим 0 — сегмент скрыт под рисующимся швом
-            glow.add(g, forKey: "spineGlow")                         // перебивает apply()-фейд (тот же ключ)
-        }
-    }
-}
-
-/// Сегмент-контрол в стиле Control Center: лёгкий frosted-трек + скользящая пилюля
-/// фирменного бренд-акцента. Заменяет стоковый NSSegmentedControl (тяжёлая системная
-/// капсула выпадала из «стекла»). Кнопки дают бесплатную доступность/клавиатуру.
-final class PillTabBar: NSView {
-    private let labels: [String]
-    private let icons: [String]?                 // SF-символы; при 5+ вкладках рисуем иконки (текст не влезает)
-    private var iconMode: Bool { icons != nil && labels.count >= 5 }
-    private var buttons: [NSButton] = []
-    private let pill = NSView()
-    /// Тихие warn/crit-точки-оверлеи (по одной на вкладку): спокойная машина — точек нет.
-    /// Оверлей поверх ярлыка, НЕ влияет на высоту таб-бара (fixed-height-инвариант).
-    private var dots: [NSView] = []
-    private var dotLevels: [Design.Level?] = []
-    private(set) var selectedIndex: Int
-    var onSelect: ((Int) -> Void)?
-    /// Повторный тап по УЖЕ выбранному сегменту (для disclosure-паттернов: «Лимит» открывает/прячет бар).
-    var onReselect: ((Int) -> Void)?
-    /// Цвет активной пилюли: nil → дефолтный accentMuted (истор. саб-бары). Домен-рельс ставит сюда
-    /// цвет ТЕПЛОВОГО РЕЖИМА (spокоен→бирюза/нагрузка→янтарь/жара→красный) — навигация дышит вместе с прибором.
-    var pillColor: NSColor? { didSet { if pillColor != oldValue { applyTheme() } } }
-
-    init(labels: [String], icons: [String]? = nil, selected: Int) {
-        self.labels = labels
-        self.icons = icons
-        self.selectedIndex = min(max(selected, 0), max(labels.count - 1, 0))
-        self.dotLevels = Array(repeating: nil, count: labels.count)
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = Design.Radius.track
-        layer?.cornerCurve = .continuous
-        pill.wantsLayer = true
-        pill.layer?.cornerRadius = Design.Radius.pill
-        pill.layer?.cornerCurve = .continuous
-        addSubview(pill)
-        for (i, t) in labels.enumerated() {
-            let b = NSButton(title: t, target: self, action: #selector(tap(_:)))
-            b.tag = i
-            b.isBordered = false
-            b.setButtonType(.momentaryChange)
-            b.cell?.usesSingleLineMode = true                    // без переноса: длинные ярлыки жмём кеглем, не в 2 строки
-            b.imageScaling = .scaleProportionallyDown
-            if iconMode { b.toolTip = t }                        // имя вкладки во всплывашке (иконки без текста)
-            b.translatesAutoresizingMaskIntoConstraints = true   // кладём по frame в layout()
-            buttons.append(b)
-            addSubview(b)
-            let dot = NSView()
-            dot.wantsLayer = true
-            dot.layer?.cornerRadius = 2.5
-            dot.layer?.cornerCurve = .continuous
-            dot.isHidden = true
-            dots.append(dot)
-            addSubview(dot)
-        }
-        applyTheme()
-    }
-
-    /// Тихая точка статуса на вкладке: nil — нет точки (спокойная машина), .warn/.crit — цвет семантики.
-    /// Зовётся из update(); дёшево (no-op при том же состоянии), оверлей не трогает геометрию ярлыков.
-    func setDot(_ index: Int, _ level: Design.Level?) {
-        guard index >= 0, index < dots.count, dotLevels[index] != level else { return }
-        dotLevels[index] = level
-        let dot = dots[index]
-        if let level {
-            let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let c = level == .crit ? Design.Color.levelCrit : Design.Color.levelWarn
-            dot.layer?.backgroundColor = (dark ? c : (c.blended(withFraction: 0.18, of: .black) ?? c)).cgColor
-            dot.isHidden = false
-        } else {
-            dot.isHidden = true
-        }
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func tap(_ sender: NSButton) {
-        guard sender.tag != selectedIndex else { onReselect?(sender.tag); return }   // повторный тап — не onSelect (иначе повторный модал), но disclosure-хук
-        select(sender.tag, animated: !Motion.reduced)
-        onSelect?(sender.tag)
-    }
-
-    func select(_ i: Int, animated: Bool) {
-        guard i >= 0, i < buttons.count else { return }
-        selectedIndex = i
-        restyle()
-        movePill(animated: animated)
-    }
-
-    override func layout() {
-        super.layout()
-        let n = CGFloat(buttons.count); guard n > 0 else { return }
-        restyle()                       // подогнать кегль под ширину сегмента (иначе 4 длинных ярлыка переносятся)
-        let segW = bounds.width / n
-        for (i, b) in buttons.enumerated() {
-            b.frame = NSRect(x: CGFloat(i) * segW, y: 0, width: segW, height: bounds.height)
-            // точка-оверлей: справа от текста ярлыка, у верхней кромки сегмента (геометрию не трогает)
-            let d: CGFloat = 5
-            let contentW = iconMode ? 15 : (labels[i] as NSString).size(withAttributes: [.font: b.font as Any]).width
-            let dx = CGFloat(i) * segW + (segW + contentW) / 2 + 4
-            dots[i].frame = NSRect(x: min(dx, CGFloat(i + 1) * segW - d - 2),
-                                   y: bounds.height - d - 6, width: d, height: d)
-        }
-        movePill(animated: false)
-    }
-
-    private func movePill(animated: Bool) {
-        let n = CGFloat(buttons.count); guard n > 0, bounds.width > 0 else { return }
-        let segW = bounds.width / n
-        let target = NSRect(x: CGFloat(selectedIndex) * segW + 2, y: 2, width: segW - 4, height: bounds.height - 4)
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = Design.Motion.durBase
-                ctx.timingFunction = Design.Motion.overshoot   // «магнитный» микро-перелёт пилюли
-                pill.animator().frame = target
-            }
-        } else {
-            pill.frame = target
-        }
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        applyTheme()
-    }
-
-    func applyTheme() {
-        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        layer?.backgroundColor = Design.Color.tabTrack(dark).cgColor
-        pill.layer?.backgroundColor = (pillColor.map { $0.withAlphaComponent(dark ? 0.22 : 0.26) }
-                                       ?? Design.Color.accentMuted(dark)).cgColor
-        // rim-light кромка активной пилюли — тот же безель-шов, что у плиток (objёмный край из света)
-        pill.layer?.borderWidth = 1
-        pill.layer?.borderColor = Design.Color.rimHighlight(dark, 0.18).cgColor
-        for (i, lvl) in dotLevels.enumerated() where lvl != nil {   // перекрасить точки под новую тему
-            dotLevels[i] = nil; setDot(i, lvl)        // сброс кэша → setDot перерисует под текущую тему
-        }
-        restyle()
-    }
-
-    private func restyle() {
-        if iconMode, let icons {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-            for (i, b) in buttons.enumerated() {
-                let active = (i == selectedIndex)
-                b.attributedTitle = NSAttributedString(string: "")
-                b.image = NSImage(systemSymbolName: icons[i], accessibilityDescription: labels[i])?.withSymbolConfiguration(cfg)
-                b.imagePosition = .imageOnly
-                b.contentTintColor = active ? .labelColor : .secondaryLabelColor
-            }
-            return
-        }
-        let center = NSMutableParagraphStyle(); center.alignment = .center; center.lineBreakMode = .byTruncatingTail
-        let size = fittedFontSize()
-        for (i, b) in buttons.enumerated() {
-            let active = (i == selectedIndex)
-            b.image = nil
-            b.attributedTitle = NSAttributedString(string: labels[i], attributes: [
-                .font: NSFont.systemFont(ofSize: size, weight: active ? .semibold : .medium),
-                .foregroundColor: active ? NSColor.labelColor : NSColor.secondaryLabelColor,
-                .paragraphStyle: center])
-        }
-    }
-
-    /// Наибольший кегль в [9…12], при котором самый длинный ярлык влезает в сегмент ОДНОЙ строкой.
-    /// Нужно с 4 вкладками: «Приложения»/«Приватность» при 12pt не помещаются в ~76px и переносятся.
-    private func fittedFontSize() -> CGFloat {
-        let n = CGFloat(buttons.count)
-        guard n > 0, bounds.width > 0 else { return 12 }
-        let segW = bounds.width / n - 10                 // минус внутренние отступы сегмента/пилюли
-        var size: CGFloat = 12
-        while size > 9 {
-            let f = NSFont.systemFont(ofSize: size, weight: .semibold)
-            let widest = labels.map { ($0 as NSString).size(withAttributes: [.font: f]).width }.max() ?? 0
-            if widest <= segW { break }
-            size -= 0.5
-        }
-        return size
-    }
-}
-
-/// Мини-спарклайн истории impact (грамматика HardwareView.renderTrace): встыковые сегменты +
-/// кромка. Безразмерный (НЕ ватты, НЕ GraphView с осью Вт). Данные — AppSession.history.
-/// Motion.reduced-нейтрален (renderTrace без анимаций, cap setDisableActions).
-final class MiniSpark: NSView {
-    private var hist: [Double] = []
-    var tint: NSColor = .systemTeal
-    /// Ж4: герой шире/выше строк — на lineWidth 1 линия читалась тоньше. heavy → 1.5, чтобы вес совпал на глаз.
-    var heavy = false { didSet { line.lineWidth = heavy ? 1.5 : 1; render() } }
-    private let line = CAShapeLayer()
-    override init(frame: NSRect) { super.init(frame: frame); wantsLayer = true; setup() }
-    required init?(coder: NSCoder) { fatalError() }
-    private func setup() {
-        line.fillColor = NSColor.clear.cgColor
-        line.lineWidth = 1
-        line.lineJoin = .round
-        layer?.addSublayer(line)
-    }
-    func setHistory(_ h: [Double], tint: NSColor) { self.hist = h; self.tint = tint; render() }
-    override func layout() { super.layout(); render() }
-    private func render() {
-        guard let host = layer else { return }
-        let W = bounds.width, H = bounds.height
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
-        var segs = host.sublayers?.filter { $0 !== line } ?? []
-        // O13: <2 точек истории (карта новая ~первые 10с) — рисуем плоскую baseline-линию tint 0.3 во всю
-        // ширину, а не прячем всё: зарезервированный слот не «дырявит» макет пустой прорезью у имени.
-        guard W > 1, hist.count >= 2 else {
-            segs.forEach { $0.isHidden = true }
-            if W > 1 {
-                let mid = H / 2
-                let base = CGMutablePath()
-                base.move(to: CGPoint(x: 0, y: mid)); base.addLine(to: CGPoint(x: W, y: mid))
-                line.path = base
-                line.strokeColor = tint.withAlphaComponent(0.3).cgColor
-                line.isHidden = false
-            } else { line.isHidden = true }
-            return
-        }
-        let lo = hist.min() ?? 0, hi = hist.max() ?? 1
-        let span = max(hi - lo, 0.0001)
-        func norm(_ v: Double) -> CGFloat { CGFloat(max(0, min(1, (v - lo) / span))) }
-        let count = hist.count
-        let segW = W / CGFloat(count)
-        let segWidth = segW + 0.5
-        while segs.count < count { let l = CALayer(); host.insertSublayer(l, below: line); segs.append(l) }
-        for i in count..<segs.count { segs[i].isHidden = true }
-        let edge = CGMutablePath()
-        for (i, v) in hist.enumerated() {
-            let seg = segs[i]; seg.isHidden = false; seg.removeAllAnimations()
-            let hgt = max(1, norm(v) * H)
-            let x = CGFloat(i) * segW
-            let wd = (i == count - 1) ? max(W - x, segWidth) : segWidth
-            seg.frame = CGRect(x: x, y: H - hgt, width: wd, height: hgt)
-            seg.backgroundColor = tint.withAlphaComponent(0.5).cgColor
-            if i == 0 { edge.move(to: CGPoint(x: x, y: H - hgt)) } else { edge.addLine(to: CGPoint(x: x, y: H - hgt)) }
-            edge.addLine(to: CGPoint(x: x + segW, y: H - hgt))
-        }
-        line.path = edge; line.strokeColor = tint.cgColor; line.isHidden = false
-    }
-}
-
-/// Кликабельная обёртка строки лидерборда (Batch D): тап → флип на досье приложения.
-/// Несёт стеклянную подложку строки и ширину IW; press/hover — состояние (не движение, ок при reduced).
-final class DossierRowView: NSView {
-    weak var owner: PopoverController?
-    var appName: String = ""          // СЫРОЕ a.name — ключ корреляции
-    var a11yText: String = ""
-    var isHero = false                // герой не приподнимается/не раскрывается — он уже раскрыт
-    var canExpand = true              // строки лидерборда раскрываются на ховере; герой — нет
-    // Ссылки на мутируемый контент — FLIP-переиспользование обновляет НА МЕСТЕ (не пересоздаёт вью).
-    weak var valLabel: NSTextField?
-    weak var fillWidth: NSLayoutConstraint?
-    weak var spark: MiniSpark?
-    weak var flagHost: NSView?        // контейнер флага (пересобираем при смене страны)
-    weak var microLine: NSTextField?  // герой: строка CPU · MEM
-    var barW: CGFloat = 64
-    private var pressed = false
-    private var expanded = false
-    private var overlay: NSView?      // ховер-раскрытие: ОВЕРЛЕЙ (не в arrangedSubviews) — layout соседей не трогаем
-    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
-    /// Базовый фон строки — controlFill; герой перекрашивается отдельно (accent-tint), сохраняем.
-    var baseFill: CGColor?
-
-    override func mouseDown(with event: NSEvent) {
-        pressed = true
-        layer?.opacity = 0.7
-    }
-    override func mouseUp(with event: NSEvent) {
-        layer?.opacity = 1
-        let p = convert(event.locationInWindow, from: nil)
-        if pressed && bounds.contains(p) { owner?.openDossier(for: appName) }
-        pressed = false
-    }
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self))
-    }
-    override func mouseEntered(with event: NSEvent) {
-        layer?.backgroundColor = Design.Color.surfaceRim(isDark).cgColor
-        guard !isHero else { return }
-        // ХОВЕР-ПРИПОДНЯТИЕ: scale 1.012 + мягкая тень (gate Motion.reduced). Центрируем scale
-        // ручной трансляцией (НЕ трогаем anchorPoint — тот дерётся с автолейаутом). Оверлей-раскрытие
-        // (B4) вне transform → не конфликтуют.
-        if !Motion.reduced, let lyr = layer {
-            let s: CGFloat = 1.012
-            let tx = bounds.width * (1 - s) / 2, ty = bounds.height * (1 - s) / 2
-            CATransaction.begin(); CATransaction.setAnimationDuration(Design.Motion.durFast)
-            lyr.transform = CATransform3DConcat(CATransform3DMakeScale(s, s, 1),
-                                                CATransform3DMakeTranslation(tx, ty, 0))
-            lyr.shadowColor = NSColor.black.cgColor
-            lyr.shadowOpacity = isDark ? 0.22 : 0.14
-            lyr.shadowRadius = 5; lyr.shadowOffset = CGSize(width: 0, height: -1.5)
-            lyr.masksToBounds = false
-            CATransaction.commit()
-        }
-        owner?.setRowHover(appName, entered: true)   // O4: заморозить пересортировку, пока строка раскрыта
-        if canExpand { showExpand() }
-    }
-    override func mouseExited(with event: NSEvent) {
-        layer?.backgroundColor = baseFill ?? Design.Color.controlFill(isDark).cgColor
-        guard !isHero else { return }
-        if !Motion.reduced {
-            CATransaction.begin(); CATransaction.setAnimationDuration(Design.Motion.durFast)
-            layer?.transform = CATransform3DIdentity
-            layer?.shadowOpacity = 0
-            CATransaction.commit()
-        }
-        hideExpand()
-        owner?.setRowHover(appName, entered: false)   // O4: разморозить — применить отложенный снимок
-    }
-
-    /// Принудительно снести ховер-оверлей (O6): строка выпадает из топа под курсором — иначе панель
-    /// осиротела бы над лидербордом до следующего ховера. Зовётся из эвикт-цикла renderAppRows.
-    func dismissOverlay() { hideExpand() }
-    /// Визуальный QA использует тот же путь построения, что и настоящее наведение.
-    func showPreviewForSnapshot() { showExpand() }
-
-    /// Ховер-раскрытие ОВЕРЛЕЕМ (не в стеке): показывает CPU/MEM/потоки/страны под самой строкой,
-    /// поверх соседей. Не меняет высоту appsStack/поповера (fittingSize-инвариант держится).
-    private func showExpand() {
-        guard overlay == nil, let content = owner?.appExpandContent(for: appName) else { return }
-        expanded = true
-        let panel = NSView()
-        panel.wantsLayer = true
-        // Оверлей находится поверх соседних строк. Непрозрачная локальная поверхность
-        // не даёт тексту быстрого просмотра смешиваться с показателями под ним.
-        panel.layer?.backgroundColor = NSColor(
-            calibratedWhite: isDark ? 0.17 : 0.96,
-            alpha: 1
-        ).cgColor
-        panel.layer?.cornerRadius = Design.Radius.chip
-        panel.layer?.cornerCurve = .continuous
-        panel.layer?.borderWidth = 1
-        panel.layer?.borderColor = Design.Color.surfaceRim(isDark).cgColor
-        Design.Elevation.tile(panel.layer!, dark: isDark)
-        panel.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(content)
-        content.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
-            content.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
-            content.topAnchor.constraint(equalTo: panel.topAnchor, constant: 7),
-            content.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -7),
-        ])
-        // Кладём в самый верх host, а не просто «над текущей строкой». Иначе строки,
-        // расположенные после неё в NSStackView, остаются выше панели и рисуют текст
-        // поверх её фона — это выглядит как полупрозрачность, хотя заливка непрозрачна.
-        // Host списка не включает нижнюю сводку CPU/памяти. Берём поверхность всей
-        // apps-плитки, чтобы и эта соседняя секция гарантированно оставалась под карточкой.
-        guard let host = owner?.appsPreviewOverlayHost() ?? superview else { return }
-        host.addSubview(panel, positioned: .above, relativeTo: nil)
-        NSLayoutConstraint.activate([
-            panel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            panel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            panel.topAnchor.constraint(equalTo: bottomAnchor, constant: 2),
-        ])
-        overlay = panel
-        if !Motion.reduced {
-            // Только геометрическое появление: fade здесь недопустим, поскольку панель
-            // перекрывает числовые строки и в промежуточных кадрах смешивает два текста.
-            panel.layer?.setAffineTransform(CGAffineTransform(translationX: 0, y: 4))
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = Design.Motion.durFast
-                panel.layer?.setAffineTransform(.identity)
-            }
-        }
-    }
-    private func hideExpand() {
-        guard let panel = overlay else { return }
-        overlay = nil; expanded = false
-        // Удаляем сразу: fade-out снова проявил бы список сквозь текст карточки.
-        panel.removeFromSuperview()
-    }
-
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { a11yText }
-    override func accessibilityPerformPress() -> Bool { owner?.openDossier(for: appName); return true }
-}
 
 final class PopoverController: NSViewController {
     private let CW: CGFloat = 328       // современный popover: больше воздуха, без тесных трёхколоночных строк
@@ -498,13 +12,12 @@ final class PopoverController: NSViewController {
     private let appsValW: CGFloat = 30  // колонка значения (поджата с 34); шапка садится над ней
     private let appsFlagW: CGFloat = 16 // колонка флага страны-назначения
     private let appsSparkW: CGFloat = 44 // мини-спарклайн истории impact между именем и баром
+    private let fixedFooterHeight: CGFloat = 43
     private var cards: [NSView] = []    // ссылки на карточки для смены темы
     /// Снапшот-режим (BM_SNAP): вместо пользовательской раскладки строим все модули (чтобы отснять всё),
     /// НЕ трогая UserDefaults владельца. nil в обычной работе.
     static var snapshotLayout: [PopoverItem]? = nil
     private let root = NSStackView()    // вертикальный стек модулей-плиток
-    private weak var headerTile: NSView?       // плитка-шапка (battery) — якорь спайна для crit-заряда
-    private weak var tabAreaView: NSView?      // контейнер вкладок — якорь спайна для жары/нагрузки
     private var footer: NSView!         // нижние кнопки (строятся один раз)
     private var ccToggles: [CCToggle] = []   // плитка быстрых переключателей
     private var tabTiles: [Int: NSView] = [:]   // вкладки тяжёлых секций (индекс → плитка)
@@ -513,6 +26,7 @@ final class PopoverController: NSViewController {
     private let tabTitleLabel = NSTextField(labelWithString: "")   // имя активной вкладки (иконки-вкладки без подписей)
     private var currentTab = 0               // активная вкладка (для направления кросс-фейда)
     private var tabContainer: NSView?               // контейнер вкладок; в иерархии ТОЛЬКО показанная вкладка → адаптивная высота
+    private weak var controlPanel: PopoverControlPanel?
     private static let topIDs: Set<String> = ["battery", "toggles", "batteryStats", "disk", "btbattery", "audio"]   // компактный верх
     /// Read-only стат-модули: смежный их прогон сливается в ОДНУ консоль-плитку с волосяными швами.
     private static let statIDs: Set<String> = ["batteryStats", "disk", "btbattery"]
@@ -544,7 +58,20 @@ final class PopoverController: NSViewController {
         default:            return "square"
         }
     }
-    private var isDark: Bool { view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+    // БЕЗОПАСНЫЙ isDark (Big Sur fix): читаем appearance КОРНЕВОГО контейнера через слабую ссылку,
+    // а не `view` контроллера — прямое чтение `view` само запускает loadView(). Если это происходит
+    // ВНУТРИ loadView (через appearance-callback), получаем бесконечную рекурсию. Ссылку ставим
+    // сразу после создания container'а; до неё (или без view) берём системный appearance.
+    // (viewIfLoaded недоступен при deployment target macOS 11 — используем собственную weak-ссылку.)
+    private weak var appearanceSourceView: NSView?
+    private var isDark: Bool {
+        let appearance = appearanceSourceView?.effectiveAppearance ?? NSApp.effectiveAppearance
+        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+    /// Reentrancy-гард loadView(): если что-то запросит view во время сборки, гасим вложенный вход.
+    private var isBuildingView = false
+    /// Regression-хук (assert): глубина вложенности loadView() должна быть 1. Не в release-билде.
+    private var loadViewDepth = 0
     /// Бирюза зарядки = фирменный акцент Kelvin (единый бренд-токен, тема-зависимый).
     private var chargeAccent: NSColor { SettingsStore.brandAccent(dark: isDark) }
     private let ring = ChargeRing()
@@ -553,12 +80,6 @@ final class PopoverController: NSViewController {
     private let statusSub = NSTextField(labelWithString: "")
     // «Живой термо-прибор» (V2): дышащая аура состояния + топ-бар шапки (бренд + температура ядра).
     private let auraView = AuraView()                             // радиальный цвет-режим у верхней кромки поповера
-    // Вердикт здоровья: одна слим-строка в шапке («Mac в норме?» за 1 секунду без переключения вкладок).
-    // Цветная точка + слово худшего активного сигнала (жара/нагрузка/заряд/форс-кулер). Язык — как у вердикт-карты фаервола.
-    private let healthDot = NSTextField(labelWithString: "●")
-    private let healthLabel = NSTextField(labelWithString: "")
-    /// Нейтральная controlFill-капсула вокруг вердикта (точка + слово) — сенсор-подпись.
-    private let verdictPill = CapsuleView()
     private let statSysVal = NSTextField(labelWithString: "—")
     private var statSysCap = NSTextField(labelWithString: "CPU")
     private let statBatVal = NSTextField(labelWithString: "—")
@@ -567,9 +88,9 @@ final class PopoverController: NSViewController {
     private var statBatCap = NSTextField(labelWithString: "RAM")
     // Витальные-приборы: CPU/Темп/Кулер/RAM. Темп тинтуется по режиму.
     private let statTempVal = NSTextField(labelWithString: "—")
-    private var statTempCap = NSTextField(labelWithString: L("Темп"))
+    private var statTempCap = NSTextField(labelWithString: L("Темп."))
     private let statFanVal = NSTextField(labelWithString: "—")
-    private var statFanCap = NSTextField(labelWithString: L("Кулер"))
+    private var statFanCap = NSTextField(labelWithString: L("Вент."))
     private let graph = GraphView()
     private let flowView = FlowView(frame: .zero)
     private let flowInfoBar = FlowInfoBar(frame: .zero)
@@ -589,7 +110,7 @@ final class PopoverController: NSViewController {
     private var btSlots: [BTSlot] = []
     /// Фиксированные слоты плитки «Звук · вывод»: иконка + имя устройства + галка (текущий дефолт).
     /// Клик по не-текущему слоту → сделать его выводом по умолчанию (Pro). Кол-во слотов постоянно.
-    private struct AudioSlot { let row: NSStackView; let icon: NSImageView; let name: NSTextField; let check: NSImageView; var deviceID: AudioDeviceID? }
+    private struct AudioSlot { let row: PopoverActionRow; let icon: NSImageView; let name: NSTextField; let check: NSImageView; var deviceID: AudioDeviceID? }
     private var audioSlots: [AudioSlot] = []
     // Вкладка «История» V5 = карточка батареи (владелец: «30 дней CPU — мутные данные»).
     // Пилюли метрик/диапазонов удалены; SQLite пишет все метрики как прежде (90 дней — PDF/тренд/CSV).
@@ -605,7 +126,6 @@ final class PopoverController: NSViewController {
     // Advisor (Health Center) UI elements
     private let healthHero = TabStatusHeroView()
     private let healthFindingsContainer = NSStackView()
-    private let healthFanStatusLabel = NSTextField(labelWithString: "")
     private var lastAdvisorResult: AdvisorResult?
     private var advisorDismissalStore = AdvisorDismissalStore()
     private var latestAdvisorBattery: BatteryInfo?
@@ -654,13 +174,10 @@ final class PopoverController: NSViewController {
     private var appsSort: AppEnergySort = .impact      // сегмент сортировки: Расход / CPU / Сеть
     private var appRows: [String: DossierRowView] = [:]  // сырое имя → живая карточка (герой ⊂ этого же словаря)
     private var appHeroName: String?                    // имя карточки, отрисованной как ГЕРОЙ
-    private var hoveredRowName: String?                 // строка под курсором: замораживаем reorder, пока раскрыта (иначе оверлей отклеивается)
+    private var hoveredRowName: String?                 // строка под курсором: замораживаем reorder, чтобы она не уехала при клике
     private var pendingAppsSnapshot: [AppEnergy]?       // отложенный снимок, пришедший под ховером — применим по mouseExited
     private weak var appsHeader: NSView?                // шапка колонки + сегмент сортировки (переиспользуем)
     private weak var appsVerdict: NSTextField?         // вывод-вердикт «кто грузит» над лидербордом (переиспользуем)
-    private var lastVerdictTip: String?                // guard: не переустанавливать toolTip капсулы каждый тик
-    private var verdictDetail: String = ""             // полная фраза вердикта — для кликабельной капсулы
-    private var verdictLevelOK = true                  // .ok → клик по капсуле no-op (нет pointingHand)
     private var tempCritStreak = 0                     // устойчивость крит-температуры: мгновенный скачок ≠ «Перегрев»
     private var lastVerdictLevel: Design.Level = .ok   // резолвнутый уровень вердикта → тинт кольца (герой-шапка)
     private var lastAuraColor: NSColor? = nil          // аура строго следует кольцу; guard не перезапускает fade каждый тик
@@ -730,66 +247,41 @@ final class PopoverController: NSViewController {
         field.toolTip = (avail > 0 && measured > avail + 0.5) ? full : nil
     }
 
-    /// Контент ховер-раскрытия строки (богатая панель — там родилась боль обрезки): CPU/MEM/потоки
-    /// + страны-назначения (флаг+имя через GeoIP.name). Зовётся из DossierRowView.showExpand.
-    func appExpandContent(for name: String) -> NSView? {
-        guard let a = appsLast.first(where: { $0.name == name }) else { return nil }
-        let col = NSStackView()
-        col.orientation = .vertical
-        col.alignment = .leading
-        col.spacing = 3
-
-        // строка мини-статов: CPU · MEM · потоки
-        var stats: [String] = []
-        if let c = a.cpu { stats.append("CPU " + fmtCPU(c)) }
-        if let m = a.memMB { stats.append(fmtMem(m)) }
-        if let t = a.threads { stats.append(String(format: L("%d потоков"), t)) }
-        if !stats.isEmpty {
-            let s = NSTextField(labelWithString: stats.joined(separator: "  ·  "))
-            s.font = Design.Font.numericBody
-            s.textColor = .secondaryLabelColor
-            col.addArrangedSubview(s)
-        }
-
-        // страны-назначения за сессию: флаг + имя, усечение с тултипом
-        let codes = AppSession.countryCodes(nameLower: name.lowercased())
-        if !codes.isEmpty {
-            let full = codes.map { GeoIP.name($0) }.joined(separator: ", ")
-            let shownCodes = codes.prefix(4)
-            let label = shownCodes.map { "\(GeoIP.flag($0)) \(GeoIP.name($0))" }.joined(separator: "  ")
-            let cty = NSTextField(labelWithString: label + (codes.count > shownCodes.count ? "  +\(codes.count - shownCodes.count)" : ""))
-            cty.font = Design.Font.caption
-            cty.textColor = .secondaryLabelColor
-            cty.lineBreakMode = .byTruncatingTail
-            cty.toolTip = full        // агрегат стран — тултип всегда (полный список имён)
-            col.addArrangedSubview(cty)
-        } else {
-            let l = NSTextField(labelWithString: L("Нет активных соединений"))
-            l.font = Design.Font.caption; l.textColor = .tertiaryLabelColor
-            col.addArrangedSubview(l)
-        }
-        col.widthAnchor.constraint(equalToConstant: IW - 20).isActive = true
-        return col
-    }
-
-    /// Верхняя поверхность всей apps-плитки: список + шов + системная сводка.
-    /// Нужна hover-карточке, чтобы её z-порядок был выше всех этих соседей.
-    func appsPreviewOverlayHost() -> NSView? {
-        appsFlipHost?.superview ?? appsFlipHost
-    }
-
     override func loadView() {
+        // КРИТИЧНО ПОРЯДКУ (Big Sur fix): присваиваем корневой view ДО любой настройки
+        // NSVisualEffectView. Присвоение material/blendingMode/state может синхронно вызвать
+        // viewDidChangeEffectiveAppearance → onAppearanceChange → applyTheme → чтение isDark →
+        // (если view ещё не присвоен) повторный loadView → переполнение стека. Поэтому container
+        // становится self.view первым, а тяжёлая сборка идёт под reentrancy-гардом.
+        let container = GlassContainer()
+        view = container
+        appearanceSourceView = container    // isDark читает appearance отсюда, не трогая `view`.
+        // Reentrancy-страховка: если что-то снова запросит view во время этой сборки, мы не уйдём
+        // в рекурсию — view уже присвоен (минимальный GlassContainer), а вложенную сборку гасим.
+        guard !isBuildingView else {
+            Log.app.fault("Recursive popover view construction blocked")
+            return
+        }
+        isBuildingView = true
+        defer { isBuildingView = false }
+
+        // Regression-хук (debug/snapshot): глубина loadView должна быть ровно 1. assert ловит
+        // регрессию появления рекурсии на раннем этапе, не ломая release-сборку.
+        loadViewDepth += 1
+        assert(loadViewDepth == 1, "PopoverController.loadView() re-entered")
+        defer { loadViewDepth -= 1 }
+
         configureLeaves()
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 12                // V3 (совет): секции разделяет ВОЗДУХ, а не стенки-хайрлайны (у Control Center так)
-        root.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        root.spacing = 9
+        root.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
         root.translatesAutoresizingMaskIntoConstraints = false
         buildFooter()
 
         // Стеклянный фон (NSVisualEffectView) — нативный «glass» для Sequoia.
-        let container = GlassContainer()
-        container.onAppearanceChange = { [weak self] in self?.applyTheme() }
+        // onAppearanceChange подключаем В САМОМ КОНЦЕ сборки (после buildModules): пока он nil,
+        // синхронный viewDidChangeEffectiveAppearance от material/state безопасно игнорируется.
         container.material = .popover
         container.blendingMode = .behindWindow
         container.state = .active
@@ -804,26 +296,41 @@ final class PopoverController: NSViewController {
         scroll.contentView.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
-        scroll.verticalScroller = HiddenScroller()   // V3: «лифт» не рисуем — листается трекпадом, чисто
         scroll.scrollerStyle = .overlay
         scroll.autohidesScrollers = true
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         scroll.documentView = root
+        let footerHost = NSView()
+        footerHost.translatesAutoresizingMaskIntoConstraints = false
+        let footerSeam = HairlineView()
+        footerSeam.translatesAutoresizingMaskIntoConstraints = false
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        footerHost.addSubview(footerSeam)
+        footerHost.addSubview(footer)
         container.addSubview(scroll)
+        container.addSubview(footerHost)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: container.topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: footerHost.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            footerHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            footerHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            footerHost.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            footerHost.heightAnchor.constraint(equalToConstant: fixedFooterHeight),
+            footerSeam.topAnchor.constraint(equalTo: footerHost.topAnchor),
+            footerSeam.leadingAnchor.constraint(equalTo: footerHost.leadingAnchor, constant: 14),
+            footerSeam.trailingAnchor.constraint(equalTo: footerHost.trailingAnchor, constant: -14),
+            footerSeam.heightAnchor.constraint(equalToConstant: 1),
+            footer.centerXAnchor.constraint(equalTo: footerHost.centerXAnchor),
+            footer.centerYAnchor.constraint(equalTo: footerHost.centerYAnchor, constant: 1),
             // документ (root) = ширина viewport (без гориз. скролла), высота НАТУРАЛЬНАЯ (верт. скролл)
             root.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
             root.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
             root.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
         ])
-        // V3: StatusSpine (левый шов) ретайрнут — единая стеклянная поверхность несёт состояние аурой,
-        // без вертикального шва в левом гаттере (он читался как «полоска сбоку»).
         // Дышащая аура состояния (V2 «живой термо-прибор») — ПОД контентом, у верхней кромки: тинтует
         // стекло цветом теплового режима. Перекрашивается медленно при смене вердикта (refreshHealthVerdict).
         auraView.translatesAutoresizingMaskIntoConstraints = false
@@ -836,33 +343,40 @@ final class PopoverController: NSViewController {
             auraView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             auraView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
         ])
-        view = container
-        // ПОСЛЕ view=container: isDark читает view.effectiveAppearance — до присвоения это триггерит
-        // повторный loadView (рекурсия). Стартовый фон+цвет ауры ставим здесь.
+        // view уже присвоен в самом верху loadView — это намеренно. isDark читает
+        // view.effectiveAppearance; стартовый фон+цвет ауры ставим здесь, на собранной иерархии.
         auraView.applyBase(dark: isDark, opacity: CGFloat(SettingsStore.popoverOpacity))
         auraView.setColor(Design.Color.stateColor(.ok, isDark), animated: false)
         buildModules()
+
+        // onAppearanceChange подключаем ПОСЛЕ полной сборки иерархии: callback не обращается к
+        // self.view во время loadView, а isDark теперь безопасно читает уже загруженный view.
+        // Дополнительно GlassContainer сам откладывает вызов в async (защита от синхронного
+        // реентера из material/appearance).
+        container.onAppearanceChange = { [weak self, weak container] in
+            guard let self,
+                  let container,
+                  self.appearanceSourceView === container
+            else { return }
+            self.applyTheme()
+        }
     }
 
     /// Одноразовая настройка постоянных вью-листьев (шрифты, фикс-размеры).
     private func configureLeaves() {
         ring.translatesAutoresizingMaskIntoConstraints = false
-        ring.widthAnchor.constraint(equalToConstant: 88).isActive = true
-        ring.heightAnchor.constraint(equalToConstant: 88).isActive = true
+        // Компактный приборный якорь: статус читается мгновенно, но не отнимает
+        // половину первого экрана у выбранного рабочего раздела.
+        ring.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        ring.heightAnchor.constraint(equalToConstant: 70).isActive = true
         statusTitle.font = Design.Font.headline; statusTitle.alignment = .right
         statusSub.font = Design.Font.caption; statusSub.textColor = .secondaryLabelColor; statusSub.alignment = .right
-        healthDot.font = Design.Font.callout                       // точка-индикатор уровня (цвет — по худшему сигналу)
-        healthLabel.font = Design.Font.calloutEmph; healthLabel.textColor = .secondaryLabelColor
-        healthLabel.lineBreakMode = .byTruncatingTail
-        // вердикт — короткое слово; держим его целым (никогда «…»). При редком дефиците ширины
-        // первой уступает вторичная строка статуса (АКБ-температура дублируется в кольце), не вердикт.
-        healthLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         statusSub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         graph.translatesAutoresizingMaskIntoConstraints = false
         graph.heightAnchor.constraint(equalToConstant: 60).isActive = true   // выше — место под оси/сетку/подписи
         graph.widthAnchor.constraint(equalToConstant: FW).isActive = true
         flowView.translatesAutoresizingMaskIntoConstraints = false
-        flowView.heightAnchor.constraint(equalToConstant: 188).isActive = true
+        flowView.heightAnchor.constraint(equalToConstant: 244).isActive = true
         flowView.widthAnchor.constraint(equalToConstant: FW).isActive = true
         flowView.detailSink = { [weak self] detail in self?.flowDetail = detail; self?.applyThermalLabel() }
         flowInfoBar.translatesAutoresizingMaskIntoConstraints = false
@@ -900,13 +414,12 @@ final class PopoverController: NSViewController {
             b.setup()
             return b
         }
-        let refresh = iconBtn("arrow.clockwise", self, #selector(refreshApps), L("Обновить"))
         // «второй мозг» продукта (Caffeine/Night Shift/фаервол/dev/безопасность) больше не спрятан
         // только за правым кликом — даём ему видимую точку входа в футере.
         let tools = iconBtn("ellipsis.circle", NSApp.delegate, #selector(AppDelegate.openToolsFromFooter), L("Инструменты"))
         let settings = iconBtn("gearshape", self, #selector(openSettings), L("Настройки"))
         let quit = iconBtn("power", NSApp, #selector(NSApplication.terminate(_:)), L("Выйти"))
-        let f = NSStackView(views: [refresh, spacer(), tools, settings, quit])
+        let f = NSStackView(views: [spacer(), tools, settings, quit])
         f.spacing = 8
         f.translatesAutoresizingMaskIntoConstraints = false
         f.widthAnchor.constraint(equalToConstant: CW).isActive = true
@@ -919,13 +432,12 @@ final class PopoverController: NSViewController {
     private func relocalizeStatic() {
         statSysCap.stringValue = "CPU"
         statBatCap.stringValue = "RAM"
-        statTempCap.stringValue = L("Темп")
-        statFanCap.stringValue = L("Кулер")
+        statTempCap.stringValue = L("Темп.")
+        statFanCap.stringValue = L("Вент.")
         installBtn.title = L("Установить хелпер…")
         for v in (footer as? NSStackView)?.subviews ?? [] {
             if let b = v as? FooterIconButton, let sel = b.action {
-                if sel == #selector(refreshApps) { b.toolTip = L("Обновить") }
-                else if sel == #selector(AppDelegate.openToolsFromFooter) { b.toolTip = L("Инструменты") }
+                if sel == #selector(AppDelegate.openToolsFromFooter) { b.toolTip = L("Инструменты") }
                 else if sel == #selector(openSettings) { b.toolTip = L("Настройки") }
                 else if sel == #selector(NSApplication.terminate(_:)) { b.toolTip = L("Выйти") }
             }
@@ -935,7 +447,7 @@ final class PopoverController: NSViewController {
     func buildModules() {
         relocalizeStatic()
         cards.removeAll(); ccToggles = []; tabTiles = [:]; btSlots = []; tabContainer = nil
-        headerTile = nil; tabAreaView = nil           // якоря спайна пересоздаются при ребилде
+        controlPanel = nil
         // прогреваем сенсоры данными ДО замера высоты вкладок — иначе пустая панель
         // дала бы заниженную высоту контейнера и обрезала бы низ. record:false — прогрев НЕ пишет
         // в кольцо трассы (ребилд по BMPopoverChanged иначе впрыснул бы внеплановый кадр); 1Гц-тик владеет историей.
@@ -950,43 +462,30 @@ final class PopoverController: NSViewController {
         var layout = (Self.snapshotLayout ?? SettingsStore.popoverLayout).filter { $0.on }
         if noBattery { layout = layout.filter { $0.id != "battery" && $0.id != "batteryStats" } }
 
-        // КОНСОЛЬ-ГРУППЫ: смежный прогон read-only стат-модулей (batteryStats/disk/btbattery)
-        // сливается в ОДНУ плитку с волосяными швами между рядами; прогон длины 1 или модуль
-        // battery/toggles рендерятся как отдельная плитка (как раньше). Порядок и on/off из popoverLayout
-        // сохранены — пользователь может вставить тумблеры между disk и btbattery, и группа разорвётся.
+        // Новая иерархия: компактная шапка → свёрнутое управление → активная вкладка.
+        // Переключатели и звук больше не отнимают первый экран; дополнительные read-only
+        // модули остаются доступными, но идут после главного раздела.
         let topItems = layout.filter { Self.topIDs.contains($0.id) }
-        // V3 «единая поверхность»: между модулями — волосяной делитель, а не зазор между карточками.
-        var placedTop = false
-        func placeTop(_ v: NSView) {
-            root.addArrangedSubview(v)   // V3: модули разделяет ВОЗДУХ (root.spacing 12), а не стенки-хайрлайны
-            placedTop = true
+        let controlIDs = topItems.map(\.id).filter { $0 == "toggles" || $0 == "audio" }
+        let auxiliaryIDs = topItems.map(\.id).filter { Self.statIDs.contains($0) }
+        var placedLead = false
+        if topItems.contains(where: { $0.id == "battery" }), let battery = buildModule("battery") {
+            root.addArrangedSubview(battery)
+            placedLead = true
         }
-        var idx = 0
-        while idx < topItems.count {
-            let id = topItems[idx].id
-            if Self.statIDs.contains(id) {
-                // собираем максимальный смежный прогон стат-модулей
-                var run = [id]
-                var j = idx + 1
-                while j < topItems.count, Self.statIDs.contains(topItems[j].id) { run.append(topItems[j].id); j += 1 }
-                if run.count >= 2 {
-                    placeTop(buildStatGroupTile(run))
-                } else if let tile = buildModule(id) {
-                    placeTop(tile)
-                }
-                idx = j
-            } else {
-                if let tile = buildModule(id) { placeTop(tile) }
-                idx += 1
-            }
+        if !controlIDs.isEmpty {
+            root.addArrangedSubview(buildControlPanel(ids: controlIDs))
+            placedLead = true
         }
 
         let tabs = layout.filter { Self.tabIDs.contains($0.id) }
         tabOrder = tabs.map { $0.id }                 // запоминаем порядок для адресных warn/crit-точек
         if !tabs.isEmpty {
-            if placedTop { root.addArrangedSubview(sectionDivider()) }   // делитель перед рельсом вкладок
+            if placedLead { root.addArrangedSubview(sectionDivider()) }   // делитель перед главным экраном
             // дефолт — последняя открытая вкладка (BM_TAB переопределяет для дебага)
+            let savedID = UserDefaults.standard.string(forKey: "popover.lastTabID")
             let initTab = ProcessInfo.processInfo.environment["BM_TAB"].flatMap { Int($0) }
+                ?? savedID.flatMap { id in tabs.firstIndex(where: { $0.id == id }) }
                 ?? UserDefaults.standard.integer(forKey: "popover.lastTab")
             let sel = min(max(initTab, 0), tabs.count - 1)
             currentTab = sel
@@ -998,15 +497,17 @@ final class PopoverController: NSViewController {
             bar.pillColor = Design.Color.accent(isDark)   // «Спокойный прибор»: навигация НЕ красится состоянием — всегда бирюза
             tabBar = bar
             root.addArrangedSubview(bar)
-            // Имя активной вкладки текстом (вкладки — иконки без подписей → это главный пробел
-            // в обнаружимости; всплывашки были, но всегда-видимое имя читается сразу, как секц-заголовок).
-            tabTitleLabel.font = Design.Font.calloutEmph
-            tabTitleLabel.textColor = .secondaryLabelColor
-            tabTitleLabel.alignment = .left
-            tabTitleLabel.stringValue = Self.tabLabel(tabs[sel].id)   // V3: обычный регистр (не CAPS)
-            tabTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-            tabTitleLabel.widthAnchor.constraint(equalToConstant: CW).isActive = true
-            root.addArrangedSubview(tabTitleLabel)
+            // При 5+ пользовательских вкладках таб-бар переходит на иконки, поэтому только
+            // в этом режиме показываем текстовое имя. В продуктовом дефолте подписи уже в табах.
+            if tabs.count >= 5 {
+                tabTitleLabel.font = Design.Font.calloutEmph
+                tabTitleLabel.textColor = .secondaryLabelColor
+                tabTitleLabel.alignment = .left
+                tabTitleLabel.stringValue = Self.tabLabel(tabs[sel].id)
+                tabTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+                tabTitleLabel.widthAnchor.constraint(equalToConstant: CW).isActive = true
+                root.addArrangedSubview(tabTitleLabel)
+            }
             // Контейнер вкладок: в иерархии держим ТОЛЬКО ПОКАЗАННУЮ вкладку → его высота = её высоте
             // (истинно адаптивно; скрытые вкладки НЕ в иерархии → не раздувают fittingSize/высоту поповера →
             // пустота под короткими вкладками исчезает). Switch/снапшот переставляют вкладку (showTab).
@@ -1033,15 +534,14 @@ final class PopoverController: NSViewController {
             for (_, t) in tabTiles { t.removeFromSuperview() }
             showTab(sel)
             root.addArrangedSubview(container)
-            tabAreaView = container                     // якорь для жары/нагрузки (вкладки Питание/Железо)
         }
-        // световой безель-шов под колонкой данных — отделяет футер, замыкает «консоль» снизу
-        let footerSeam = RimLightView()
-        footerSeam.translatesAutoresizingMaskIntoConstraints = false
-        footerSeam.widthAnchor.constraint(equalToConstant: CW).isActive = true
-        footerSeam.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        root.addArrangedSubview(footerSeam)
-        root.addArrangedSubview(footer)
+        if !auxiliaryIDs.isEmpty {
+            if !tabs.isEmpty || placedLead { root.addArrangedSubview(sectionDivider()) }
+            // Все вспомогательные факты объединяются в одну спокойную консоль после главной вкладки.
+            root.addArrangedSubview(auxiliaryIDs.count > 1
+                ? buildStatGroupTile(auxiliaryIDs)
+                : (buildModule(auxiliaryIDs[0]) ?? NSView()))
+        }
         paintCards()
         auraView.applyBase(dark: isDark, opacity: CGFloat(SettingsStore.popoverOpacity))   // прозрачность фона из настроек
         settlePreferredSize()
@@ -1062,9 +562,12 @@ final class PopoverController: NSViewController {
         win.contentViewController = self
         buildModules()
         // Наполняем данными КАК настоящий тик: несколько апдейтов (история кольца/flow) + apps-лидерборд.
+        // BM_NOBATT обязан подменять и данные, а не только скрывать шапку: иначе desktop-снапшот
+        // случайно рисует аккумулятор хостового Mac и не проверяет честный fallback «Без батареи».
+        let forcedNoBattery = ProcessInfo.processInfo.environment["BM_NOBATT"] != nil
         var hist: [Double] = []
         for _ in 0..<6 {
-            let b = BatteryReader.read() ?? .absent
+            let b = (forcedNoBattery ? nil : BatteryReader.read()) ?? .absent
             let e = EnergyModel.snapshot()
             let c = PowerInfo.components()
             let sensors = SensorsModel.snapshot(cpuLoad: SystemUsage.shared.cpu(),
@@ -1080,8 +583,8 @@ final class PopoverController: NSViewController {
         var n = 0
         func shot(_ name: String) {
             self.view.layoutSubtreeIfNeeded()
-            let sz = self.root.fittingSize        // снимок = ПОЛНЫЙ контент (скролл развёрнут), высота от root
-            win.setContentSize(NSSize(width: max(sz.width, CW), height: max(sz.height, 120)))
+            let sz = self.root.fittingSize        // полный скролл-контент + закреплённый футер
+            win.setContentSize(NSSize(width: max(sz.width, CW), height: max(sz.height + fixedFooterHeight, 120)))
             self.view.layoutSubtreeIfNeeded()
             let r = self.view.bounds
             guard r.width > 1, r.height > 1, let rep = self.view.bitmapImageRepForCachingDisplay(in: r) else { return }
@@ -1105,6 +608,7 @@ final class PopoverController: NSViewController {
                 if tid == "hardware" { sensorsView.animateIn() }
                 if tid == "apps" { refreshApps() }
                 if tid == "history" { refreshHistory() }
+                if tid == "health" { refreshAdvisor() }
                 if tid == "privacy" {                  // радар снимаем во ВСЕХ трёх сегментах (Страны/Приложения/Порты)
                     vpnChipRefresh?(); mediaChipRefresh?()
                     for (bname, b) in [("countries", PrivacyView.Basis.country), ("apps", PrivacyView.Basis.app), ("ports", PrivacyView.Basis.ports)] {
@@ -1117,11 +621,12 @@ final class PopoverController: NSViewController {
                 updatePreferredSize()
                 pumpRunLoop(2.5)                        // тик данных этой вкладки (apps-лидерборд/flow медленнее)
                 shot(tid)
-                if tid == "apps", let row = appRows.values.first {
-                    row.showPreviewForSnapshot()
-                    self.view.layoutSubtreeIfNeeded()
-                    shot("apps_hover")
-                    row.dismissOverlay()
+                if tid == "flow", ProcessInfo.processInfo.environment["BM_FLOW_DETAILS"] != nil {
+                    for (suffix, node) in [("source", "Адаптер"), ("system", "Система"), ("battery", "Батарея")] {
+                        flowView.focusNode(node)
+                        pumpRunLoop(0.15)
+                        shot("flow_" + suffix)
+                    }
                 }
             }
         }
@@ -1155,7 +660,10 @@ final class PopoverController: NSViewController {
         guard sel != currentTab else { return }
         let prev = currentTab
         currentTab = sel
-        UserDefaults.standard.set(sel, forKey: "popover.lastTab")   // запоминаем вкладку между открытиями
+        UserDefaults.standard.set(sel, forKey: "popover.lastTab")   // legacy fallback для старой версии
+        if sel < tabOrder.count {
+            UserDefaults.standard.set(tabOrder[sel], forKey: "popover.lastTabID")
+        }
         if sel < tabOrder.count { tabTitleLabel.stringValue = Self.tabLabel(tabOrder[sel]) }  // имя вкладки текстом (обычный регистр)
         // оживление тяжёлых вкладок
         if sel < tabOrder.count, tabOrder[sel] == "hardware" {
@@ -1196,7 +704,7 @@ final class PopoverController: NSViewController {
             ?? NSScreen.main
         let screenH = targetScreen?.visibleFrame.height ?? 900
         let cap = max(300, screenH - 72)
-        preferredContentSize = NSSize(width: sz.width, height: min(sz.height, cap))
+        preferredContentSize = NSSize(width: sz.width, height: min(sz.height + fixedFooterHeight, cap))
     }
 
     /// Auto Layout вкладки и async-контент не обязаны стабилизироваться в тот же run-loop pass.
@@ -1232,7 +740,6 @@ final class PopoverController: NSViewController {
     private func buildModule(_ id: String) -> NSView? {
         switch id {
         case "battery":      return buildBatteryTile()
-        case "toggles":      return buildTogglesTile()
         case "flow":         return buildFlowTile()
         case "batteryStats": return buildBatteryStatsTile()
         case "hardware":     return buildHardwareTile()
@@ -1241,7 +748,6 @@ final class PopoverController: NSViewController {
         case "maintenance":  return buildMaintenanceTile()
         case "disk":         return buildDiskTile()
         case "btbattery":    return buildBTBatteryTile()
-        case "audio":        return buildAudioTile()
         case "history":      return buildHistoryTile()
         case "health":       return buildHealthTile()
         default:             return nil
@@ -1293,7 +799,7 @@ final class PopoverController: NSViewController {
         return row
     }
     private func vitalCell(_ val: NSTextField, _ cap: NSTextField) -> NSView {
-        val.font = Design.Font.numericVital; val.alignment = .center     // значение СВЕРХУ (макет V3), крупно, rounded
+        val.font = Design.Font.mono(16, .semibold); val.alignment = .center
         cap.font = Design.Font.sys(11, .regular); cap.textColor = .tertiaryLabelColor; cap.alignment = .center   // V3: обычный регистр, 11pt
         let s = vstack([val, cap], 2); s.alignment = .centerX
         return s
@@ -1303,7 +809,7 @@ final class PopoverController: NSViewController {
         d.layer?.backgroundColor = Design.Color.hairline(isDark, 0.10).cgColor
         d.translatesAutoresizingMaskIntoConstraints = false
         d.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        d.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        d.heightAnchor.constraint(equalToConstant: 26).isActive = true
         return d
     }
     /// Волосяной делитель СЕКЦИЙ (V3 «единая поверхность»): 0.5pt линия во всю ширину модуля (CW),
@@ -1317,30 +823,6 @@ final class PopoverController: NSViewController {
         return d
     }
 
-    /// Топ-бар шапки (V3): тихий словомарк «KELVIN» слева + кнопка «Настроить поповер» справа
-    /// (slider.horizontal.3 → Настройки · Поповер: прозрачность / набор-порядок модулей / плотность).
-    /// «ядро NN°» ретайрнут — дублировал ТЕМП в витальных; трекинг словомарка снижен 2.2→0.4 (нативнее).
-    private func headerTopBar() -> NSView {
-        // V3: словомарк «KELVIN» убран (совет: панель не подписывают — бренд несёт иконка в меню-баре).
-        // Остаётся тихая кнопка «Настроить» справа сверху; иконка в едином SF-Symbols весе/масштабе.
-        let edit = FooterIconButton(title: "", target: self, action: #selector(openPopoverSettings))
-        edit.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: L("Настроить поповер"))
-        edit.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        edit.imageScaling = .scaleProportionallyDown
-        edit.isBordered = false
-        edit.contentTintColor = .tertiaryLabelColor
-        edit.toolTip = L("Настроить поповер")
-        edit.translatesAutoresizingMaskIntoConstraints = false
-        edit.widthAnchor.constraint(equalToConstant: 24).isActive = true
-        edit.heightAnchor.constraint(equalToConstant: 20).isActive = true
-        edit.setup()
-        let row = NSStackView(views: [spacer(), edit])
-        row.alignment = .centerY
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        return row
-    }
-
     private func buildBatteryTile() -> NSView {
         // hero (V3): кольцо-заряд + статус словами, СЛЕВА-выровнено рядом (грамматика макета).
         // Вердикт-пилюля/слово («Нагрузка»/«Греется») ретайрнуты — владелец: слова лишние; состояние
@@ -1349,7 +831,11 @@ final class PopoverController: NSViewController {
         statusSub.alignment = .left
         let statusCol = vstack([statusTitle, statusSub], 3); statusCol.alignment = .leading
         let hero = NSStackView(views: [ring, statusCol, spacer()])
-        hero.alignment = .centerY; hero.spacing = 14
+        hero.alignment = .centerY
+        hero.spacing = 14
+        // Собственный воздух hero нужен именно вокруг круглого прибора: общий inset плитки
+        // отделяет секцию от краёв, а эти поля не дают кольцу слипнуться с текстом и витальными.
+        hero.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 3, right: 4)
         hero.translatesAutoresizingMaskIntoConstraints = false
         hero.widthAnchor.constraint(equalToConstant: IW).isActive = true
         // Витальные CPU/Темп/Кулер/RAM без бордюра, только с hairline-разделителями.
@@ -1363,29 +849,14 @@ final class PopoverController: NSViewController {
             self?.view.layoutSubtreeIfNeeded()
             self?.updatePreferredSize()
         }
-        let tile = glassTile(vstack([headerTopBar(), hero, vitals, chargeTrack], 12))
-        headerTile = tile
-        return tile
-    }
-    /// Световой безель-шов по верхней кромке плитки: 1px rim-light, вписан в скругления.
-    /// Оверлей поверх контента — НЕ влияет на высоту (плитка-инвариант цел).
-    private func addTopRim(to tile: NSView) {
-        let rim = RimLightView()
-        rim.translatesAutoresizingMaskIntoConstraints = false
-        tile.addSubview(rim)
-        NSLayoutConstraint.activate([
-            rim.topAnchor.constraint(equalTo: tile.topAnchor, constant: 1),
-            rim.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: Design.Radius.tile),
-            rim.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -Design.Radius.tile),
-            rim.heightAnchor.constraint(equalToConstant: 1),
-        ])
+        // Настройка уже доступна в постоянном футере; отдельная пустая top-bar строка
+        // убрана, чтобы активная вкладка поднялась выше первого экрана.
+        return glassTile(vstack([hero, vitals, chargeTrack], 10), chrome: false)
     }
     private func buildFlowTile() -> NSView {
-        // Energy canvas занимает почти всю ширину. В нём нет компонентных ватт CPU/GPU/DRAM:
-        // только один общий сигнал, его источник, динамика и состояние батареи.
-        // thermalLabel остаётся строкой точного разбора по наведению.
-        glassTile(vstack([flowView, flowInfoBar,
-                          padLeading(thermalLabel, 10, width: FW)], 8), hInset: 6, fill: true)
+        // Главная вкладка: честный баланс источников + встроенный интерактивный инспектор.
+        // Три нижних фактора дают контекст расхода, не притворяясь суммой общего ваттажа.
+        glassTile(vstack([flowView, flowInfoBar], 8), hInset: 6, fill: true)
     }
     /// Обёртка фиксированной ширины с левым отступом — для выравнивания текста при узком поле плитки.
     private func padLeading(_ v: NSView, _ inset: CGFloat, width: CGFloat) -> NSView {
@@ -1424,8 +895,7 @@ final class PopoverController: NSViewController {
         }
         applyBasis(privacyView.currentBasis)                        // старт с текущей основы (переживает переоткрытие)
         privacyView.onBasisChange = { applyBasis($0) }
-        return glassTile(vstack([padLeading(Self.sectionLabel(L("Приватность · радар")), 10, width: FW),
-                                 padLeading(sub, 10, width: FW),
+        return glassTile(vstack([padLeading(sub, 10, width: FW),
                                  padLeading(buildMediaChip(), 10, width: FW),
                                  padLeading(buildVPNChip(), 10, width: FW),
                                  privacyView,
@@ -1540,13 +1010,14 @@ final class PopoverController: NSViewController {
             iv.translatesAutoresizingMaskIntoConstraints = false
             iv.widthAnchor.constraint(equalToConstant: 18).isActive = true
             let t = NSTextField(labelWithString: title); t.font = Design.Font.body; t.textColor = .labelColor
-            t.setContentCompressionResistancePriority(.required, for: .horizontal)      // заголовок держит ширину
+            t.lineBreakMode = .byTruncatingTail
+            t.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             let v = NSTextField(labelWithString: L("проверка…")); v.font = Design.Font.numericBody; v.alignment = .right
             v.textColor = .tertiaryLabelColor
             // Статус остаётся одной компактной правой колонкой. Полная строка
             // доступна в tooltip; перенос ломал вертикальный ритм вкладки.
             v.lineBreakMode = .byTruncatingTail; v.maximumNumberOfLines = 1
-            v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)    // при дефиците ширины гнётся ЗНАЧЕНИЕ, не заголовок
+            v.setContentCompressionResistancePriority(.required, for: .horizontal)
             let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
             let r = NSStackView(views: [iv, t, spacer, v])
             r.orientation = .horizontal; r.alignment = .centerY; r.spacing = 8
@@ -1566,15 +1037,15 @@ final class PopoverController: NSViewController {
             row.icon.contentTintColor = grey ? .tertiaryLabelColor
                 : (level == .crit ? .systemRed : (level == .warn ? .systemOrange : .systemGreen))
         }
-        let xp = makeRow(L("Защита XProtect"))
-        let sip = makeRow(L("Целостность системы (SIP)"))
-        let fv = makeRow(L("Шифрование диска (FileVault)"))
-        let boot = makeRow(L("Boot-args"))
+        let xp = makeRow("XProtect")
+        let sip = makeRow("SIP")
+        let fv = makeRow("FileVault")
+        let boot = makeRow("Boot-args")
         let upd = makeRow(L("Обновления macOS"))
         let mem = makeRow(L("Память"))
         let therm = makeRow(L("Термонагрузка"))
-        let sleep = makeRow(L("Что мешает сну"))
-        let crash = makeRow(L("Отчёты о сбоях (7 дн)"))
+        let sleep = makeRow(L("Сон"))
+        let crash = makeRow(L("Сбои · 7 дней"))
         let note = NSTextField(labelWithString: L("Только чтение. Факты из системных утилит (csrutil, fdesetup, XProtect, pmset) — без root."))
         note.font = Design.Font.sys(9, .regular); note.textColor = .tertiaryLabelColor
         note.lineBreakMode = .byWordWrapping; note.maximumNumberOfLines = 2
@@ -1594,7 +1065,9 @@ final class PopoverController: NSViewController {
             // boot-args: ВСЕГДА нейтрально-серо (факт без вердикта по флагам — «no verdict» политика);
             // стандартно → «стандартные», кастом → verbatim (заполненный флажок как маркер «есть что-то»).
             let ba = p.bootArgs
-            setRow(boot, ba ?? L("стандартные"), nil, symbol: ba == nil ? "flag" : "flag.fill", neutral: true)
+            setRow(boot, ba == nil ? L("стандартные") : L("настроены"), nil,
+                   symbol: ba == nil ? "flag" : "flag.fill", neutral: true)
+            boot.value.toolTip = ba ?? L("стандартные")
             // обновления macOS: атрибуция самой ОС. Патч в текущей ОС → warn (актуально применим); апгрейд ОС
             // (major) → НЕЙТРАЛЬ (валидный выбор, не «тревога»). «нет» — тоже нейтраль (не зелёное «защищены»).
             let df = DateFormatter(); df.dateFormat = "d MMM"; df.locale = Locale(identifier: I18n.current.rawValue)
@@ -1639,8 +1112,9 @@ final class PopoverController: NSViewController {
                    symbol: blocked ? "powersleep" : "moon.zzz.fill", neutral: blocked)
             let crashed = p.crashes7d > 0
             let crashVal = crashed ? "\(p.crashes7d)" + (p.latestCrash.map { " · " + $0 } ?? "") : "0"
-            setRow(crash, crashVal, nil,
+            setRow(crash, crashed ? "\(p.crashes7d)" : "0", nil,
                    symbol: crashed ? "exclamationmark.triangle" : "checkmark.circle", neutral: crashed)
+            crash.value.toolTip = crashVal
 
             var attention = 0
             if p.sip.level != nil { attention += 1 }
@@ -1889,8 +1363,6 @@ final class PopoverController: NSViewController {
 
     /// Плитка «Звук · вывод»: строки-устройства, текущее с галкой; клик по другому → сделать выводом
     /// по умолчанию (Pro). ЧЕСТНОСТЬ: меняем СИСТЕМНЫЙ вывод по умолчанию, не «маршрутизируем весь звук».
-    private func buildAudioTile() -> NSView { glassTile(buildAudioContent(), fill: false) }   // V3: топ-модуль ХУГАЕТ контент (fill:true растягивался на слабину .fill-стека → пустой провал)
-    
     /// Вкладка «Здоровье» — Центр здоровья Mac (Kelvin Advisor).
     /// Показывает общий статус и список рекомендаций.
     private func buildHealthTile() -> NSView {
@@ -1968,94 +1440,8 @@ final class PopoverController: NSViewController {
         return row
     }
 
-    /// Современное управление охлаждением прямо в «Здоровье» — без перехода в старое окно настроек.
-    private func buildHealthFanPanel() -> NSView {
-        let topology = FanController.coolingTopology()
-        let fans = FanController.fans()
-
-        let title = NSTextField(labelWithString: L("Охлаждение"))
-        title.font = Design.Font.sys(13, .semibold)
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: "fanblades.fill", accessibilityDescription: L("Охлаждение"))
-        icon.contentTintColor = Design.Color.accent(isDark)
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        let head = NSStackView(views: [icon, title, spacer()])
-        head.alignment = .centerY
-        head.spacing = 8
-
-        healthFanStatusLabel.font = Design.Font.sys(10, .regular)
-        healthFanStatusLabel.textColor = .secondaryLabelColor
-        healthFanStatusLabel.lineBreakMode = .byWordWrapping
-        healthFanStatusLabel.maximumNumberOfLines = 2
-        if FanController.isPassiveCooling {
-            healthFanStatusLabel.stringValue = L("Пассивное охлаждение — вентиляторов в этой модели Mac нет.")
-        } else if fans.isEmpty {
-            healthFanStatusLabel.stringValue = {
-                if case .unknown = topology {
-                    return L("Данные вентиляторов недоступны. Kelvin не применяет управление без подтверждённой топологии.")
-                }
-                return L("Вентиляторы сейчас недоступны для чтения.")
-            }()
-        } else {
-            let rpm = fans.map { String(format: "%.0f", $0.rpm) }.joined(separator: " · ")
-            healthFanStatusLabel.stringValue = FanController.daemonInstalled
-                ? String(format: L("%d вент. · %@ об/мин · управление активно"), fans.count, rpm)
-                : String(format: L("%d вент. · %@ об/мин · мониторинг"), fans.count, rpm)
-        }
-
-        var views: [NSView] = [head, healthFanStatusLabel]
-        if !fans.isEmpty {
-            let profiles: [(String, String)] = [
-                ("auto", L("Авто")),
-                ("balance", L("Баланс")),
-                ("turbo", L("Максимум"))
-            ]
-            let row = NSStackView()
-            row.spacing = 6
-            row.distribution = .fillEqually
-            for (id, label) in profiles {
-                let button = GlassButton(title: label, symbol: nil, cornerRadius: Design.Radius.chip)
-                button.onClick = { [weak self] in self?.activateHealthFanProfile(id) }
-                row.addArrangedSubview(button)
-            }
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.widthAnchor.constraint(equalToConstant: IW - 24).isActive = true
-            views.append(row)
-        }
-
-        let panel = NSStackView()
-        panel.orientation = .vertical
-        panel.spacing = 9
-        views.forEach { panel.addArrangedSubview($0) }
-        panel.edgeInsets = NSEdgeInsets(top: 10, left: 2, bottom: 12, right: 2)
-        panel.translatesAutoresizingMaskIntoConstraints = false
-        panel.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        return panel
-    }
-
-    private func activateHealthFanProfile(_ profile: String) {
-        guard !FanController.fans().isEmpty, !FanController.isPassiveCooling else { return }
-        guard Licensing.shared.isPro else {
-            _ = SettingsCoordinator.requirePro(.fans)
-            return
-        }
-        if !FanController.daemonInstalled {
-            // Профиль можно подготовить из Health, но пароль никогда не возникает
-            // из обычного переключателя. Подключение — одна явная CTA в Settings.
-            FanController.applyProfileHeadless(named: profile)
-            healthFanStatusLabel.stringValue = L("Настройки подготовлены")
-            view.window?.close()
-            SettingsCoordinator.open(section: "cooling")
-            return
-        }
-        FanController.applyProfileHeadless(named: profile)
-        healthFanStatusLabel.stringValue = String(format: L("Профиль «%@» применён"), FanController.profile(named: profile).name)
-        refreshAdvisor()
-    }
-    
     private func buildAudioContent() -> NSView {
-        let slotCount = 6                                  // покрывает почти любой набор; переполнение честно раскрываем в сноске
+        let slotCount = 3                                  // быстрый выбор; полный список остаётся в системных настройках
         audioSlots = []
         var rows: [NSView] = [Self.sectionLabel(L("Звук · вывод"))]
         for _ in 0..<slotCount {
@@ -2074,12 +1460,12 @@ final class PopoverController: NSViewController {
             check.contentTintColor = Design.Color.accent(isDark)
             check.widthAnchor.constraint(equalToConstant: 16).isActive = true
             check.isHidden = true
-            let row = NSStackView(views: [icon, name, spacer(), check])
+            let row = PopoverActionRow()
+            [icon, name, spacer(), check].forEach { row.addArrangedSubview($0) }
+            row.orientation = .horizontal
             row.alignment = .centerY; row.spacing = 8
             row.translatesAutoresizingMaskIntoConstraints = false
             row.widthAnchor.constraint(equalToConstant: IW).isActive = true
-            let g = NSClickGestureRecognizer(target: self, action: #selector(audioSlotClicked(_:)))
-            row.addGestureRecognizer(g)
             audioSlots.append(AudioSlot(row: row, icon: icon, name: name, check: check, deviceID: nil))
             rows.append(row)
         }
@@ -2109,6 +1495,10 @@ final class PopoverController: NSViewController {
                     slot.name.stringValue = d.name
                     slot.name.textColor = d.isCurrent ? .labelColor : .secondaryLabelColor
                     slot.check.isHidden = !d.isCurrent
+                    slot.row.accessibilityText = L("Звук · вывод") + " · " + d.name + (d.isCurrent ? " · ✓" : "")
+                    slot.row.onPress = d.isCurrent ? nil : { [weak self, weak row = slot.row] in
+                        self?.audioSlotClicked(row)
+                    }
                     slot.row.isHidden = false
                 } else if i == 0 {
                     self.audioSlots[i].deviceID = nil
@@ -2116,9 +1506,12 @@ final class PopoverController: NSViewController {
                     slot.name.stringValue = L("нет устройств вывода")
                     slot.name.textColor = .tertiaryLabelColor
                     slot.check.isHidden = true
+                    slot.row.accessibilityText = L("нет устройств вывода")
+                    slot.row.onPress = nil
                     slot.row.isHidden = false
                 } else {
                     self.audioSlots[i].deviceID = nil
+                    slot.row.onPress = nil
                     slot.row.isHidden = true
                 }
             }
@@ -2132,8 +1525,8 @@ final class PopoverController: NSViewController {
         }
     }
     /// Клик по слоту: не-текущий → сделать выводом по умолчанию (Pro-гейт). Текущий = no-op (без гейта).
-    @objc private func audioSlotClicked(_ g: NSClickGestureRecognizer) {
-        guard let v = g.view, let slot = audioSlots.first(where: { $0.row === v }), let id = slot.deviceID else { return }
+    private func audioSlotClicked(_ row: PopoverActionRow?) {
+        guard let row, let slot = audioSlots.first(where: { $0.row === row }), let id = slot.deviceID else { return }
         if slot.check.isHidden == false { return }         // уже текущий вывод — клик ничего не меняет
         guard Licensing.shared.isPro else { _ = SettingsCoordinator.requirePro(.audioSwitch); return }
         if AudioDevices.setDefaultOutput(id) {
@@ -2299,13 +1692,7 @@ final class PopoverController: NSViewController {
         if let earliest = data.earliest {
             let df = DateFormatter(); df.dateFormat = "d MMM HH:mm"; df.locale = Locale(identifier: I18n.current.rawValue)
             let n = data.count
-            let pts: String                                            // #5: склонение «точек» по числу и языку
-            switch I18n.current {
-            case .ru: pts = SettingsStore.plural(n, "точка", "точки", "точек")
-            case .uk: pts = SettingsStore.plural(n, "точка", "точки", "точок")
-            case .en: pts = n == 1 ? "point" : "points"
-            case .pt: pts = n == 1 ? "ponto" : "pontos"
-            }
+            let pts = I18n.pluralPoints(n)
             historyFooter.stringValue = String(format: L("Данные с %@ · %d %@ · снимок раз в минуту, локально"),
                                                df.string(from: Date(timeIntervalSince1970: TimeInterval(earliest))), n, pts)
         } else {
@@ -2341,7 +1728,7 @@ final class PopoverController: NSViewController {
             let snapshot = AdvisorSnapshot(
                 batteryPresent: battery?.present ?? false,
                 batteryChargePercent: battery?.charge,
-                batteryHealthPercent: battery?.health,
+                batteryHealthPercent: battery?.displayHealth,
                 batteryCycles: battery?.cycleCount,
                 batteryRatedCycles: battery?.ratedCycles ?? 1000,
                 batteryTemperature: battery?.temperature,
@@ -2427,17 +1814,13 @@ final class PopoverController: NSViewController {
                     }
                 }
                 if visibleResult.findings.count > 3 {
-                    let more = NSTextField(labelWithString: String(
+                    let more = GlassButton(title: String(
                         format: L("Ещё %d — открыть обслуживание"),
                         visibleResult.findings.count - 3
-                    ))
-                    more.font = Design.Font.sys(10, .medium)
-                    more.textColor = Design.Color.accent(self.isDark)
-                    more.alignment = .right
+                    ), symbol: "arrow.right", cornerRadius: Design.Radius.chip)
                     more.translatesAutoresizingMaskIntoConstraints = false
                     more.widthAnchor.constraint(equalToConstant: self.IW).isActive = true
-                    let click = NSClickGestureRecognizer(target: self, action: #selector(self.openHealthMaintenance))
-                    more.addGestureRecognizer(click)
+                    more.onClick = { [weak self] in self?.openHealthMaintenance() }
                     self.healthFindingsContainer.addArrangedSubview(more)
                 }
                 self.settlePreferredSize()
@@ -2445,8 +1828,13 @@ final class PopoverController: NSViewController {
         }
     }
 
-    @objc private func openHealthMaintenance() {
-        if let index = tabOrder.firstIndex(of: "maintenance") { selectTab(index) }
+    private func openHealthMaintenance() {
+        if let index = tabOrder.firstIndex(of: "maintenance") {
+            selectTab(index)
+        } else {
+            view.window?.close()
+            SettingsCoordinator.open(section: "maintenance")
+        }
     }
     
     /// Построить карточку рекомендации.
@@ -2474,8 +1862,8 @@ final class PopoverController: NSViewController {
         let expLabel = NSTextField(labelWithString: finding.explanation)
         expLabel.font = Design.Font.sys(10, .regular)
         expLabel.textColor = .secondaryLabelColor
-        expLabel.lineBreakMode = .byTruncatingTail
-        expLabel.maximumNumberOfLines = 1
+        expLabel.lineBreakMode = .byWordWrapping
+        expLabel.maximumNumberOfLines = 2
 
         let text = NSStackView(views: [titleLabel, expLabel])
         text.orientation = .vertical
@@ -2486,77 +1874,50 @@ final class PopoverController: NSViewController {
         metric.textColor = .tertiaryLabelColor
         metric.alignment = .right
 
-        let chevron = NSImageView()
-        chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: L("Подробнее"))
-        chevron.contentTintColor = .tertiaryLabelColor
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        chevron.widthAnchor.constraint(equalToConstant: 10).isActive = true
+        let actionable = finding.detailsDestination != nil || finding.action != nil
+        var rowViews: [NSView] = [iconView, text, spacer(), metric]
+        if actionable {
+            let chevron = NSImageView()
+            chevron.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: L("Подробнее"))
+            chevron.contentTintColor = .tertiaryLabelColor
+            chevron.translatesAutoresizingMaskIntoConstraints = false
+            chevron.widthAnchor.constraint(equalToConstant: 10).isActive = true
+            rowViews.append(chevron)
+        }
 
-        let row = NSStackView(views: [iconView, text, spacer(), metric, chevron])
+        let row = PopoverActionRow(frame: .zero)
+        rowViews.forEach(row.addArrangedSubview)
         row.alignment = .centerY
         row.spacing = 8
         row.edgeInsets = NSEdgeInsets(top: 8, left: 2, bottom: 8, right: 2)
         row.translatesAutoresizingMaskIntoConstraints = false
         row.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        row.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        let click = NSClickGestureRecognizer(target: self, action: #selector(advisorCompactRowClicked(_:)))
-        row.identifier = NSUserInterfaceItemIdentifier(finding.id)
-        row.addGestureRecognizer(click)
+        row.heightAnchor.constraint(equalToConstant: 58).isActive = true
+        if actionable {
+            row.accessibilityText = [finding.title, finding.explanation, finding.metric]
+                .compactMap { $0 }
+                .joined(separator: " · ")
+            row.onPress = { [weak self] in self?.openAdvisorFinding(id: finding.id) }
+        }
         return row
     }
 
-    @objc private func advisorCompactRowClicked(_ gesture: NSClickGestureRecognizer) {
-        guard let id = gesture.view?.identifier?.rawValue,
-              let finding = lastAdvisorResult?.findings.first(where: { $0.id == id }) else { return }
-        if let action = finding.action { handleAdvisorAction(action, finding: finding) }
-        else if let destination = finding.detailsDestination { openAdvisorDetails(destination: destination) }
-    }
-    
-    /// Обработать действие рекомендации.
-    private func handleAdvisorAction(_ action: AdvisorAction, finding: AdvisorFinding) {
+    private func openAdvisorFinding(id: String) {
+        guard let finding = lastAdvisorResult?.findings.first(where: { $0.id == id }) else { return }
+        if let destination = finding.detailsDestination {
+            openAdvisorDetails(destination: destination)
+            return
+        }
+        guard let action = finding.action else { return }
         switch action {
-        case .enableChargeLimit(let percent):
-            guard Licensing.shared.isPro else {
-                _ = SettingsCoordinator.requirePro(.charge)
-                return
-            }
-            ChargeControl.setLimit(percent)
-            refreshAdvisor()
-            
-        case .enableHeatProtection:
-            guard Licensing.shared.isPro else {
-                _ = SettingsCoordinator.requirePro(.charge)
-                return
-            }
-            guard HelperInstall.fandInstalled else {
-                SettingsCoordinator.open(section: "power")
-                return
-            }
-            SettingsStore.heatProtect = true
-            ChargeControl.writeJSON()
-            refreshAdvisor()
-            
-        case .activateFanProfile(let profile):
-            guard Licensing.shared.isPro else {
-                _ = SettingsCoordinator.requirePro(.fans)
-                return
-            }
-            guard FanController.daemonInstalled else {
-                activateHealthFanProfile(profile)
-                return
-            }
-            FanController.applyProfileHeadless(named: profile)
-            refreshAdvisor()
-            
-        case .openSettings(let section):
-            SettingsCoordinator.open(section: section)
-            
-        case .openPopoverSection(let section):
-            if let idx = tabOrder.firstIndex(of: section) {
-                selectTab(idx)
-            }
-            
+        case .enableChargeLimit, .enableHeatProtection:
+            openAdvisorDetails(destination: "power")
+        case .activateFanProfile:
+            openAdvisorDetails(destination: "cooling")
+        case .openSettings(let section), .openPopoverSection(let section):
+            openAdvisorDetails(destination: section)
         case .revealApplication(let appName):
+            view.window?.close()
             let workspace = NSWorkspace.shared
             if let appURL = workspace.urlForApplication(withBundleIdentifier: appName) {
                 workspace.open(appURL)
@@ -2564,21 +1925,17 @@ final class PopoverController: NSViewController {
                 let appURL = URL(fileURLWithPath: "/Applications/\(appName).app")
                 if FileManager.default.fileExists(atPath: appURL.path) { workspace.open(appURL) }
             }
-            
         }
     }
     
     /// Открыть подробности рекомендации.
     private func openAdvisorDetails(destination: String) {
-        let inlineDestination: String
-        switch destination {
-        case "power": inlineDestination = "health"
-        case "about": inlineDestination = "maintenance"
-        default: inlineDestination = destination
+        if let idx = tabOrder.firstIndex(of: destination) {
+            if idx != currentTab { selectTab(idx) }
+            return
         }
-        if let idx = tabOrder.firstIndex(of: inlineDestination) {
-            selectTab(idx)
-        }
+        view.window?.close()
+        SettingsCoordinator.open(section: destination)
     }
     
     /// Открыть/подсветить вкладку «Приватность» (из баннера first-conn). Поповер уже показан вызывающим.
@@ -2598,8 +1955,7 @@ final class PopoverController: NSViewController {
             tint: Design.Color.accent(isDark),
             animated: false
         )
-        let sensorsTitle = Self.sectionLabel(L("Датчики"))
-        let hw: [NSView] = [hardwareHero, gpuStatusView(), sensorsTitle, sensorsView,
+        let hw: [NSView] = [hardwareHero, gpuStatusView(), sensorsView,
                             compStatus, installBtn]
         return glassTile(vstack(hw, 8), fill: true)
     }
@@ -2612,11 +1968,6 @@ final class PopoverController: NSViewController {
     }
 
     private let gpuLine = NSTextField(labelWithString: "")   // живой индикатор активной GPU (перекрашивается в тике)
-    private var gpuModeBar: PillTabBar?                      // компактный селектор Авто/Встроенная/Дискретная
-
-    /// Строка-glance «какая видеокарта работает» + компактный селектор режима.
-    /// На dual-GPU Mac с установленным privileged-сервисом — переключение в один тап,
-    /// без пароля. Если сервис не установлен — selector скрыт, остаётся только индикатор.
     private func gpuStatusView() -> NSView {
         gpuLine.lineBreakMode = .byTruncatingTail
         gpuLine.translatesAutoresizingMaskIntoConstraints = false
@@ -2624,74 +1975,28 @@ final class PopoverController: NSViewController {
         paintGPU()
         guard GPUInfo.switchable else { return gpuLine }
 
-        // The settings screen owns setup/approval. A selector that cannot
-        // execute is misleading and used to produce serviceUnavailable on
-        // every click from the popover.
-        GPUController.shared.refreshServiceState()
-        guard GPUController.shared.canSwitch else {
-            let approvalRequired: Bool
-            if case .approvalRequired = GPUController.shared.serviceState {
-                approvalRequired = true
-            } else {
-                approvalRequired = false
-            }
-            let setup = GlassButton(
-                title: approvalRequired
-                    ? L("Разрешить переключение графики…")
-                    : L("Подключить переключение графики…"),
-                symbol: approvalRequired ? "checkmark.shield" : "gearshape"
-            )
-            setup.onClick = {
-                if approvalRequired {
-                    MacSystemSettings.openLoginItems()
-                } else {
-                    SettingsCoordinator.open(section: "cooling")
-                }
-            }
-            setup.translatesAutoresizingMaskIntoConstraints = false
-            setup.widthAnchor.constraint(equalToConstant: IW).isActive = true
-            return vstack([gpuLine, setup], 6)
-        }
+        // Дополнительная read-only строка с текущей политикой переключения.
+        let policy = NSTextField(labelWithString: "")
+        policy.font = Design.Font.caption
+        policy.textColor = .secondaryLabelColor
+        policy.translatesAutoresizingMaskIntoConstraints = false
+        policy.widthAnchor.constraint(equalToConstant: IW).isActive = true
+        gpuPolicyLabel = policy
+        paintGPUPolicy()
 
-        // Компактный селектор: Встроенная / Дискретная / Авто.
-        let labels = GPUMode.allCases.map { $0.shortTitle }
-        let currentRaw = GPUInfo.mode()?.rawValue ?? GPUMode.automatic.rawValue
-        // PillTabBar индексы: 0=integratedOnly, 1=discreteOnly, 2=automatic
-        let bar = PillTabBar(labels: labels, selected: currentRaw)
-        bar.onSelect = { [weak self] idx in
-            guard let mode = GPUMode(rawValue: idx) else { return }
-            self?.setGPUMode(mode)
-        }
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.widthAnchor.constraint(equalToConstant: IW).isActive = true
-        gpuModeBar = bar
-
-        // Обновляем selector при каждом тике (paintGPU вызывается из tick).
-        return vstack([gpuLine, bar], 6)
+        return vstack([gpuLine, policy], 6)
     }
 
-    /// Переключить режим GPU через GPUController (XPC, без пароля).
-    private func setGPUMode(_ mode: GPUMode) {
-        // Pro-проверка до setup flow.
-        guard Licensing.shared.isPro else {
-            _ = SettingsCoordinator.requirePro(.gpuSwitch)
-            // Возвращаем selector к фактическому значению.
-            syncGPUModeBar()
-            return
-        }
-        Task { @MainActor in
-            GPUController.shared.setMode(mode)
-        }
+    private weak var gpuPolicyLabel: NSTextField?
+
+    /// Обновить read-only строку текущей политики GPU для вкладки «Железо».
+    private func paintGPUPolicy() {
+        // Не fallback на GPUInfo.mode(): sync fork+exec pmset на main. selectedMode
+        // загружается async; до загрузки показываем «—».
+        let mode = GPUController.shared.selectedMode
+        gpuPolicyLabel?.stringValue = String(format: L("Политика: %@"), mode?.shortTitle ?? "—")
     }
 
-    /// Синхронизировать PillTabBar с текущим режимом из pmset.
-    private func syncGPUModeBar() {
-        guard let bar = gpuModeBar else { return }
-        let current = GPUInfo.mode()?.rawValue ?? GPUMode.automatic.rawValue
-        if bar.selectedIndex != current {
-            bar.select(current, animated: false)
-        }
-    }
     /// Перекрасить строку GPU по ТЕКУЩЕЙ активной карте (живая смена дискретная↔встроенная).
     private func paintGPU() {
         let gpus = GPUInfo.all()
@@ -2744,8 +2049,41 @@ final class PopoverController: NSViewController {
         return glassTile(vstack([host, seam, statsRow, appsUpdatedLabel], 7))
     }
 
+    // MARK: компактный Control Center — быстрые действия + вывод звука по запросу
+    private func buildControlPanel(ids: [String]) -> NSView {
+        var sections: [NSView] = []
+        func appendSection(_ view: NSView) {
+            if !sections.isEmpty { sections.append(divider()) }
+            sections.append(view)
+        }
+        if ids.contains("toggles") { appendSection(buildTogglesContent()) }
+        if ids.contains("audio") { appendSection(buildAudioContent()) }
+        let content = vstack(sections, 12)
+        let environment = ProcessInfo.processInfo.environment
+        let initiallyExpanded = environment["BM_CONTROLS_OPEN"] != nil
+            || (environment["BM_SNAP"] == nil && SettingsStore.popoverControlsExpanded)
+        let panel = PopoverControlPanel(
+            title: L("Быстрые действия"),
+            summary: "",
+            content: content,
+            expanded: initiallyExpanded
+        )
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.widthAnchor.constraint(equalToConstant: CW).isActive = true
+        panel.onExpansionChanged = { [weak self] expanded in
+            SettingsStore.popoverControlsExpanded = expanded
+            guard let self else { return }
+            self.view.layoutSubtreeIfNeeded()
+            self.root.layoutSubtreeIfNeeded()
+            self.settlePreferredSize()
+        }
+        controlPanel = panel
+        return panel
+    }
+
     // MARK: плитка быстрых переключателей (Control Center) — встроенные + свои кнопки, по раскладке
-    private func buildTogglesTile() -> NSView {
+    /// Контент переключателей без внешней плитки — используется внутри раскрываемого Control Center.
+    private func buildTogglesContent() -> NSView {
         var buttons: [CCToggle] = []
         for item in SettingsStore.toggleLayout where item.on {
             if item.id.hasPrefix("custom:") {
@@ -2784,17 +2122,20 @@ final class PopoverController: NSViewController {
             rows.append(row)
             i += 2
         }
-        return glassTile(vstack(rows, 8))
+        return vstack(rows, 8)
     }
     private func makeBuiltinToggle(_ def: QuickToggleDef) -> CCToggle {
         let t = CCToggle(id: def.id, icon: def.icon, title: def.label, accent: def.accent)
-        t.toolTip = def.label                           // фикс-ячейка сетки режет длинные подписи «…» — полное имя в тултипе
+        t.toolTip = def.tooltip ?? def.label            // фикс-ячейка сетки режет длинные подписи «…» — полное имя в тултипе
         t.isBuiltin = true
-        t.stateProvider = def.isOn
-        t.isOn = def.isOn()
+        t.isMomentaryAction = def.isMomentaryAction
+        t.stateProvider = def.isMomentaryAction ? nil : def.isOn
+        t.isOn = def.isMomentaryAction ? false : def.isOn()
         t.onClick = { [weak self] in
             def.toggle()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.refreshToggles() }
+            if !def.isMomentaryAction {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.refreshToggles() }
+            }
         }
         ccToggles.append(t)
         return t
@@ -2802,6 +2143,7 @@ final class PopoverController: NSViewController {
     private func makeCustomButton(_ c: CustomToggle) -> CCToggle {
         let t = CCToggle(id: "custom:\(c.id)", icon: c.icon.isEmpty ? "bolt.fill" : c.icon, title: c.label, accent: c.accent)
         t.isOn = false                                  // мгновенное действие, не состояние
+        t.isMomentaryAction = true
         // Pro-гейт на КЛИК, а не только на создание: после даунгрейда в Free кнопка не должна исполнять bash.
         t.onClick = {
             guard Licensing.shared.isPro else { _ = SettingsCoordinator.requirePro(.customToggles); return }
@@ -2848,8 +2190,10 @@ final class PopoverController: NSViewController {
     }
     /// Стеклянная плитка (Control Center / Liquid Glass): непрерывные скругления,
     /// frosted-fill поверх размытого фона поповера, мягкая тень-глубина вместо рамки.
-    private func glassTile(_ inner: NSView, radius: CGFloat = Design.Radius.tile, hInset: CGFloat = 16, fill: Bool = false) -> NSView {
+    private func glassTile(_ inner: NSView, radius: CGFloat = Design.Radius.tile, hInset: CGFloat = 16,
+                           fill: Bool = false, chrome: Bool = true) -> NSView {
         let tile = NSView()
+        tile.identifier = NSUserInterfaceItemIdentifier(chrome ? "workSurface" : "chromeFree")
         tile.wantsLayer = true
         tile.translatesAutoresizingMaskIntoConstraints = false
         tile.layer?.cornerRadius = radius
@@ -2872,15 +2216,20 @@ final class PopoverController: NSViewController {
         cards.append(tile)
         return tile
     }
-    /// V3 «единая стеклянная поверхность» (грамматика Control Center): плитки ПОЛНОСТЬЮ прозрачны —
-    /// ни заливки, ни кромки, ни тени. Весь поповер = ОДНА стеклянная панель (GlassContainer .popover),
-    /// секции разделяются только волосяными делителями (sectionDivider) + отступом. Это убивает «полоски
-    /// по бокам»: раньше светлая заливка плитки (CW) на фоне тёмной базы ауры в 14pt-гаттере читалась как
-    /// боковые тёмные полосы; теперь центр и гаттер — одно равномерное стекло, шва нет.
+    /// Спокойная иерархия Control Center: единая blur-панель остаётся базой, а контентные
+    /// группы получают очень тихую поверхность и световой кант. Это отделяет смысловые
+    /// блоки без тяжёлых рамок и «карточки в карточке».
     private func paintCards() {
         for c in cards {
-            c.layer?.backgroundColor = NSColor.clear.cgColor
-            c.layer?.borderWidth = 0
+            let chrome = c.identifier?.rawValue == "workSurface"
+            c.layer?.backgroundColor = chrome
+                ? (isDark ? NSColor.white.withAlphaComponent(0.035)
+                          : NSColor.black.withAlphaComponent(0.025)).cgColor
+                : NSColor.clear.cgColor
+            c.layer?.borderWidth = chrome ? 0.5 : 0
+            c.layer?.borderColor = chrome
+                ? Design.Color.hairline(isDark, isDark ? 0.08 : 0.06).cgColor
+                : NSColor.clear.cgColor
             c.layer?.shadowOpacity = 0
         }
     }
@@ -2904,7 +2253,7 @@ final class PopoverController: NSViewController {
             return
         }
         lastAuraColor = resolved
-        auraView.setColor(resolved, animated: animated, intensity: 0.72, duration: 0.72)
+        auraView.setColor(resolved, animated: animated, intensity: 0.18, duration: 0.72)
     }
 
     /// Цвет системной стрелки/рамки NSPopover. Контент рисует AuraView, но стрелка
@@ -2934,8 +2283,7 @@ final class PopoverController: NSViewController {
             DispatchQueue.main.async { [weak self] in self?.privacyView.animateIn(); self?.vpnChipRefresh?(); self?.mediaChipRefresh?() }
         }
         guard !Motion.reduced else { ring.animateIn(); return }   // «Уменьшить движение» — без всплытия/прорисовки
-        // плитки оседают со стаггером сразу с открытия. Прежний spineLead (0.11с прорисовки шва) УБРАН
-        // вместе со StatusSpine — иначе fillMode .backwards держал бы контент на opacity 0 эти 110мс («моргок»).
+        // Плитки оседают со стаггером сразу с открытия.
         // Только РАЗМЕЩЁННЫЕ в иерархии карточки: замер вкладок кладёт в cards все до 6 таб-плиток,
         // но показана одна — 5 отсоединённых «съедали» слоты стаггера и раздували задержку видимой вкладки.
         let live = cards.filter { $0.superview != nil }
@@ -3023,7 +2371,7 @@ final class PopoverController: NSViewController {
         var feed = FlowInfoBar.Feed()
         feed.hasBattery = b.present
         feed.cycleCount = b.cycleCount
-        feed.health = b.health
+        feed.health = b.displayHealth
         feed.capacityWh = b.capacityWh
         feed.onBattery = b.present && !e.plugged
         feed.topApp = appsLast.first?.name
@@ -3070,14 +2418,17 @@ final class PopoverController: NSViewController {
             // ауре (та краснеет при реальном crit). Тепловой crit из тинта кольца УБРАН: иначе 90% заряда +
             // горячий CPU красили кольцо красным, читаясь как «критический заряд». Заряжается → бирюза;
             // иначе семантика заряда (≤15 красный / ≤35 амбер / иначе зелёный).
-            let ringColor: NSColor = b.charging ? Design.Color.accentBright(isDark)
+            let activelyCharging = b.charging && b.charge < 100
+            let ringColor: NSColor = activelyCharging ? Design.Color.accentBright(isDark)
                 : (b.charge <= 15 ? Design.Color.levelCrit
                    : (b.charge <= 35 ? Design.Color.levelWarn : Design.Color.levelOK))
-            ring.set(charge: b.charge, charging: b.charging, flow: e.battFlow, plugged: e.plugged, accent: ringColor)
+            let presentedFlow: BatteryFlow = (b.charge >= 100 && e.battFlow == .charging) ? .idle : e.battFlow
+            ring.set(charge: b.charge, charging: activelyCharging,
+                     flow: presentedFlow, plugged: e.plugged, accent: ringColor)
             syncAura(to: ringColor, animated: true)
             applyChargeLimit()                         // тик на кольце + дорожка заряда (Pro charge limit)
             // дорожка заряда (строка 2): реальное состояние потолка/режима/парусов + Pro-флаг
-            chargeTrack.set(charge: b.charge, charging: b.charging, flow: e.battFlow,
+            chargeTrack.set(charge: b.charge, charging: activelyCharging, flow: presentedFlow,
                             limit: ChargeControl.limit, mode: ChargeControl.mode,
                             sailUpper: ChargeControl.sailUpper, sailLower: ChargeControl.sailLower,
                             topUpActive: ChargeControl.isTopUpActive,
@@ -3086,7 +2437,7 @@ final class PopoverController: NSViewController {
 
             // Статус ЧЕЛОВЕЧЕСКИМ языком, коротко (прежнее «адаптер 47 Вт» обрезалось до «адаптер 47 В»):
             // «Зарядка · до полного 1:20» / «От сети · держим 80%» / «От батареи · осталось 4:10».
-            if b.charging {
+            if b.charging && b.charge < 100 {
                 statusTitle.stringValue = L("Зарядка")
                 statusTitle.textColor = chargeAccent
                 // «ещё» (не «до полного»): правая колонка шапки узкая (ring 80 + широкий вердикт),
@@ -3101,7 +2452,7 @@ final class PopoverController: NSViewController {
                     ? L("защита настроена · не активна")
                     : (ChargeControl.limit < 100 && b.charge >= ChargeControl.limit - 2)
                     ? String(format: L("держим %d%%"), ChargeControl.limit)
-                    : String(format: L("%d%%"), b.charge)
+                    : (b.charge >= 99 ? L("заряд завершён") : L("заряд приостановлен"))
             } else {
                 statusTitle.stringValue = L("От батареи")
                 statusTitle.textColor = .systemGreen
@@ -3110,10 +2461,9 @@ final class PopoverController: NSViewController {
             }
             // (CPU/Темп/Кулер/RAM + спарклайн уже обновлены ВЫШЕ — не зависят от батарейной ветки.)
 
-            metric["Здоровье"]?.stringValue = String(format: "%.0f%%", b.health)
-            // Здоровье = один канонический дом (из футера Flow здоровье убрано в L4). >100% делаем
-            // САМООЧЕВИДНЫМ реальной парой мА·ч (coconutBattery-стиль): текущая полная ёмкость vs заводская —
-            // тогда «104%» читается как факт «АКБ чуть выше заводской», а не как баг. Честность закон #1.
+            metric["Здоровье"]?.stringValue = String(format: "%.0f%%", b.displayHealth)
+            // Основная шкала здоровья заканчивается на 100%; сырой коэффициент остаётся в подсказке
+            // вместе с обеими ёмкостями — диагностическая точность сохранена, но UI не выглядит сломанным.
             metric["Здоровье"]?.toolTip = (b.designCapacity > 0 && b.maxCapacity > 0)
                 ? String(format: L("Полная ёмкость сейчас %d мА·ч из заводских %d мА·ч (%.0f%%). Выше 100%% — норма для новых или откалиброванных АКБ; ниже — естественный износ."),
                          b.maxCapacity, b.designCapacity, b.health)
@@ -3198,14 +2548,17 @@ final class PopoverController: NSViewController {
             tint: hardwareTint
         )
         // живая смена GPU (дискретная↔встроенная) — перекрашиваем строку, пока видна вкладка «Железо»
-        if currentTab < tabOrder.count, tabOrder[currentTab] == "hardware" { paintGPU() }
+        if currentTab < tabOrder.count, tabOrder[currentTab] == "hardware" {
+            paintGPU()
+            paintGPUPolicy()   // read-only политика во вкладке «Железо»
+        }
         refreshAppsUpdatedLabel()      // «обновлено N с назад» в футере Приложений тикает каждую секунду
         // каталог-лента: read() ТОЛЬКО видимых строк (перф) + диагностика движка из уже собранных полей
         let visible = sensorsView.visibleIDs()
         let catRows = SensorCatalog.snapshot(visibleIDs: visible, record: true)
         sensorsView.updateCatalog(rows: catRows, components: c, energy: e)
-        refreshHealthVerdict(battery: b, energy: e, sensors: sensors)   // одна слим-строка «всё ли в норме» в шапке
-        refreshTabDots(battery: b, energy: e, sensors: sensors)         // тихие warn/crit-точки на вкладках
+        refreshHealthVerdict(battery: b, sensors: sensors)
+        refreshTabDots(battery: b, sensors: sensors)                    // тихие warn/crit-точки на вкладках
         // Детализация powermetrics имеет собственную state machine. Краткий stale после
         // wake/нагрузки больше не маскируется под «нужно переустановить».
         switch HelperInstall.telemetryState(c) {
@@ -3251,9 +2604,9 @@ final class PopoverController: NSViewController {
         return (best?.0 ?? .ok, best?.1)
     }
 
-    private func refreshHealthVerdict(battery b: BatteryInfo, energy e: EnergySnapshot, sensors: SensorsSnapshot) {
+    private func refreshHealthVerdict(battery b: BatteryInfo, sensors: SensorsSnapshot) {
         // Худший тепловой сигнал по ЧЕСТНЫМ порогам датчика (CPU крит ≥100°, батарея ≥45° и т.д.).
-        let (instTempLvl, hottest) = worstTempSignal(sensors.temps)
+        let (instTempLvl, _) = worstTempSignal(sensors.temps)
         // Устойчивость: крит-температуру показываем «Перегрев» только если держится ≥3 тика (~4–5с),
         // иначе мгновенный турбо-скачок кристалла флипал бы капсулу. До того — максимум «Греется».
         if instTempLvl == .crit { tempCritStreak += 1 } else { tempCritStreak = 0 }
@@ -3263,95 +2616,19 @@ final class PopoverController: NSViewController {
         // (у владельца с fan-кривой это ПОСТОЯННО) — НЕ фолт. Вердикт-warn остаётся ТОЛЬКО за реальной жарой
         // (Греется/Перегрев) → кольцо амбер редко и честно; температура/обороты видны в витальных.
 
-        // worst-of: сначала crit, затем warn, иначе ok. КАПСУЛА = короткое слово (никогда не «…»),
-        // ТУЛТИП (detail) = полная фраза с цифрой/сенсором — наведение раскрывает деталь (фикс «скрыто, наводишь — пусто»).
-        // anchor — модуль-источник сигнала: спайн подсветит сегмент у него (жара/нагрузка → вкладки, заряд → шапка).
-        let level: Design.Level
-        let word: String                 // короткое слово в капсулу (≤ ширины пилюли, без усечения)
-        let detail: String               // полная фраза в тултип капсулы
-        let anchor: NSView?
-        if tempLvl == .crit {
-            level = .crit
-            word = L("Перегрев")
-            detail = hottest.map { String(format: L("Перегрев — %@ %@"), $0.name, $0.text) } ?? L("Перегрев")
-            anchor = tabAreaView
-        } else if critCharge {
-            level = .crit
-            word = L("Заряд")
-            detail = String(format: L("Критический заряд — %d%%"), b.charge)
-            anchor = headerTile
+        if tempLvl == .crit || critCharge {
+            lastVerdictLevel = .crit
         } else if tempLvl == .warn {
-            level = .warn
-            word = L("Греется")
-            detail = hottest.map { String(format: L("Греется — %@ %@"), $0.name, $0.text) } ?? L("Греется")
-            anchor = tabAreaView
+            lastVerdictLevel = .warn
         } else {
-            level = .ok
-            word = L("Всё в норме")
-            detail = L("Всё в норме")
-            anchor = nil
+            lastVerdictLevel = .ok
         }
-        lastVerdictLevel = level            // герой-шапка: тинт кольца берёт этот уровень на следующем тике
-        let color: NSColor
-        switch level {
-        case .ok:   color = Design.Color.levelOK
-        case .warn: color = Design.Color.levelWarn
-        case .crit: color = Design.Color.levelCrit
-        }
-        healthDot.textColor = isDark ? color : (color.blended(withFraction: 0.18, of: .black) ?? color)
-        if healthLabel.stringValue != word { healthLabel.stringValue = word }
-        let tip = (level == .ok) ? nil : detail                // наведение раскрывает полную деталь (цифра/сенсор)
-        // GUARD: не трогать toolTip если строка не изменилась — иначе каждый тик сбрасывает
-        // ~1.5с таймер всплытия AppKit и подсказка «не успевает» показаться (первопричина бага).
-        if lastVerdictTip != tip {
-            verdictPill.toolTip = tip; healthLabel.toolTip = tip; healthDot.toolTip = tip
-            lastVerdictTip = tip
-        }
-        // Кликабельная капсула (главный фикс): тап раскрывает деталь поповером, не завися от
-        // капризного AppKit-таймера. .ok → инертна (нет pointingHand).
-        verdictDetail = detail
-        verdictLevelOK = (level == .ok)
-        verdictPill.onClick = (level == .ok) ? nil : { [weak self] in self?.showVerdictDetail() }
-        verdictPill.window?.invalidateCursorRects(for: verdictPill)
-        let ax = "● " + detail                                // VoiceOver/AX читает полную фразу, не усечённое слово
-        healthDot.setAccessibilityLabel(ax); healthLabel.setAccessibilityLabel(ax)
-
-        _ = anchor        // V3: StatusSpine ретайрнут — anchor больше не подсвечивает сегмент шва
-    }
-
-    /// Клик по капсуле вердикта → стеклянный поповер с полной фразой (цифра/сенсор). Надёжнее
-    /// тултипа: не зависит от AppKit-таймера всплытия. .ok — no-op (капсула инертна).
-    private func showVerdictDetail() {
-        guard !verdictLevelOK, !verdictDetail.isEmpty else { return }
-        let vc = NSViewController()
-        let host = NSView()
-        host.wantsLayer = true
-        let dark = isDark
-        host.layer?.backgroundColor = Design.Color.controlFill(dark).cgColor
-        let label = NSTextField(wrappingLabelWithString: verdictDetail)
-        label.font = Design.Font.body
-        label.textColor = .labelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.preferredMaxLayoutWidth = 240
-        host.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 12),
-            label.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -12),
-            label.topAnchor.constraint(equalTo: host.topAnchor, constant: 10),
-            label.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -10),
-        ])
-        vc.view = host
-        let pop = NSPopover()
-        pop.contentViewController = vc
-        pop.behavior = .semitransient
-        pop.contentSize = NSSize(width: 264, height: label.intrinsicContentSize.height + 20)
-        pop.show(relativeTo: verdictPill.bounds, of: verdictPill, preferredEdge: .maxY)
     }
 
     /// Тихие warn/crit-точки на вкладках таб-бара: «Железо» — перегрев сенсора (Design.tempLevel),
     /// «Питание» — критический заряд (crit) или высокий расход системы (warn). Спокойная машина — точек нет.
     /// Берёт уже собранные снимки (не перечитывает SMC); оверлей не меняет высоту таб-бара.
-    private func refreshTabDots(battery b: BatteryInfo, energy e: EnergySnapshot, sensors: SensorsSnapshot) {
+    private func refreshTabDots(battery b: BatteryInfo, sensors: SensorsSnapshot) {
         guard let bar = tabBar else { return }
         let hwLevel: Design.Level? = { let l = worstTempSignal(sensors.temps).level; return l == .ok ? nil : l }()
         let critCharge = b.present && !b.charging && b.charge <= 15      // как кольцо/алерты/вердикт
@@ -3435,7 +2712,7 @@ final class PopoverController: NSViewController {
         guard let t = appsUpdatedAt else { appsUpdatedLabel.stringValue = ""; return }
         let s = Int(Date().timeIntervalSince(t).rounded())
         appsUpdatedLabel.stringValue = s <= 1 ? L("обновлено только что")
-                                              : String(format: L("обновлено %d с назад"), s)
+                                              : String(format: L("обновлено %d сек. назад"), s)
     }
 
     /// Ховер строки: замораживает/размораживает вертикальную пересортировку лидерборда (O4).
@@ -3455,7 +2732,6 @@ final class PopoverController: NSViewController {
 
     /// Сбросить реестр переиспользуемых карточек (при переходе в досье/пустой-стейт/calm-floor).
     private func teardownAppRows() {
-        appRows.values.forEach { $0.dismissOverlay() }      // D1: снять осиротевшие ховер-оверлеи ДО сноса строк (calm-floor/пусто/досье под курсором)
         appsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         appRows.removeAll(); appHeroName = nil; appsHeader = nil; appsVerdict = nil
         lastFlagCodes.removeAll()                           // O12: карточек нет — diff-кэш флагов недействителен
@@ -3551,11 +2827,11 @@ final class PopoverController: NSViewController {
         // («Chrome больше всех расходует энергию») — это и есть преимущество над Мониторингом системы.
         if appsVerdict == nil {
             let v = NSTextField(labelWithString: "")
-            v.font = Design.Font.sys(13, .semibold); v.textColor = .labelColor
+            v.font = Design.Font.sys(12, .semibold); v.textColor = .labelColor
             // 2 строки с переносом: длинное имя процесса («WindowServer») + фраза не влезали в одну
             // строку IW и обрезались по хвосту («…больше всех рас…»), теряя сам вывод. Перенос держит
             // вердикт целым (и заполняет верх вкладки — цель L4), высоту вкладка вмещает.
-            v.lineBreakMode = .byTruncatingTail; v.maximumNumberOfLines = 1
+            v.lineBreakMode = .byWordWrapping; v.maximumNumberOfLines = 2
             v.translatesAutoresizingMaskIntoConstraints = false
             v.widthAnchor.constraint(equalToConstant: IW).isActive = true
             v.preferredMaxLayoutWidth = IW
@@ -3580,7 +2856,6 @@ final class PopoverController: NSViewController {
 
         // Эвикт карточек, выпавших из топа.
         for (n, v) in appRows where !targetSet.contains(n) {
-            v.dismissOverlay()          // O6: снести осиротевший ховер-оверлей вместе со строкой
             v.removeFromSuperview(); appRows[n] = nil
             lastFlagCodes[n] = nil      // O12: не течь diff-кэшем флагов
             if appHeroName == n { appHeroName = nil }
@@ -3773,7 +3048,6 @@ final class PopoverController: NSViewController {
         wrapper.owner = self
         wrapper.appName = a.name
         wrapper.isHero = isHero
-        wrapper.canExpand = !isHero
         wrapper.barW = appsBarW
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.wantsLayer = true
@@ -4635,7 +3909,7 @@ final class PopoverController: NSViewController {
         }
     }
 
-    @objc private func refreshApps() {
+    private func refreshApps() {
         // Берём расширенный сырой пул: после объединения helper/web-content процессов
         // всё равно остаётся полноценный топ из шести самостоятельных приложений.
         PowerInfo.topApps(limit: 18) { [weak self] in self?.updateApps($0) }
@@ -4645,15 +3919,6 @@ final class PopoverController: NSViewController {
         view.window?.close()                      // закрыть поповер
         SettingsCoordinator.open()
     }
-
-    /// Аффорданс «Настроить поповер» из шапки (V3): открыть Настройки на разделе поповера
-    /// (прозрачность фона / набор и порядок модулей / плотность / пресеты).
-    @objc private func openPopoverSettings() {
-        view.window?.close()
-        SettingsCoordinator.open()
-        SettingsCoordinator.select("popover")
-    }
-
 
     /// Эффективный потолок заряда: «Парусный» → верхний порог; «Лимит» → chargeLimit (<100).
     /// nil — лимита нет. Кольцо получает тик-метку, чип показывает «Лимит N%» (иначе скрыт).
@@ -4697,1827 +3962,6 @@ final class PopoverController: NSViewController {
         installBtn.isHidden = true
     }
 }
-
-// MARK: - App
-
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
-    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    let popover = NSPopover()
-    private var popoverAnchor: NSWindow?     // неподвижный якорь поповера (фикс «съезда» в полноэкранном)
-    private var postedMenuTracking = false   // послан ли begin-меню-трекинг (fullscreen-путь) — снять на закрытии
-    let controller = PopoverController()
-    var history: [Double] = []
-    var tickTimer: Timer?
-    var appsTimer: Timer?
-    var idleTimer: Timer?
-    private var statusAnimationTimer: Timer?
-    private var statusAnimationPhase = 0
-    private var lastStatusBattery = BatteryInfo.absent
-    private var lastStatusEnergy = EnergySnapshot()
-    private var hasStatusSnapshot = false
-    private var menuBarCPULoad: Double = 0
-    private var menuBarRAMLoad: Double = 0
-    let usbWatch = USBWatch()             // живой USB-ридер (lifetime-инстанс, рег. при старте)
-    var idleDimmed = false
-    var savedBacklight: Float = -1
-    var nightTick = 0
-    private let hardwareQueue = DispatchQueue(label: "com.trykelvin.kelvin.hardware",
-                                              qos: .userInitiated)
-    private var hardwareTickInFlight = false
-    private var lastMenuTitle = ""        // чтобы не переустанавливать заголовок строки без изменений
-    private var lastMenuImgKey = ""
-
-    /// Мгновенно применить настройки строки меню: сброс кэша рендера → безусловная перерисовка
-    /// СЕЙЧАС, не дожидаясь тика/смены сигнатуры. Раньше часть настроек «Общих» (стиль иконок
-    /// Kelvin↔Системные в необъединённом виде и др.) не входила в триггер перерисовки и применялась
-    /// только после перезапуска приложения. Зовётся наблюдателем BMMenuBarChanged.
-    func refreshMenuBarNow() {
-        lastMenuTitle = ""; lastMenuImgKey = ""
-        let b = BatteryReader.read() ?? .absent
-        let energy = menuBarNeedsEnergy ? EnergyModel.snapshot() : EnergySnapshot()
-        updateMenuBar(b, energy)
-    }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        Hardening.denyDebugger()              // релиз-only: затруднить lldb-attach к гейту лицензии
-        SettingsStore.migrateMenuBarIdentityIfNeeded()
-        SettingsStore.migrateNativeMenuBarIfNeeded()
-        if let btn = statusItem.button {
-            // Бренд виден с первого кадра; асинхронный hardware tick затем добавит
-            // реальное значение. Больше нет безликого временного «…».
-            btn.image = KelvinGlyph.image("kelvin", size: 14)
-            btn.imagePosition = .imageOnly
-            btn.title = ""
-            btn.setAccessibilityTitle("Kelvin")
-            btn.action = #selector(statusClick)
-            btn.target = self
-            btn.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            btn.wantsLayer = true                 // для лёгкой вспышки при автозамене
-        }
-        popover.behavior = .transient
-        popover.contentViewController = controller
-        buildMainMenu()                       // горячие клавиши ⌘C/⌘V/⌘Z в полях + ⌘,/⌘W/⌘Q в окнах
-        AlertsEngine.shared.start()           // делегат Центра уведомлений (баннеры показываются и поверх активного приложения)
-        // Радар 2.0: хук открытия радара из баннера «новое приложение в сети».
-        FirstConnAlert.shared.showRadar = { [weak self] in self?.openRadarFromAlert() }
-
-        tick()
-        controller.updateApps([])
-        refreshApps()
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
-        appsTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in self?.refreshApps() }
-        RunLoop.main.add(tickTimer!, forMode: .common)
-        RunLoop.main.add(appsTimer!, forMode: .common)   // иначе рефреш приложений вставал во время трекинга меню/скролла
-
-        // пересборка поповера при изменении его настроек (секция «Поповер»)
-        NotificationCenter.default.addObserver(forName: Notification.Name("BMPopoverChanged"), object: nil, queue: .main) { [weak self] _ in
-            guard let self, self.controller.isViewLoaded else { return }
-            self.controller.buildModules()
-        }
-
-        // мгновенное применение настроек строки меню из секции «Общие» (без перезапуска)
-        NotificationCenter.default.addObserver(forName: Notification.Name("BMMenuBarChanged"), object: nil, queue: .main) { [weak self] _ in
-            self?.refreshMenuBarNow()
-        }
-
-        // Из popover обычный toggle только подготавливает конфигурацию и приводит
-        // пользователя к единственной осознанной CTA. Password dialog отсюда не вызывается.
-        NotificationCenter.default.addObserver(forName: ChargeControl.helperSetupNeeded, object: nil, queue: .main) { _ in
-            SettingsCoordinator.open(section: "power")
-        }
-
-        // авто-гашение подсветки клавы при простое
-        idleTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in self?.checkIdleBacklight() }
-
-        // E1 — живой USB: регистрируем при СТАРТЕ (не при открытии поповера), чтобы счётчик был
-        // верен в момент открытия. Колбэк на main: connect/disconnect → тик-пульс обода + сурфейс.
-        usbWatch.onChange = { [weak self] ev in
-            guard let self else { return }
-            switch ev {
-            case .connected:    self.controller.pulseUSB(connect: true)
-            case .disconnected: self.controller.pulseUSB(connect: false)
-            case .initialSync:  break   // стартовый засев — без пульса, только сурфейс
-            }
-            let name = self.usbWatch.devices.first?.name
-            self.controller.setUSBCount(self.usbWatch.count, name: name)
-        }
-        usbWatch.start()
-
-        // авто-переключатель раскладки + сниппеты — но платные авто-фичи поднимаем только при Pro
-        LangSwitcher.shared.hotkeyKeycode = CGKeyCode(SettingsStore.langHotkey)
-        LangSwitcher.shared.snippets = SettingsStore.parseSnippets(SettingsStore.snippetsRaw)
-        LangSwitcher.shared.onFeedback = { [weak self] fb in self?.handleLangFeedback(fb) }
-        applyProEntitlements()
-
-        // Глобальный хоткей вызова поповера (Carbon, без Универсального доступа). Дефолт ⌥⌘B вкл.
-        // Даёт вход в поповер поверх fullscreen, где иконка строки меню недостижима.
-        GlobalHotkey.shared.onPressed = { [weak self] in
-            self?.togglePopover(fromHotkey: true)        // колбэк уже на main (DispatchQueue.main.async внутри GlobalHotkey)
-        }
-        GlobalHotkey.shared.apply(
-            enabled: SettingsStore.popoverHotkeyEnabled,
-            keyCode: SettingsStore.popoverHotkeyKeyCode,
-            modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(SettingsStore.popoverHotkeyMods)))
-
-        // Переносим только доказанно существовавший старый LaunchAgent. Новый
-        // пользователь сам решает, запускать ли Kelvin при входе.
-        if Bundle.main.bundlePath.hasPrefix("/Applications/") {
-            LoginItem.migrateLegacyIfNeeded()
-        }
-        Licensing.shared.revalidate()        // тихо обновляем офлайн-grace, если есть лицензия
-
-        // Инициализация системы отчётов о сбоях: отмечаем запуск в breadcrumbs
-        CrashBreadcrumbStore.shared.appStarted()
-        
-        // Проверка наличия crash reports после предыдущего запуска
-        checkForCrashReports()
-
-        // welcome при первом запуске (но не во время скриншот-режимов)
-        let env = ProcessInfo.processInfo.environment
-        let screenshotMode = env["BM_SETTINGS"] != nil || env["BM_SHOWCASE"] != nil || env["BM_AUTOSHOW"] != nil
-        if env["BM_ONBOARD"] != nil || (OnboardingWindowController.shouldShow && !screenshotMode) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                OnboardingWindowController.shared.present()
-                if let w = OnboardingWindowController.shared.window { print("ONBOARD_WIN \(w.windowNumber)"); fflush(stdout) }
-            }
-        }
-        // (Прощальный оффер по окончании триала УБРАН — коммерция снята, приложение бесплатно.
-        //  presentTrialEnded() сохранён спящим для возможной реактивации.)
-        if !screenshotMode { Updater.checkOnLaunch() }   // тихая проверка обновлений (не чаще раза в сутки)
-
-        // прямое открытие настроек (для скриншот-проверки)
-        if ProcessInfo.processInfo.environment["BM_SETTINGS"] != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                SettingsCoordinator.open()
-                if let sec = ProcessInfo.processInfo.environment["BM_SETTINGS"], sec != "1" {
-                    SettingsCoordinator.select(sec)
-                }
-                if let w = SettingsCoordinator.window {
-                    if ProcessInfo.processInfo.environment["BM_LIGHT"] != nil {
-                        w.appearance = NSAppearance(named: .aqua)
-                    }
-                    print("SETTINGS_WIN \(w.windowNumber)")
-                    fflush(stdout)
-                }
-            }
-        }
-
-        // витрина: весь UI в обычном окне (для экранного скриншота, т.к. слои/анимация
-        // не видны в офскрин-рендере поповера).
-        if ProcessInfo.processInfo.environment["BM_SHOWCASE"] != nil {
-            let v = controller.view
-            if ProcessInfo.processInfo.environment["BM_LIGHT"] != nil {
-                v.appearance = NSAppearance(named: .aqua)
-            }
-            v.layoutSubtreeIfNeeded()
-            let sz = v.fittingSize
-            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: max(sz.width, 300), height: max(sz.height, 500)),
-                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            win.title = "Kelvin"
-            win.contentView = v
-            win.center()
-            win.level = .floating
-            win.makeKeyAndOrderFront(nil)
-            win.orderFrontRegardless()
-            NSApp.activate(ignoringOtherApps: true)
-            // печатаем номер окна для screencapture -l (надёжно даже при перекрытии)
-            print("SHOWCASE_WIN \(win.windowNumber)")
-            fflush(stdout)
-        }
-
-        // отладочный автопоказ поповера для скриншот-проверки
-        if ProcessInfo.processInfo.environment["BM_AUTOSHOW"] != nil {
-            popover.behavior = .applicationDefined   // не закрывать при потере фокуса (для скриншота)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                NSApp.activate(ignoringOtherApps: true)
-                self?.togglePopover()
-                if let w = self?.popover.contentViewController?.view.window { print("POPOVER_WIN \(w.windowNumber)"); fflush(stdout) }
-                guard let path = ProcessInfo.processInfo.environment["BM_RENDER"] else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                    guard let v = self?.controller.view else { return }
-                    v.layoutSubtreeIfNeeded()
-                    guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
-                    v.cacheDisplay(in: v.bounds, to: rep)
-                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                }
-            }
-        }
-    }
-
-    /// Рисованная батарея-template для строки меню (адаптируется к свету/тьме).
-    /// Фирменный глиф меню-бара — вертикальный термо-столбик (а не клон Apple-батарейки):
-    /// стеклянная капсула + колба, «ртуть» = уровень заряда, шкала-риски справа, при зарядке — молния-вырез.
-    /// Template (монохром): узнаётся формой, система тинтует под свет/тьму/подсветку.
-    /// Главная иконка строки меню по выбранному стилю (термометр / батарея) — обе charge-aware.
-    func menuBarIcon(charge: Int, charging: Bool) -> NSImage {
-        switch SettingsStore.mainIconStyle {
-        case "kelvin":
-            return menuBarKelvinIcon(charge: charge, charging: charging, phase: statusAnimationPhase)
-        case "ring":
-            return menuBarRingIcon(charge: charge, charging: charging, phase: statusAnimationPhase)
-        default:
-            if SettingsStore.menuBarIconStyle == "system" {
-                // У системной батареи SF Symbols только пять дискретных состояний.
-                // Рисуем её в нативных пропорциях сами, чтобы заливка честно следовала
-                // каждому проценту; для термометра оставляем оригинальный SF Symbol.
-                if SettingsStore.mainIconStyle == "battery" {
-                    return menuBarBatteryIcon(charge: charge, charging: charging)
-                }
-                if let image = systemMenuBarIcon(charge: charge, charging: charging) {
-                    return image
-                }
-            }
-            return SettingsStore.mainIconStyle == "battery"
-                ? menuBarBatteryIcon(charge: charge, charging: charging)
-                : menuBarThermometerIcon(charge: charge, charging: charging)
-        }
-    }
-
-    /// Канонический монохромный знак Kelvin: тот же термометр со шкалой, что на
-    /// AppIcon, но адаптированный к 16 pt. Уровень живой, а во время зарядки по
-    /// столбику проходит спокойный блик.
-    private func menuBarKelvinIcon(charge: Int, charging: Bool, phase: Int) -> NSImage {
-        let w: CGFloat = 16, h: CGFloat = 16
-        let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
-            let ink = NSColor.black
-            ink.setStroke(); ink.setFill()
-            let x: CGFloat = 5.4
-            let bulbR: CGFloat = 3.0
-            let bulbY: CGFloat = 3.4
-            let stem = NSBezierPath(roundedRect: NSRect(x: x - 1.8, y: bulbY, width: 3.6, height: 11.5),
-                                    xRadius: 1.8, yRadius: 1.8)
-            stem.lineWidth = 1.15; stem.stroke()
-            NSBezierPath(ovalIn: NSRect(x: x - bulbR, y: bulbY - bulbR,
-                                        width: bulbR * 2, height: bulbR * 2)).fill()
-
-            let level = bulbY + 1 + 9.0 * CGFloat(max(0, min(100, charge))) / 100
-            NSBezierPath(roundedRect: NSRect(x: x - 0.7, y: bulbY, width: 1.4,
-                                             height: max(1, level - bulbY)),
-                         xRadius: 0.7, yRadius: 0.7).fill()
-
-            let ticks = NSBezierPath()
-            ticks.lineWidth = 1.05; ticks.lineCapStyle = .round
-            for i in 0..<4 {
-                let y = 5.3 + CGFloat(i) * 2.55
-                ticks.move(to: NSPoint(x: 9.1, y: y))
-                ticks.line(to: NSPoint(x: i.isMultiple(of: 2) ? 13.2 : 12.3, y: y))
-            }
-            ticks.stroke()
-
-            if charging && SettingsStore.menuBarMotion && !Motion.reduced {
-                let p = CGFloat(phase % 10) / 9.0
-                NSGraphicsContext.current?.compositingOperation = .clear
-                NSBezierPath(ovalIn: NSRect(x: x - 1.0, y: 4.0 + p * 8.0,
-                                            width: 2.0, height: 1.5)).fill()
-            }
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-
-    /// Кольцевой charge-gauge — более компактная фирменная альтернатива батарее.
-    private func menuBarRingIcon(charge: Int, charging: Bool, phase: Int) -> NSImage {
-        let s: CGFloat = 16
-        let img = NSImage(size: NSSize(width: s, height: s), flipped: false) { _ in
-            let center = NSPoint(x: s / 2, y: s / 2)
-            let radius: CGFloat = 5.7
-            NSColor.black.withAlphaComponent(0.28).setStroke()
-            let track = NSBezierPath()
-            track.appendArc(withCenter: center, radius: radius, startAngle: -90, endAngle: 270)
-            track.lineWidth = 1.5; track.stroke()
-
-            let start = -90 + (charging && SettingsStore.menuBarMotion && !Motion.reduced
-                               ? CGFloat(phase % 10) * 2.0 : 0)
-            NSColor.black.setStroke()
-            let value = NSBezierPath()
-            value.appendArc(withCenter: center, radius: radius, startAngle: start,
-                            endAngle: start + 360 * CGFloat(max(2, min(100, charge))) / 100)
-            value.lineWidth = 2.0; value.lineCapStyle = .round; value.stroke()
-
-            NSColor.black.setFill()
-            let bolt = NSBezierPath()
-            bolt.move(to: NSPoint(x: 8.6, y: 12.0))
-            bolt.line(to: NSPoint(x: 5.8, y: 7.7))
-            bolt.line(to: NSPoint(x: 7.7, y: 7.7))
-            bolt.line(to: NSPoint(x: 6.9, y: 4.0))
-            bolt.line(to: NSPoint(x: 10.2, y: 8.7))
-            bolt.line(to: NSPoint(x: 8.3, y: 8.7))
-            bolt.close(); bolt.fill()
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-
-    /// Офскрин QA-галерея status item (`BM_STATUS_SNAP=/path.png`).
-    /// Не читает железо и не меняет UserDefaults владельца.
-    private func statusSnapshotImage(_ template: NSImage, color: NSColor) -> NSImage {
-        let copy = NSImage(size: template.size, flipped: false) { rect in
-            template.draw(in: rect)
-            color.setFill()
-            rect.fill(using: .sourceAtop)
-            return true
-        }
-        copy.isTemplate = false
-        return copy
-    }
-
-    func renderStatusIconSnapshot(to path: String) {
-        let styles: [(String, (Int, Bool, Int) -> NSImage)] = [
-            ("Kelvin Live", { (charge: Int, charging: Bool, phase: Int) -> NSImage in
-                self.menuBarKelvinIcon(charge: charge, charging: charging, phase: phase)
-            }),
-            (L("Кольцо заряда"), { (charge: Int, charging: Bool, phase: Int) -> NSImage in
-                self.menuBarRingIcon(charge: charge, charging: charging, phase: phase)
-            }),
-            (L("Термометр"), { (charge: Int, charging: Bool, _: Int) -> NSImage in
-                self.menuBarThermometerIcon(charge: charge, charging: charging)
-            }),
-            (L("Батарея"), { (charge: Int, charging: Bool, _: Int) -> NSImage in
-                self.menuBarBatteryIcon(charge: charge, charging: charging)
-            }),
-        ]
-        let states: [(String, Int, Bool, Int)] = [
-            ("10%", 10, false, 0), ("45%", 45, false, 0), ("80%", 80, false, 0),
-            (L("Зарядка") + " A", 45, true, 1), (L("Зарядка") + " B", 45, true, 6),
-        ]
-        let cellW: CGFloat = 84, rowH: CGFloat = 54, labelW: CGFloat = 120
-        let size = NSSize(width: labelW + cellW * CGFloat(states.count) + 24,
-                          height: 34 + rowH * CGFloat(styles.count))
-        let canvas = NSImage(size: size, flipped: true) { rect in
-            NSColor.windowBackgroundColor.setFill()
-            rect.fill()
-            let titleAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-                .foregroundColor: NSColor.labelColor,
-            ]
-            let smallAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]
-            for (i, state) in states.enumerated() {
-                (state.0 as NSString).draw(at: NSPoint(x: labelW + CGFloat(i) * cellW + 24, y: 10),
-                                           withAttributes: smallAttrs)
-            }
-            for (row, style) in styles.enumerated() {
-                let y = 34 + CGFloat(row) * rowH
-                (style.0 as NSString).draw(at: NSPoint(x: 14, y: y + 17), withAttributes: titleAttrs)
-                for (col, state) in states.enumerated() {
-                    let icon = self.statusSnapshotImage(
-                        style.1(state.1, state.2, state.3),
-                        color: .labelColor
-                    )
-                    let box = NSRect(x: labelW + CGFloat(col) * cellW + 30, y: y + 8,
-                                     width: 28, height: 28)
-                    NSColor.controlBackgroundColor.setFill()
-                    NSBezierPath(roundedRect: box, xRadius: 7, yRadius: 7).fill()
-                    icon.draw(in: NSRect(x: box.midX - icon.size.width / 2,
-                                         y: box.midY - icon.size.height / 2,
-                                         width: icon.size.width, height: icon.size.height))
-                }
-            }
-            return true
-        }
-        guard let rep = NSBitmapImageRep(data: canvas.tiffRepresentation ?? Data()),
-              let png = rep.representation(using: .png, properties: [:]) else { return }
-        try? png.write(to: URL(fileURLWithPath: path), options: .atomic)
-    }
-
-    /// Нативная ветка использует только SF Symbols и системный template-тинт.
-    /// Уровни кратны 25%, как у стандартных индикаторов macOS; точный процент остаётся рядом.
-    private func systemMenuBarIcon(charge: Int, charging: Bool) -> NSImage? {
-        let symbol: String
-        if SettingsStore.mainIconStyle == "thermometer" {
-            symbol = "thermometer.medium"
-        } else {
-            let level: Int
-            switch charge {
-            case ..<13: level = 0
-            case ..<38: level = 25
-            case ..<63: level = 50
-            case ..<88: level = 75
-            default: level = 100
-            }
-            symbol = "battery.\(level)"
-        }
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: charging ? L("Зарядка") : nil)?
-            .withSymbolConfiguration(config) else { return nil }
-        image.isTemplate = true
-        return image
-    }
-
-    /// Charge-aware батарея (горизонтальная): уровень заливки = заряд, молния-вырез при зарядке.
-    private func menuBarBatteryIcon(charge: Int, charging: Bool) -> NSImage {
-        // Размер близок к системной батарее macOS: она шире большинства SF-глифов
-        // и занимает почти всю полезную высоту menu bar, не выглядя мелкой пиктограммой.
-        let w: CGFloat = 19, h: CGFloat = 12
-        let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
-            let body = NSRect(x: 0.75, y: 1.45, width: w - 3.8, height: h - 2.9)
-            NSColor.black.setStroke()
-            let outline = NSBezierPath(roundedRect: body, xRadius: 2.35, yRadius: 2.35)
-            outline.lineWidth = 1.15
-            outline.stroke()
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: NSRect(x: body.maxX + 0.65, y: h/2 - 1.65, width: 1.7, height: 3.3),
-                         xRadius: 0.7, yRadius: 0.7).fill()                      // клемма
-            let inset = body.insetBy(dx: 1.65, dy: 1.65)
-            let fillW = inset.width * CGFloat(max(0, min(100, charge))) / 100
-            if fillW > 0.5 {
-                NSBezierPath(roundedRect: NSRect(x: inset.minX, y: inset.minY, width: fillW, height: inset.height),
-                             xRadius: 1.0, yRadius: 1.0).fill()
-            }
-            if charging {                                                        // молния-вырез
-                NSGraphicsContext.current?.compositingOperation = .clear
-                let bx = body.midX, top = body.maxY - 1.1, bot = body.minY + 1.1, mid = body.midY
-                let bolt = NSBezierPath()
-                bolt.move(to: NSPoint(x: bx + 1.5, y: top))
-                bolt.line(to: NSPoint(x: bx - 1.7, y: mid + 0.2))
-                bolt.line(to: NSPoint(x: bx + 0.1, y: mid + 0.2))
-                bolt.line(to: NSPoint(x: bx - 1.5, y: bot))
-                bolt.line(to: NSPoint(x: bx + 1.9, y: mid - 0.2))
-                bolt.line(to: NSPoint(x: bx + 0.1, y: mid - 0.2))
-                bolt.close(); bolt.fill()
-            }
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-
-    private func menuBarThermometerIcon(charge: Int, charging: Bool) -> NSImage {
-        let w: CGFloat = 13, h: CGFloat = 16
-        let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
-            let cx: CGFloat = 4.8
-            let stemW: CGFloat = 3.8, bulbR: CGFloat = 3.0
-            let bulbCY: CGFloat = bulbR + 0.7                 // колба у низа
-            let stemTop: CGFloat = h - 1.0
-
-            // стекло: капсула-стержень + колба (обводка)
-            let glass = NSBezierPath(roundedRect: NSRect(x: cx - stemW/2, y: bulbCY, width: stemW, height: stemTop - bulbCY),
-                                     xRadius: stemW/2, yRadius: stemW/2)
-            glass.appendOval(in: NSRect(x: cx - bulbR, y: bulbCY - bulbR, width: bulbR*2, height: bulbR*2))
-            NSColor.black.setStroke(); glass.lineWidth = 1.1; glass.stroke()
-
-            // ртуть: колба + столбик до уровня заряда
-            let innerW: CGFloat = stemW - 1.8
-            let colTopMax = stemTop - innerW/2
-            let level = bulbCY + (colTopMax - bulbCY) * CGFloat(max(0, min(100, charge))) / 100
-            let merc = NSBezierPath(roundedRect: NSRect(x: cx - innerW/2, y: bulbCY, width: innerW, height: max(0, level - bulbCY)),
-                                    xRadius: innerW/2, yRadius: innerW/2)
-            merc.appendOval(in: NSRect(x: cx - (bulbR - 0.9), y: bulbCY - (bulbR - 0.9), width: (bulbR - 0.9)*2, height: (bulbR - 0.9)*2))
-            NSColor.black.setFill(); merc.fill()
-
-            // шкала-риски справа
-            let ticks = NSBezierPath(); ticks.lineWidth = 0.9; ticks.lineCapStyle = .round
-            NSColor.black.setStroke()
-            for i in 0..<3 {
-                let ty = bulbCY + bulbR + 1.4 + CGFloat(i) * ((stemTop - bulbCY - bulbR - 2.2) / 2)
-                ticks.move(to: NSPoint(x: cx + stemW/2 + 1.4, y: ty))
-                ticks.line(to: NSPoint(x: cx + stemW/2 + 3.1, y: ty))
-            }
-            ticks.stroke()
-
-            if charging {                                    // молния-вырез в столбике
-                NSGraphicsContext.current?.compositingOperation = .clear
-                let bx = cx, top = stemTop - 1.0, bot = bulbCY + bulbR - 0.4, mid = (top + bot)/2
-                let bolt = NSBezierPath()
-                bolt.move(to: NSPoint(x: bx + 1.3, y: top))
-                bolt.line(to: NSPoint(x: bx - 1.5, y: mid + 0.3))
-                bolt.line(to: NSPoint(x: bx + 0.1, y: mid + 0.3))
-                bolt.line(to: NSPoint(x: bx - 1.3, y: bot))
-                bolt.line(to: NSPoint(x: bx + 1.7, y: mid - 0.3))
-                bolt.line(to: NSPoint(x: bx + 0.1, y: mid - 0.3))
-                bolt.close(); bolt.fill()
-            }
-            return true
-        }
-        img.isTemplate = true
-        return img
-    }
-
-    /// Обновляет иконку строки меню по выбранному режиму (battery / cpu / ram).
-    /// Основной показатель строки меню (строка + иконка + ключ иконки) — общий источник для
-    /// классического и объединённого видов, чтобы они не расходились.
-    private func menuBarPrimaryToken(_ b: BatteryInfo, _ e: EnergySnapshot) -> (token: String, image: NSImage, imgKey: String) {
-        switch SettingsStore.menuBarMode {
-        case "cpu":
-            let v = menuBarCPULoad
-            return (figPad(String(format: "%.0f%%", v * 100), 4), usageBarImage(SystemUsage.shared.cpuHistory, value: v), "graph")
-        case "ram":
-            let v = menuBarRAMLoad
-            return (figPad(String(format: "%.0f%%", v * 100), 4), usageBarImage(SystemUsage.shared.ramHistory, value: v), "graph")
-        case "cputemp":
-            let token = e.cpuTemp.map { figPad(String(format: "%.0f°", $0), 4) } ?? figPad("—°", 4)
-            let image = menuBarGlyph(forID: "cputemp")
-                ?? menuBarKelvinIcon(charge: b.charge, charging: b.charging, phase: statusAnimationPhase)
-            return (token, image, "metric-cputemp-\(SettingsStore.menuBarIconStyle)")
-        case "fan":
-            let token = e.fans.first.map { figPad(String(format: "%.1fk", $0 / 1000), 4) } ?? figPad("—", 4)
-            let image = menuBarGlyph(forID: "fan")
-                ?? menuBarKelvinIcon(charge: b.charge, charging: b.charging, phase: statusAnimationPhase)
-            return (token, image, "metric-fan-\(SettingsStore.menuBarIconStyle)")
-        default:
-            if b.present {
-                let token = figPad(SettingsStore.menuBarShowWatts ? String(format: "%.0fW", e.systemWatts > 0.1 ? e.systemWatts : b.watts) : "\(b.charge)%", 4)
-                return (token, menuBarIcon(charge: b.charge, charging: b.charging), "b\(b.charge)\(b.charging)\(SettingsStore.mainIconStyle)")
-            }
-            // десктоп без АКБ — вместо фейкового заряда показываем загрузку CPU
-            let v = menuBarCPULoad
-            return (figPad(String(format: "%.0f%%", v * 100), 4), usageBarImage(SystemUsage.shared.cpuHistory, value: v), "graph")
-        }
-    }
-
-    private func updateMenuBar(_ b: BatteryInfo, _ energy: EnergySnapshot) {
-        guard let btn = statusItem.button else { return }
-        let powerTransition = hasStatusSnapshot
-            && (b.charging != lastStatusBattery.charging || b.external != lastStatusBattery.external)
-        let chargeTransition = hasStatusSnapshot && b.present
-            && b.charge != lastStatusBattery.charge
-        lastStatusBattery = b
-        lastStatusEnergy = energy
-        hasStatusSnapshot = true
-        updateStatusAnimationTimer()
-        if powerTransition { animateStatusTransition() }
-        else if chargeTransition { animateChargeTransition() }
-        let prim = menuBarPrimaryToken(b, energy)
-        // Объединённый вид: рисуем всё одной template-картинкой (моно, без семантического цвета —
-        // зато ОС корректно тинтует для светлой/тёмной/подсветки). Перестраиваем только при смене подписи.
-        if SettingsStore.menuBarCombined {
-            let icons = SettingsStore.menuBarExtraIcons
-            var cells: [(id: String?, token: String)] = [(menuBarPrimaryGlyphID(b), prim.token)]
-            for id in SettingsStore.menuBarExtras.prefix(SettingsStore.menuBarExtraMax) {
-                if let t = menuBarExtraToken(id, b, energy) { cells.append((id, t)) }
-            }
-            // подпись включает флаг иконок И стиль — переключение обязано перерисовать картинку
-            let sig = "combined|\(icons ? "i" : "t")|\(SettingsStore.menuBarIconStyle)|\(SettingsStore.mainIconStyle)|\(prim.imgKey)|"
-                + cells.map { $0.token }.joined(separator: "|")
-            if sig != lastMenuTitle {
-                lastMenuTitle = sig
-                lastMenuImgKey = "combined"
-                btn.image = combinedMenuImage(cells, icons: icons, primaryImage: prim.image)
-                btn.imagePosition = .imageOnly
-                btn.attributedTitle = NSAttributedString(string: "")
-            }
-            let human = menuBarTooltip(b, energy)
-            btn.toolTip = human
-            btn.setAccessibilityTitle(human)
-            return
-        }
-        let primary = prim.token
-        let image = prim.image
-        let imgKey = prim.imgKey
-        // картинка фикс-ширины (графику обновляем каждый тик; батарейку — лишь при смене заряда)
-        if imgKey == "graph" || imgKey != lastMenuImgKey {
-            lastMenuImgKey = imgKey; btn.image = image; btn.imagePosition = .imageLeading
-        }
-        // доп-показатели (курируемые, с лимитом). Ширина каждого токена СТАБИЛЬНА (фигурные пробелы +
-        // моноширинные цифры), а заголовок переустанавливаем лишь при реальном изменении — поэтому
-        // строка меню не «дёргается» при смене значений (особенно заметно в полноэкранном режиме).
-        let extras = SettingsStore.menuBarExtras.prefix(SettingsStore.menuBarExtraMax)
-            .compactMap { menuBarExtraToken($0, b, energy) }
-        let parts = [primary] + extras
-        let sig = parts.joined(separator: "|")
-        if sig != lastMenuTitle { lastMenuTitle = sig; btn.attributedTitle = menuBarTitle(parts) }
-        let human = menuBarTooltip(b, energy)
-        btn.toolTip = human                            // живая подсказка при наведении
-        btn.setAccessibilityTitle(human)               // VoiceOver: человеческая фраза вместо «42%/18W/56°»
-    }
-
-    /// Низкочастотная смысловая анимация: работает только для Kelvin Live/кольца
-    /// во время зарядки и не запускает повторное чтение железа.
-    private func advanceStatusAnimation() {
-        guard SettingsStore.menuBarMotion, !Motion.reduced,
-              SettingsStore.menuBarMode == "battery",
-              lastStatusBattery.present, lastStatusBattery.charging,
-              SettingsStore.mainIconStyle == "kelvin" || SettingsStore.mainIconStyle == "ring",
-              let button = statusItem.button
-        else { return }
-        statusAnimationPhase = (statusAnimationPhase + 1) % 60
-        button.image = menuBarIcon(charge: lastStatusBattery.charge, charging: true)
-        button.imagePosition = .imageLeading
-    }
-
-    private func updateStatusAnimationTimer() {
-        let shouldAnimate = SettingsStore.menuBarMotion && !Motion.reduced
-            && !SettingsStore.menuBarCombined
-            && SettingsStore.menuBarMode == "battery"
-            && lastStatusBattery.present && lastStatusBattery.charging
-            && (SettingsStore.mainIconStyle == "kelvin" || SettingsStore.mainIconStyle == "ring")
-        if shouldAnimate, statusAnimationTimer == nil {
-            let timer = Timer(timeInterval: 0.16, repeats: true) { [weak self] _ in
-                self?.advanceStatusAnimation()
-            }
-            statusAnimationTimer = timer
-            RunLoop.main.add(timer, forMode: .common)
-        } else if !shouldAnimate, statusAnimationTimer != nil {
-            statusAnimationTimer?.invalidate()
-            statusAnimationTimer = nil
-            statusAnimationPhase = 0
-        }
-    }
-
-    /// Один короткий импульс при подключении/отключении питания — событие, а не
-    /// бесконечная декоративная пульсация.
-    private func animateStatusTransition() {
-        guard SettingsStore.menuBarMotion, !Motion.reduced,
-              let layer = statusItem.button?.layer else { return }
-        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
-        animation.values = [1.0, 1.13, 0.98, 1.0]
-        animation.keyTimes = [0, 0.38, 0.72, 1]
-        animation.duration = 0.34
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer.add(animation, forKey: "powerTransition")
-    }
-
-    /// Небольшой нативный cross-fade при изменении процента: новая геометрия заливки
-    /// появляется мягко, но status item не пульсирует и не отвлекает пользователя.
-    private func animateChargeTransition() {
-        guard SettingsStore.menuBarMotion, !Motion.reduced,
-              !SettingsStore.menuBarCombined,
-              SettingsStore.menuBarMode == "battery",
-              let layer = statusItem.button?.layer else { return }
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0.68
-        fade.toValue = 1.0
-        fade.duration = 0.22
-        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        layer.add(fade, forKey: "chargeTransition")
-    }
-    /// Человеческая сводка для подсказки на иконке: заряд/состояние/время/ватты.
-    private func menuBarTooltip(_ b: BatteryInfo, _ e: EnergySnapshot) -> String {
-        let watt = e.systemWatts > 0.1 ? e.systemWatts : b.watts
-        let w = "\(Int(watt.rounded())) \(L("Вт"))"
-        let hint = " · \(L("правый клик: инструменты"))"
-        switch SettingsStore.menuBarMode {
-        case "cpu":
-            return "Kelvin · CPU \(Int((menuBarCPULoad * 100).rounded()))%\(hint)"
-        case "ram":
-            return "Kelvin · RAM \(Int((menuBarRAMLoad * 100).rounded()))%\(hint)"
-        case "cputemp":
-            let value = e.cpuTemp.map { String(format: "%.0f°C", $0) } ?? "—"
-            return "Kelvin · \(L("Температура CPU")) \(value)\(hint)"
-        case "fan":
-            let value = e.fans.first.map { String(format: "%.0f %@", $0, L("об/мин")) } ?? "—"
-            return "Kelvin · \(L("Вентилятор")) \(value)\(hint)"
-        default:
-            break
-        }
-        guard b.present else { return "Kelvin · \(L("без батареи")) · \(w)\(hint)" }
-        let state = b.charging ? L("зарядка") : (b.external ? L("от сети") : L("от батареи"))
-        let mins = b.charging ? b.timeToFull : b.timeToEmpty
-        let time = (mins > 0 && mins < 1200) ? " · \(b.charging ? L("до полного") : L("осталось")) \(mins/60):\(String(format: "%02d", mins % 60))" : ""
-        return "Kelvin · \(b.charge)% (\(state)) · \(w)\(time)\(hint)"
-    }
-    /// Дополняет строку ведущими фигурными пробелами (ширина цифры) до стабильной ширины.
-    private func figPad(_ s: String, _ width: Int) -> String {
-        s.count >= width ? s : String(repeating: "\u{2007}", count: width - s.count) + s
-    }
-    /// Формат времени по локали (j → 12/24 ч автоматически), кэшируем — DateFormatter дорог в создании.
-    private lazy var clockFmt: DateFormatter = {
-        let f = DateFormatter(); f.locale = .current; f.setLocalizedDateFormatFromTemplate("jmm"); return f
-    }()
-    /// Короткая дата по локали: день недели + число + месяц («Чт 26 июн»).
-    private lazy var dateFmt: DateFormatter = {
-        let f = DateFormatter(); f.locale = .current; f.setLocalizedDateFormatFromTemplate("EEEEEEdMMM"); return f
-    }()
-    /// Один доп-показатель строки меню в компактном виде (стабильной ширины), или nil если данных нет.
-    private func menuBarExtraToken(_ id: String, _ b: BatteryInfo, _ e: EnergySnapshot) -> String? {
-        switch id {
-        case "watts":   let w = e.systemWatts > 0.1 ? e.systemWatts : b.watts; return figPad(String(format: "%.0fW", w), 4)
-        case "cputemp": return e.cpuTemp.map { figPad(String(format: "%.0f°", $0), 4) } ?? figPad("—°", 4)
-        case "gputemp": return e.gpuTemp.map { figPad(String(format: "%.0f° G", $0), 6) } ?? figPad("—° G", 6)
-        case "fan":     return e.fans.first.map { figPad(String(format: "%.1fk", $0 / 1000), 4) } ?? figPad("—", 4)
-        case "cpu":     return figPad(String(format: "%.0f%% C", menuBarCPULoad * 100), 6)
-        case "ram":     return figPad(String(format: "%.0f%% R", menuBarRAMLoad * 100), 6)
-        case "net":     let nu = NetUsage.shared.sample(); return "↓\(NetUsage.fmtRate(nu.down)) ↑\(NetUsage.fmtRate(nu.up))"
-        case "diskio":  let d = DiskUsage.shared.sample(); return "↓\(NetUsage.fmtRate(d.read)) ↑\(NetUsage.fmtRate(d.write))"
-        case "diskfree": return DiskInfo.capacity().map { figPad(String(format: "%.0fG", Double($0.free) / 1e9), 5) }
-        case "btbatt":  return BTPeripherals.cachedWorst().map { figPad(String(format: "%d%%", $0), 4) } ?? figPad("—", 4)
-        case "clock":   return clockFmt.string(from: Date())
-        case "date":    return dateFmt.string(from: Date())
-        default:        return nil
-        }
-    }
-    /// Собирает заголовок строки меню: моноширинные цифры, разделитель « · » приглушён.
-    private func menuBarTitle(_ parts: [String]) -> NSAttributedString {
-        let font = Design.Font.numericBody
-        let s = NSMutableAttributedString(string: " ", attributes: [.font: font])
-        for (i, p) in parts.enumerated() {
-            if i > 0 { s.append(NSAttributedString(string: "  ·  ", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])) }
-            s.append(NSAttributedString(string: p, attributes: [.font: font]))
-        }
-        return s
-    }
-    /// Мини-график загрузки для строки меню (вертикальные бары, цвет по нагрузке).
-    private func usageBarImage(_ history: [Double], value: Double) -> NSImage {
-        let w: CGFloat = 30, h: CGFloat = 15
-        let color: NSColor = value > 0.85 ? .systemRed : (value > 0.6 ? .systemOrange : .systemGreen)
-        let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
-            let bars = Array(history.suffix(15))
-            guard !bars.isEmpty else { return true }
-            let bw = w / 15
-            for (i, v) in bars.enumerated() {
-                let bh = max(1.5, CGFloat(v) * (h - 2))
-                let r = NSRect(x: CGFloat(i) * bw + 0.6, y: 1, width: bw - 1.2, height: bh)
-                color.withAlphaComponent(0.35 + 0.55 * CGFloat(v)).setFill()
-                NSBezierPath(roundedRect: r, xRadius: 0.8, yRadius: 0.8).fill()
-            }
-            return true
-        }
-        img.isTemplate = false
-        return img
-    }
-
-    /// Курируемые SF-глифы для показателей строки меню. Подобраны так, чтобы читаться при ~13pt
-    /// в моно-template-картинке (тонкие глифы вроде «wind» отброшены в пользу плотных и узнаваемых).
-    private static let menuBarGlyphs: [String: String] = [
-        "battery":  "battery.100",
-        "watts":    "bolt.fill",
-        "cputemp":  "thermometer",
-        "gputemp":  "thermometer",
-        "fan":      "fanblades.fill",
-        "cpu":      "cpu",
-        "ram":      "memorychip",
-        "net":      "arrow.up.arrow.down",
-        "diskio":   "internaldrive",
-        "diskfree": "internaldrive",
-        "btbatt":   "wave.3.right",
-        "clock":    "clock",
-        "date":     "calendar",
-    ]
-    /// Глиф основной ячейки объединённого вида — по текущему режиму строки меню.
-    private func menuBarPrimaryGlyphID(_ b: BatteryInfo) -> String? {
-        switch SettingsStore.menuBarMode {
-        case "cpu": return "cpu"
-        case "ram": return "ram"
-        case "cputemp": return "cputemp"
-        case "fan": return "fan"
-        default:
-            guard b.present else { return "cpu" }
-            if SettingsStore.mainIconStyle == "kelvin" { return "kelvin" }
-            if SettingsStore.mainIconStyle == "ring" { return "ring" }
-            return "battery"
-        }
-    }
-    /// Убирает дублирующий хвостовой литер-суффикс (« G»/« C»/« R») когда глиф уже опознаёт метрику.
-    private func stripGlyphSuffix(_ id: String, _ token: String) -> String {
-        let drop: [String: String] = ["gputemp": " G", "cpu": " C", "ram": " R"]
-        guard let suff = drop[id], token.hasSuffix(suff) else { return token }
-        return String(token.dropLast(suff.count))
-    }
-    /// Шаблонная картинка SF-символа фиксированной высоты для строки меню (моно-template-тинт).
-    private func menuBarGlyphImage(_ name: String) -> NSImage? {
-        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(cfg) else { return nil }
-        img.isTemplate = true
-        return img
-    }
-    /// Глиф показателя по выбранному стилю: kelvin (фирменный векторный) | system (SF Symbol).
-    private func menuBarGlyph(forID id: String) -> NSImage? {
-        if id == "kelvin" || id == "ring" {
-            return KelvinGlyph.image(id, size: 13)
-        }
-        if SettingsStore.menuBarIconStyle == "kelvin", let img = KelvinGlyph.image(id, size: 14) { return img }
-        guard let name = Self.menuBarGlyphs[id] else { return nil }
-        return menuBarGlyphImage(name)
-    }
-
-    /// Объединённый вид строки меню: основной показатель + доп-показатели как ячейки с тонкими
-    /// разделителями в одной template-картинке (~22pt). isTemplate=true → ОС тинтует под светлую/тёмную/подсветку.
-    /// Ширина каждой ячейки фиксирована (моно-цифры + бюджет по максимально-широкой строке), поэтому 9→100,
-    /// 3-значные температуры и ↓1.2M никогда не «дёргают» строку. Цена: теряется зелёный/оранжевый/красный
-    /// цвет нагрузки — корректный размен ради чёткого OS-тинта.
-    /// При icons=true перед значением рисуется ведущий SF-глиф; ширину ячейки расширяем РОВНО на измеренную
-    /// ширину глифа+зазор, чтобы инвариант «строка не дёргается» сохранялся.
-    private func combinedMenuImage(
-        _ cells: [(id: String?, token: String)],
-        icons: Bool,
-        primaryImage: NSImage? = nil
-    ) -> NSImage {
-        let font = Design.Font.mono(13, .semibold)
-        let h: CGFloat = 22, padX: CGFloat = 5, gap: CGFloat = 8, iconGap: CGFloat = 3
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
-        // глиф ячейки (если иконки включены и для id есть символ) + его картинка/ширина
-        func glyph(_ id: String?, at index: Int) -> (img: NSImage, w: CGFloat)? {
-            if icons, index == 0, let primaryImage {
-                return (primaryImage, ceil(primaryImage.size.width))
-            }
-            guard icons, let id = id, let img = menuBarGlyph(forID: id) else { return nil }
-            return (img, ceil(img.size.width))
-        }
-        // текст ячейки (со снятым дубль-суффиксом, если перед ним будет глиф)
-        func text(_ c: (id: String?, token: String)) -> String {
-            (icons && c.id != nil && Self.menuBarGlyphs[c.id!] != nil)
-                ? stripGlyphSuffix(c.id!, c.token) : c.token
-        }
-        // фикс-ширина ячейки: бюджет по более широкой из (значение, эталон ширины токена этой длины) + глиф
-        func textWidth(_ s: String) -> CGFloat {
-            let probe = String(repeating: "0", count: max(s.count, 4))   // токены уже figPad-нуты под свою ширину
-            let a = (s as NSString).size(withAttributes: attrs).width
-            let b = (probe as NSString).size(withAttributes: attrs).width
-            return ceil(max(a, b))
-        }
-        let glyphs = cells.enumerated().map { glyph($0.element.id, at: $0.offset) }
-        let texts = cells.map(text)
-        let tWidths = texts.map(textWidth)
-        // полная ширина ячейки = глиф + зазор + текст (если глиф есть)
-        let widths: [CGFloat] = zip(tWidths, glyphs).map { tw, g in g == nil ? tw : g!.w + iconGap + tw }
-        let total = padX * 2 + widths.reduce(0, +) + gap * CGFloat(max(0, cells.count - 1))
-        let para = NSMutableParagraphStyle(); para.alignment = .center
-        var cellAttrs = attrs; cellAttrs[.paragraphStyle] = para
-        let img = NSImage(size: NSSize(width: max(1, ceil(total)), height: h), flipped: false) { _ in
-            var x = padX
-            for i in cells.indices {
-                let w = widths[i]
-                if i > 0 {     // тонкий разделитель-волосок (template-картинка его тоже тинтует)
-                    NSColor.black.withAlphaComponent(0.28).setStroke()
-                    let sep = NSBezierPath(); sep.lineWidth = 1
-                    sep.move(to: NSPoint(x: x - gap / 2, y: 4)); sep.line(to: NSPoint(x: x - gap / 2, y: h - 4)); sep.stroke()
-                }
-                var tx = x, tw = w
-                if let g = glyphs[i] {     // ведущий глиф ячейки — слева, по вертикали по центру
-                    let gs = g.img.size
-                    g.img.draw(in: NSRect(x: x, y: (h - gs.height) / 2, width: g.w, height: gs.height),
-                               from: .zero, operation: .sourceOver, fraction: 1)
-                    tx = x + g.w + iconGap; tw = w - g.w - iconGap
-                }
-                let p = texts[i]
-                let vh = (p as NSString).size(withAttributes: cellAttrs).height
-                (p as NSString).draw(in: NSRect(x: tx, y: (h - vh) / 2, width: tw, height: vh), withAttributes: cellAttrs)
-                x += w + gap
-            }
-            return true
-        }
-        img.isTemplate = true     // ОС сама красит под светлую/тёмную/подсветку, как у menuBarIcon
-        return img
-    }
-
-    // MARK: обратная связь автозамены языка/опечатки (звук + индикатор + вспышка иконки)
-    private func handleLangFeedback(_ fb: LangSwitcher.Feedback) {
-        let sound = SettingsStore.langFeedbackSound
-        let hud = SettingsStore.langFeedbackHUD
-        switch fb {
-        case .layout(let toRU):
-            if sound { playFeedbackSound("Morse") }
-            if hud { FeedbackHUD.shared.show(symbol: "globe", text: toRU ? L("Русский") : "English", tint: Design.Color.accentAdaptive) }
-        case .spell(let original, let corrected, let id):
-            if sound { playFeedbackSound("Pop") }
-            if hud { CorrectionChoiceHUD.shared.show(original: original, corrected: corrected, id: id) }
-        case .undo:
-            if sound { playFeedbackSound("Tink") }
-            if hud { FeedbackHUD.shared.show(symbol: "arrow.uturn.backward.circle.fill", text: L("Исходное слово возвращено"), tint: Design.Color.accentAdaptive) }
-        }
-        if hud { flashStatusItem() }
-    }
-    private func playFeedbackSound(_ name: String) {
-        let s = NSSound(named: name); s?.volume = 0.3; s?.play()
-    }
-    private func flashStatusItem() {
-        guard !Motion.reduced, let layer = statusItem.button?.layer else { return }   // «Уменьшить движение» — без вспышки иконки
-        let a = CABasicAnimation(keyPath: "opacity")
-        a.fromValue = 1.0; a.toValue = 0.4
-        a.autoreverses = true; a.duration = 0.13
-        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer.add(a, forKey: "langflash")
-    }
-
-    /// Нужен ли строке меню тяжёлый EnergyModel.snapshot (только если выбран энергозависимый доп-показатель).
-    private var menuBarNeedsEnergy: Bool {
-        ["cputemp", "fan"].contains(SettingsStore.menuBarMode)
-            || SettingsStore.menuBarExtras.prefix(SettingsStore.menuBarExtraMax)
-                .contains { ["watts", "cputemp", "gputemp", "fan"].contains($0) }
-    }
-
-    /// Согласует платные авто-фичи с Pro-статусом. Зовётся на старте (и должно — при смене лицензии):
-    /// если Pro потерян (триал истёк/деактивация) — гасит языковые автоматизации, чтобы не работали даром.
-    /// Вентиляторы/charge-limit гасятся отдельно: при !isPro heartbeat аренды (refreshLease) не обновляется,
-    /// и демон сам вернёт авто+BCLM100 по истечении lease-окна (15 мин); защита по кристаллу всё равно форсит макс при перегреве.
-    func applyProEntitlements() {
-        let pro = Licensing.shared.isPro
-        LangSwitcher.shared.snippetsEnabled = pro && SettingsStore.snippetsEnabled
-        LangSwitcher.shared.spellFixEnabled = pro && SettingsStore.spellFixEnabled
-        let lm = SettingsStore.langMode
-        LangSwitcher.shared.mode = pro ? ((lm == "auto") ? .auto : (lm == "hotkey" ? .hotkey : .off)) : .off
-    }
-
-    func tick() {
-        ClipboardHistory.shared.poll()
-        Caffeine.expireIfDue()                            // синхронизируем флаг с OS-таймаутом ассерции
-        nightTick += 1
-        if SettingsStore.nightKeepOn && NightShift.available && nightTick % 10 == 0 { NightShift.enableNow() }
-        if nightTick % 120 == 0, Licensing.shared.isPro {
-            hardwareQueue.async { FanController.refreshLease() }
-        }
-        guard !hardwareTickInFlight else { return }
-        hardwareTickInFlight = true
-
-        let tickNumber = nightTick
-        let popoverOpen = popover.isShown
-        let needEnergy = popoverOpen || menuBarNeedsEnergy
-        let forcedNoBatt = ProcessInfo.processInfo.environment["BM_NOBATT"] != nil
-        // Mach counters are cheap and their history remains main-owned.
-        let cpuLoad = SystemUsage.shared.cpu()
-        let ramLoad = SystemUsage.shared.ram()
-        menuBarCPULoad = cpuLoad
-        menuBarRAMLoad = ramLoad
-
-        hardwareQueue.async { [weak self] in
-            guard let self else { return }
-            let battery = (forcedNoBatt ? nil : BatteryReader.read()) ?? .absent
-            let energy = needEnergy ? EnergyModel.snapshot() : EnergySnapshot()
-            if needEnergy { SessionEnergy.accumulate(energy) }
-            let components = popoverOpen ? PowerInfo.components() : ComponentPower()
-            let sensors = popoverOpen
-                ? SensorsModel.snapshot(cpuLoad: cpuLoad, ramLoad: ramLoad, components: components)
-                : SensorsSnapshot()
-            if tickNumber % 15 == 0 {
-                AlertsEngine.shared.evaluate(battery: battery, popoverOpen: popoverOpen,
-                                             sampledCPULoad: cpuLoad)
-            }
-            let historyEnergy = tickNumber % 60 == 0 && !needEnergy ? EnergyModel.snapshot() : energy
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.hardwareTickInFlight = false
-                self.applyHardwareFrame(battery: battery, energy: energy, historyEnergy: historyEnergy,
-                                        components: components, sensors: sensors,
-                                        popoverOpen: popoverOpen, tickNumber: tickNumber)
-            }
-        }
-    }
-
-    private func applyHardwareFrame(battery b: BatteryInfo, energy: EnergySnapshot,
-                                    historyEnergy: EnergySnapshot, components: ComponentPower,
-                                    sensors: SensorsSnapshot, popoverOpen: Bool, tickNumber: Int) {
-        precondition(Thread.isMainThread)
-        if b.present { checkFanAutoBySource(external: b.external) }
-
-        if tickNumber % 60 == 0 {
-            func temp(_ v: Double?) -> Double? { (v ?? 0) > 1 ? v : nil }
-            History.shared.record(History.Sample(
-                ts: Int64(Date().timeIntervalSince1970),
-                charge: b.present ? Double(b.charge) : nil,
-                health: (b.present && b.health > 1) ? b.health : nil,
-                battTemp: b.present ? temp(b.temperature) : nil,
-                cpuTemp: temp(historyEnergy.cpuTemp), gpuTemp: temp(historyEnergy.gpuTemp),
-                systemW: historyEnergy.systemWatts > 0.1 ? historyEnergy.systemWatts : nil,
-                fanRPM: historyEnergy.fans.max(), charging: b.charging), keepSeconds: 90 * 86400)
-        }
-
-        if popoverOpen || SettingsStore.menuBarExtras.prefix(SettingsStore.menuBarExtraMax).contains("btbatt") {
-            BTPeripherals.refreshIfStale()
-        }
-        updateMenuBar(b, energy)
-        if (popoverOpen || menuBarNeedsEnergy), b.present {
-            history.append(energy.systemWatts > 0.1 ? energy.systemWatts : b.watts)
-            if history.count > 90 { history.removeFirst() }
-        }
-        if popoverOpen {
-            controller.update(battery: b, history: history, components: components,
-                              energy: energy, sensors: sensors)
-        }
-    }
-
-    private var lastPowerExternal: Bool? = nil
-    /// Авто fan-профиль на смену источника: применяем профиль AC/battery ТОЛЬКО на реальном РЕБРЕ
-    /// (первый тик — молча запоминаем, без применения). Требует Pro + включённую автоматику + демон.
-    /// Реверт к системному авто при выходе/краше — по ЛИЗ-истечению (~15 мин), не мгновенно (демон).
-    private func checkFanAutoBySource(external: Bool) {
-        defer { lastPowerExternal = external }
-        guard let prev = lastPowerExternal, prev != external else { return }   // только ребро; первый тик — молча
-        guard SettingsStore.fanAutoBySource, Licensing.shared.isPro, FanController.daemonInstalled else { return }
-        if AlertsEngine.shared.isBoostActive { return }                       // не перебивать аварийный форс кулеров
-        FanController.applyProfileHeadless(named: external ? SettingsStore.fanProfileAC : SettingsStore.fanProfileBattery)
-    }
-
-    func refreshApps() {
-        guard popover.isShown else { return }             // /usr/bin/top незачем спавнить при закрытом поповере
-        PowerInfo.topApps(limit: 18) { [weak self] in self?.controller.updateApps($0) }
-    }
-
-    func checkIdleBacklight() {
-        guard KeyboardBacklight.available else { return }
-        guard SettingsStore.idleBacklight else {
-            if idleDimmed { KeyboardBacklight.set(max(0, savedBacklight)); idleDimmed = false }
-            return
-        }
-        let idle = IdleTime.seconds()
-        let threshold = Double(SettingsStore.idleSeconds)
-        if idle >= threshold && !idleDimmed {
-            let cur = KeyboardBacklight.get()
-            if cur > 0.02 { savedBacklight = cur; KeyboardBacklight.set(0); idleDimmed = true }
-        } else if idle < threshold && idleDimmed {
-            KeyboardBacklight.set(max(0, savedBacklight)); idleDimmed = false
-        }
-    }
-
-    // правый клик / ⌃-клик — меню инструментов; обычный — поповер
-    @objc func statusClick() {
-        let e = NSApp.currentEvent
-        if e?.type == .rightMouseUp || (e?.modifierFlags.contains(.control) ?? false) {
-            showToolsMenu(from: nil)
-        } else {
-            togglePopover()
-        }
-    }
-
-    private func menuIcon(_ name: String) -> NSImage? {
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        img?.isTemplate = true                     // тинтуется цветом текста меню, в т.ч. при подсветке
-        return img
-    }
-    @objc func openToolsFromFooter(_ sender: NSButton) { showToolsMenu(from: sender) }
-    /// Меню инструментов. `anchor` = вью, под которой раскрывается меню; nil → status item
-    /// в строке меню (правый клик). Из футера передаём кнопку «…», иначе меню всплывало бы
-    /// у иконки наверху экрана, а не под нажатой кнопкой (и .transient-поповер закрывал бы его).
-    private func showToolsMenu(from anchor: NSView?) {
-        let btn: NSView
-        if let anchor = anchor {
-            btn = anchor
-        } else {
-            guard let sb = statusItem.button else { return }
-            btn = sb
-        }
-        let m = NSMenu()
-        // Тумблерные строки-«не закрывай меню» (custom-view): собираем для 1Гц-refresh во время tracking
-        var liveRows: [MenuToggleRow] = []
-        func toggleRow(in menu: NSMenu, _ title: String, _ symbol: String?,
-                       state: @escaping () -> Bool, onToggle: @escaping () -> Void) {
-            let row = MenuToggleRow(title: title, symbol: symbol, state: state, onToggle: onToggle)
-            let it = NSMenuItem()
-            it.view = row
-            menu.addItem(it)
-            liveRows.append(row)
-        }
-        func add(_ title: String, _ symbol: String?, _ on: Bool?, _ sel: Selector, enabled: Bool = true) {
-            let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-            it.target = self
-            it.image = symbol.flatMap { menuIcon($0) }
-            if let on = on { it.state = on ? .on : .off }
-            it.isEnabled = enabled
-            m.addItem(it)
-        }
-        func head(_ title: String, _ symbol: String, _ submenu: NSMenu) {
-            let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            it.image = menuIcon(symbol)
-            it.submenu = submenu
-            m.addItem(it)
-        }
-        // Тумблеры «щёлкай подряд» — custom-view строки, меню НЕ закрывается (Caffeine/NightShift/Finder тоже)
-        let caffMenu = NSMenu()
-        buildCaffeineRows(into: caffMenu) { liveRows.append($0) }
-        head(caffeineHeadTitle(), "cup.and.saucer.fill", caffMenu)
-        head(sleepHeadTitle(), "moon.zzz.fill", sleepSubmenu())
-        if NightShift.available {
-            let nsMenu = NSMenu()
-            buildNightShiftRows(into: nsMenu) { liveRows.append($0) }
-            head(L("Night Shift"), "moon.fill", nsMenu)
-        }
-        if !FanController.fans().isEmpty { head(fanHeadTitle(), "fanblades.fill", fanQuickSubmenu()) }
-        toggleRow(in: m, L("Тёмная тема"), "circle.lefthalf.filled",
-                  state: { UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark" },
-                  onToggle: { [weak self] in
-                      DarkModeToggle.toggle()
-                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                          guard let self else { return }
-                          self.controller.view.appearance = nil
-                          self.controller.view.needsDisplay = true
-                          self.controller.buildModules()
-                          self.refreshMenuBarNow()
-                      }
-                  })
-        if WiFiToggle.available {
-            toggleRow(in: m, "Wi-Fi", "wifi", state: { WiFiToggle.isOn }, onToggle: { WiFiToggle.toggle() })
-        }
-        if BluetoothToggle.available {
-            toggleRow(in: m, "Bluetooth", "dot.radiowaves.right",
-                      state: { BluetoothToggle.isOn }, onToggle: { BluetoothToggle.toggle() })
-        }
-        head(L("Разрешение экрана"), "display", displaySubmenu())
-        m.addItem(.separator())
-        let finderMenu = NSMenu()
-        buildFinderRows(into: finderMenu) { liveRows.append($0) }
-        head(L("Finder и рабочий стол"), "folder.fill", finderMenu)
-        head(L("Для разработчиков"), "hammer.fill", devToolsSubmenu())
-        head(L("Gatekeeper и карантин"), "lock.shield.fill", securitySubmenu())
-
-        let clips = ClipboardHistory.shared.items
-        if !clips.isEmpty {
-            m.addItem(.separator())
-            let sub = NSMenu()
-            for (i, s) in clips.prefix(12).enumerated() {
-                let label = String(s.prefix(48)).replacingOccurrences(of: "\n", with: " ")
-                let it = NSMenuItem(title: label, action: #selector(pasteClip(_:)), keyEquivalent: "")
-                it.target = self; it.tag = i
-                sub.addItem(it)
-            }
-            head(L("История буфера"), "doc.on.clipboard", sub)
-        }
-
-        m.addItem(.separator())
-        // [обновления]
-        add(L("Проверить обновления…"), "arrow.triangle.2.circlepath", nil, #selector(checkUpdatesFromMenu))
-        add(L("Что нового…"), "sparkle.magnifyingglass", nil, #selector(checkUpdatesFromMenu))
-        m.addItem(.separator())
-        // [поддержка автора] — коммерция снята (июль 2026); приложение бесплатно, донат добровольный
-        add(L("Поддержать Kelvin…"), "heart", nil, #selector(donateFromMenu))
-        add(L("Обратная связь…"), "envelope", nil, #selector(sendFeedbackFromMenu))
-        add(L("Благодарности / Лицензии…"), "heart.text.square", nil, #selector(openAboutFromMenu))
-        m.addItem(.separator())
-        add(L("Настройки…"), "gearshape", nil, #selector(openSettingsFromMenu))
-        add(L("О программе Kelvin"), "info.circle", nil, #selector(openAboutFromMenu))
-        add(L("Выйти из Kelvin"), "power", nil, #selector(NSApplication.terminate(_:)))
-        // Если меню открыто из футера, поповер на экране и .transient закрыл бы его при
-        // показе меню (потеря фокуса) — временно держим поповер открытым, восстанавливаем после.
-        let fromFooter = anchor != nil
-        if fromFooter { popover.behavior = .applicationDefined }
-        (btn as? NSButton)?.highlight(true)            // нативная подсветка кнопки, пока открыто меню
-        // 1Гц-refresh живых строк во время tracking (Wi-Fi/BT асинхронны, Finder-твики пишутся в фоне):
-        // обычные таймеры в menu-tracking НЕ тикают → режим .eventTracking обязателен.
-        let live = liveRows
-        let refresher = Timer(timeInterval: 1.0, repeats: true) { _ in live.forEach { $0.refresh() } }
-        RunLoop.main.add(refresher, forMode: .eventTracking)
-        m.popUp(positioning: nil, at: NSPoint(x: 0, y: btn.bounds.height), in: btn)
-        refresher.invalidate()
-        (btn as? NSButton)?.highlight(false)
-        if fromFooter { popover.behavior = .transient }
-    }
-    // (toggleCaffeine/toggleNightShift-селекторы удалены — их работу выполняют MenuToggleRow-замыкания)
-
-    /// «1 ч 05 мин», «5 мин», «42 с» — компактный остаток для пунктов меню.
-    private func remainText(_ s: TimeInterval) -> String {
-        let t = Int(s.rounded())
-        if t >= 3600 { return String(format: L("%d ч %02d мин"), t / 3600, (t % 3600) / 60) }
-        if t >= 60 { return String(format: L("%d мин"), (t + 59) / 60) }
-        return String(format: L("%d с"), t)
-    }
-
-    // — Caffeine с длительностью —
-    private func caffeineHeadTitle() -> String {
-        if Caffeine.active, let r = Caffeine.remaining { return L("Не засыпать (Caffeine)") + " · " + remainText(r) }
-        if Caffeine.active { return L("Не засыпать (Caffeine)") + " · " + L("бессрочно") }
-        return L("Не засыпать (Caffeine)")
-    }
-    /// Caffeine-подменю строками-«не закрывай меню»: щёлкай режимы подряд, галочка обновляется на месте.
-    /// «До времени…» остаётся нативным пунктом (открывает модал — меню обязано закрыться).
-    private func buildCaffeineRows(into sub: NSMenu, collect: (MenuToggleRow) -> Void) {
-        func row(_ title: String, state: @escaping () -> Bool, onToggle: @escaping () -> Void) {
-            let r = MenuToggleRow(title: title, symbol: nil, state: state, onToggle: onToggle)
-            let it = NSMenuItem(); it.view = r; sub.addItem(it); collect(r)
-        }
-        row(L("Выключено"), state: { !Caffeine.active }, onToggle: { Caffeine.stop() })
-        sub.addItem(.separator())
-        for (title, mins) in [(L("15 минут"), 15), (L("1 час"), 60), (L("2 часа"), 120)] {
-            row(title, state: { Caffeine.active && abs((Caffeine.remaining ?? -1) - Double(mins) * 60) < 90 },
-                onToggle: { Caffeine.start(seconds: TimeInterval(mins) * 60) })
-        }
-        let until = NSMenuItem(title: L("До времени…"), action: #selector(caffeineUntil), keyEquivalent: "")
-        until.target = self
-        sub.addItem(until)
-        row(L("Бессрочно (пока Kelvin запущен)"),
-            state: { Caffeine.active && Caffeine.deadline == nil },
-            onToggle: { Caffeine.start() })
-        if Caffeine.active, let r = Caffeine.remaining {
-            sub.addItem(.separator())
-            let info = NSMenuItem(title: String(format: L("Осталось: %@"), remainText(r)), action: nil, keyEquivalent: "")
-            info.isEnabled = false
-            sub.addItem(info)
-        }
-    }
-    // (caffeineOff/For/Indefinite удалены — Caffeine-строки зовут API напрямую через MenuToggleRow)
-    @objc private func caffeineUntil() {
-        guard let secs = askUntilSeconds(L("Не засыпать до времени")) else { return }
-        Caffeine.start(seconds: secs)
-    }
-
-    // — Таймер сна —
-    private func sleepHeadTitle() -> String {
-        if let r = SleepTimer.remaining { return L("Сон") + " · " + String(format: L("через %@"), remainText(r)) }
-        return L("Сон")
-    }
-    private func sleepSubmenu() -> NSMenu {
-        let sub = NSMenu()
-        func item(_ title: String, _ sel: Selector, tag: Int = 0, on: Bool = false) {
-            let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-            it.target = self; it.tag = tag; it.state = on ? .on : .off
-            sub.addItem(it)
-        }
-        item(L("Уснуть сейчас"), #selector(sleepNow))
-        item(L("Погасить экран"), #selector(displaySleepNow))
-        sub.addItem(.separator())
-        let armed = SleepTimer.isArmed
-        for (title, mins) in [(L("Уснуть через 15 минут"), 15), (L("Уснуть через 30 минут"), 30), (L("Уснуть через 60 минут"), 60)] {
-            item(title, #selector(sleepIn(_:)), tag: mins)
-        }
-        item(L("Уснуть через…"), #selector(sleepInCustom))
-        if armed, let r = SleepTimer.remaining {
-            sub.addItem(.separator())
-            let info = NSMenuItem(title: String(format: L("Сон через %@"), remainText(r)), action: nil, keyEquivalent: "")
-            info.isEnabled = false
-            sub.addItem(info)
-            item(L("Отменить таймер сна"), #selector(cancelSleep))
-        }
-        return sub
-    }
-    @objc private func sleepNow() { SleepTimer.sleepNow() }
-    @objc private func displaySleepNow() { SleepTimer.displaySleepNow() }
-    @objc private func sleepIn(_ sender: NSMenuItem) { SleepTimer.arm(minutes: sender.tag) }
-    @objc private func cancelSleep() { SleepTimer.cancel() }
-    @objc private func sleepInCustom() {
-        guard let mins = askMinutes(L("Уснуть через"), suggestion: 45) else { return }
-        SleepTimer.arm(minutes: mins)
-    }
-
-    /// Запросить число минут (1…1440). nil = отмена/пусто.
-    private func askMinutes(_ title: String, suggestion: Int) -> Int? {
-        let a = NSAlert(); a.messageText = title
-        a.informativeText = L("Сработает, только пока Kelvin запущен.")
-        let field = NSTextField(string: String(suggestion))
-        field.frame = NSRect(x: 0, y: 0, width: 120, height: 24)
-        a.accessoryView = field
-        a.addButton(withTitle: L("ОК")); a.addButton(withTitle: L("Отмена"))
-        a.window.initialFirstResponder = field
-        guard a.runModal() == .alertFirstButtonReturn else { return nil }
-        guard let n = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), n >= 1 else { return nil }
-        return min(n, 1440)
-    }
-
-    /// Запросить время «до HH:MM» и вернуть число секунд до него (сегодня или завтра).
-    private func askUntilSeconds(_ title: String) -> TimeInterval? {
-        let a = NSAlert(); a.messageText = title
-        a.informativeText = L("Введите время в формате ЧЧ:ММ (24 ч). Удерживает, пока Kelvin запущен.")
-        let now = Date()
-        let cal = Calendar.current
-        let hh = cal.component(.hour, from: now)
-        let field = NSTextField(string: String(format: "%02d:%02d", (hh + 1) % 24, 0))
-        field.frame = NSRect(x: 0, y: 0, width: 120, height: 24)
-        a.accessoryView = field
-        a.addButton(withTitle: L("ОК")); a.addButton(withTitle: L("Отмена"))
-        a.window.initialFirstResponder = field
-        guard a.runModal() == .alertFirstButtonReturn else { return nil }
-        let parts = field.stringValue.trimmingCharacters(in: .whitespaces).split(separator: ":")
-        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]),
-              (0...23).contains(h), (0...59).contains(m) else { return nil }
-        var comp = cal.dateComponents([.year, .month, .day], from: now)
-        comp.hour = h; comp.minute = m; comp.second = 0
-        guard var target = cal.date(from: comp) else { return nil }
-        if target <= now { target = target.addingTimeInterval(86400) }   // уже прошло — на завтра
-        return target.timeIntervalSince(now)
-    }
-
-    /// Night Shift строками-«не закрывай меню»: вкл/держать/теплота щёлкаются подряд.
-    private func buildNightShiftRows(into sub: NSMenu, collect: (MenuToggleRow) -> Void) {
-        func row(_ title: String, state: @escaping () -> Bool, onToggle: @escaping () -> Void) {
-            let r = MenuToggleRow(title: title, symbol: nil, state: state, onToggle: onToggle)
-            let it = NSMenuItem(); it.view = r; sub.addItem(it); collect(r)
-        }
-        row(L("Включён сейчас"), state: { NightShift.isOn }, onToggle: { NightShift.toggle() })
-        row(L("Держать всегда включённым"), state: { SettingsStore.nightKeepOn },
-            onToggle: { [weak self] in self?.toggleNightKeepOn() })
-        sub.addItem(.separator())
-        for (title, val) in [(L("Слабо"), Float(0.3)), (L("Средне"), 0.6), (L("Сильно"), 1.0)] {
-            row(title, state: { abs(SettingsStore.nightStrength - val) < 0.05 },
-                onToggle: {
-                    SettingsStore.nightStrength = val
-                    if NightShift.isOn || SettingsStore.nightKeepOn { NightShift.enableNow(strength: val) }
-                    else { NightShift.setStrength(val) }
-                })
-        }
-    }
-    @objc private func toggleNightKeepOn() {
-        SettingsStore.nightKeepOn.toggle()
-        if SettingsStore.nightKeepOn { NightShift.enableNow() }   // включить сразу; tick будет удерживать
-    }
-    // (setNightStrength удалён — строки теплоты зовут API напрямую через MenuToggleRow)
-
-    private func displaySubmenu() -> NSMenu {
-        let sub = NSMenu()
-        let cur = ScreenResolution.current()
-        for mode in ScreenResolution.available() {
-            let it = NSMenuItem(title: mode.label, action: #selector(applyResolution(_:)), keyEquivalent: "")
-            it.target = self; it.representedObject = mode
-            if let c = cur, c.w == mode.w, c.h == mode.h { it.state = .on }
-            sub.addItem(it)
-        }
-        if sub.items.isEmpty { sub.addItem(NSMenuItem(title: L("нет доступных режимов"), action: nil, keyEquivalent: "")) }
-        return sub
-    }
-    @objc private func applyResolution(_ sender: NSMenuItem) {
-        guard let mode = sender.representedObject as? ScreenResolution.Mode else { return }
-        _ = ScreenResolution.apply(mode)
-    }
-    // (toggleDark/WiFi/BT-селекторы удалены — верхнеуровневые тумблеры зовут API через MenuToggleRow)
-    /// Finder-твики строками-«не закрывай меню» — ГЛАВНЫЙ сценарий владельца: 8 тумблеров подряд.
-    /// toggle (defaults write + killall Finder) — В ФОНЕ (синхронный Process на main вешал tracking);
-    /// галочку доведёт 1Гц-refresher меню.
-    private func buildFinderRows(into sub: NSMenu, collect: (MenuToggleRow) -> Void) {
-        for t in FinderTweaks.tweaks {
-            let r = MenuToggleRow(title: t.title, symbol: nil,
-                                  state: { FinderTweaks.isOn(t) },
-                                  onToggle: { DispatchQueue.global(qos: .userInitiated).async { FinderTweaks.toggle(t) } })
-            let it = NSMenuItem(); it.view = r; sub.addItem(it); collect(r)
-        }
-    }
-
-    private func devToolsSubmenu() -> NSMenu {
-        let sub = NSMenu()
-        if !DevTools.brewInstalled {
-            let it = NSMenuItem(title: L("⚙ Установить Homebrew (нужен для остального)"), action: #selector(installHomebrew), keyEquivalent: "")
-            it.target = self
-            sub.addItem(it)
-            return sub
-        }
-        let head = NSMenuItem(title: L("✓ Homebrew установлен"), action: nil, keyEquivalent: "")
-        head.isEnabled = false
-        sub.addItem(head)
-        sub.addItem(.separator())
-        for cat in DevTools.categories {
-            let catItem = NSMenuItem(title: L(cat.title), action: nil, keyEquivalent: "")
-            let catMenu = NSMenu()
-            for tool in cat.tools {
-                let it = NSMenuItem(title: tool.name, action: #selector(installDevTool(_:)), keyEquivalent: "")
-                it.target = self
-                it.representedObject = tool
-                it.state = DevTools.isInstalled(tool) ? .on : .off
-                catMenu.addItem(it)
-            }
-            catItem.submenu = catMenu
-            sub.addItem(catItem)
-        }
-        return sub
-    }
-    @objc private func installHomebrew() {
-        let a = NSAlert()
-        a.messageText = L("Установить Homebrew")
-        a.informativeText = L("Откроется Терминал с официальным установщиком Homebrew. Он попросит пароль и подтверждение. После установки снова открой это меню — появятся инструменты.")
-        a.addButton(withTitle: L("Открыть Терминал"))
-        a.addButton(withTitle: L("Отмена"))
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        DevTools.runInTerminal(DevTools.homebrewInstall)
-    }
-    @objc private func installDevTool(_ sender: NSMenuItem) {
-        guard let tool = sender.representedObject as? DevTools.Tool, let cmd = DevTools.installCommand(tool) else { return }
-        let reinstall = DevTools.isInstalled(tool)
-        let a = NSAlert()
-        a.messageText = (reinstall ? L("Переустановить ") : L("Установить ")) + tool.name
-        a.informativeText = String(format: L("Откроется Терминал с командой:\n\n%@\n\nПрогресс установки будет виден в окне."), cmd)
-        a.addButton(withTitle: reinstall ? L("Переустановить") : L("Установить"))
-        a.addButton(withTitle: L("Отмена"))
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        DevTools.runInTerminal(cmd)
-    }
-
-    private func securitySubmenu() -> NSMenu {
-        let sub = NSMenu()
-        let gk = SecurityTools.gatekeeperEnabled
-        let gkItem = NSMenuItem(title: gk ? L("Gatekeeper: включён ✓") : L("Gatekeeper: выключен ⚠️"),
-                                action: #selector(toggleGatekeeper), keyEquivalent: "")
-        gkItem.target = self
-        sub.addItem(gkItem)
-        let q = NSMenuItem(title: L("Карантин новых загрузок"), action: #selector(toggleQuarantine), keyEquivalent: "")
-        q.target = self; q.state = SecurityTools.quarantineOn ? .on : .off
-        sub.addItem(q)
-        sub.addItem(.separator())
-        let clr = NSMenuItem(title: L("Снять карантин с приложения…"), action: #selector(clearQuarantinePick), keyEquivalent: "")
-        clr.target = self
-        sub.addItem(clr)
-        return sub
-    }
-    @objc private func toggleGatekeeper() {
-        let enabled = SecurityTools.gatekeeperEnabled
-        let disabling = enabled
-        let a = NSAlert()
-        a.alertStyle = disabling ? .critical : .informational
-        a.messageText = disabling ? L("Выключить Gatekeeper?") : L("Включить Gatekeeper?")
-        a.informativeText = disabling
-            ? L("⚠️ macOS перестанет проверять подпись приложений — запускаться сможет ЛЮБОЕ, включая вредоносное. Включи обратно, когда закончишь. Может понадобиться подтверждение в Системных настройках → Конфиденциальность и безопасность.")
-            : L("Вернёт стандартную защиту: запуск только проверенных приложений.")
-        a.addButton(withTitle: disabling ? L("Выключить") : L("Включить"))
-        a.addButton(withTitle: L("Отмена"))
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        let ok = SecurityTools.setGatekeeper(!enabled)
-        let done = NSAlert()
-        done.messageText = ok ? L("Готово") : L("Не удалось")
-        done.informativeText = ok
-            ? (disabling ? L("Gatekeeper выключен. Если «неизвестные» приложения всё ещё блокируются — выбери «Anywhere» в Системных настройках → Конфиденциальность и безопасность.")
-                         : L("Gatekeeper включён — стандартная защита."))
-            : L("Действие отменено или ошибка.")
-        done.runModal()
-    }
-    @objc private func toggleQuarantine() {
-        SecurityTools.setQuarantine(!SecurityTools.quarantineOn)
-    }
-    @objc private func clearQuarantinePick() {
-        NSApp.activate(ignoringOtherApps: true)
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = true
-        panel.message = L("Выбери приложение или файл, с которого снять карантин")
-        panel.prompt = L("Снять карантин")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let r = SecurityTools.clearQuarantine(url.path)
-        let a = NSAlert()
-        a.messageText = r.ok ? L("Карантин снят") : L("Не удалось")
-        a.informativeText = r.ok
-            ? String(format: L("«%@» теперь запустится без блокировки."), url.lastPathComponent)
-            : L("Не удалось снять карантин (отменено или нет прав).")
-        a.runModal()
-    }
-    @objc private func openSettingsFromMenu() { SettingsCoordinator.open() }
-    @objc private func openAboutFromMenu() { SettingsCoordinator.open(); SettingsCoordinator.select("about") }
-    @objc private func openProFromMenu() { SettingsCoordinator.open(); SettingsCoordinator.select("license") }
-
-    // MARK: — быстрые пресеты охлаждения из меню-бара (Авто/Тихо/Баланс/Максимум) + заряд-состояние —
-    /// Заголовок пункта «Охлаждение · <текущее состояние>». Честно: без демона или в «Авто» — «система».
-    private func fanHeadTitle() -> String {
-        let base = L("Охлаждение")
-        let id = SettingsStore.activeFanProfileName
-        if !FanController.daemonInstalled || id == "auto" { return base + " · " + L("система") }
-        return base + " · " + SettingsStore.builtinFanDisplay(id)
-    }
-    private func fanQuickSubmenu() -> NSMenu {
-        let sub = NSMenu()
-        // Заряд-состояние (инфо-строка, неактивна).
-        let pctText = BatteryReader.systemChargePercent().map { "\($0)%" } ?? "—"
-        let chargeLineBase: String
-        switch SettingsStore.chargeMode {
-        case "sail": chargeLineBase = String(format: L("Заряд %@ · поддержание %d–%d%%"), pctText, SettingsStore.sailLower, SettingsStore.sailUpper)
-        default:     chargeLineBase = SettingsStore.chargeLimit < 100
-                        ? String(format: L("Заряд %@ · лимит %d%%"), pctText, SettingsStore.chargeLimit)
-                        : String(format: L("Заряд %@ · без лимита"), pctText)
-        }
-        let chargeLine = chargeLineBase
-            + (ChargeControl.requiresSystemControl ? " · " + L("не активно") : "")
-        let info = NSMenuItem(title: chargeLine, action: nil, keyEquivalent: "")
-        info.isEnabled = false
-        sub.addItem(info)
-        sub.addItem(.separator())
-        // Пресеты. Активным считаем: под управлением — активный профиль, иначе «Авто».
-        let controlled = FanController.daemonInstalled && SettingsStore.activeFanProfileName != "auto"
-        let effective = controlled ? SettingsStore.activeFanProfileName : "auto"
-        let presets: [(id: String, title: String, sym: String)] = [
-            ("auto", L("Авто (система)"), "a.circle"),
-            ("quiet", L("Тихо"), "leaf"),
-            ("balance", L("Баланс"), "speedometer"),
-            ("turbo", L("Максимум"), "bolt.fill"),
-        ]
-        for p in presets {
-            let it = NSMenuItem(title: p.title, action: #selector(applyFanQuick(_:)), keyEquivalent: "")
-            it.target = self
-            it.image = menuIcon(p.sym)
-            it.representedObject = p.id
-            it.state = (p.id == effective) ? .on : .off
-            sub.addItem(it)
-        }
-        return sub
-    }
-    @objc private func applyFanQuick(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        if id == "auto" {
-            FanController.applyProfileHeadless(named: "auto")   // демон отпустит; без демона — уже система
-            SettingsStore.activeFanProfileName = "auto"
-            SettingsCoordinator.refresh()
-            return
-        }
-        // Форс вентиляторов — Pro.
-        guard Licensing.shared.isPro else { _ = SettingsCoordinator.requirePro(.fans); return }
-        // Управление ещё не установлено — ведём в настройки (там ставится root-демон через диалог пароля).
-        guard FanController.daemonInstalled else {
-            SettingsCoordinator.open()
-            SettingsCoordinator.select("power")
-            return
-        }
-        FanController.applyProfileHeadless(named: id)           // сам выставит activeFanProfileName
-        SettingsCoordinator.refresh()
-    }
-
-    // MARK: пункты меню — обновления, поддержка автора, обратная связь
-    @objc private func checkUpdatesFromMenu() { Updater.checkManually() }
-
-    /// «Поддержать Kelvin» — донат автору (коммерция снята). URL-плейсхолдер в `Donate.url`.
-    @objc private func donateFromMenu() { Donate.open() }
-
-    // — ниже: спящие коммерческие обработчики (лицензирование отключено; сохранены для реактивации) —
-    @objc private func buyProFromMenu() {                      // гейт: только не-Pro
-        if let url = Licensing.checkoutURL, let u = URL(string: url) { NSWorkspace.shared.open(u) }
-    }
-
-    @objc private func restorePurchaseFromMenu() {             // честно: почта восстановления
-        let subj = "Kelvin — restore purchase".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        if let u = URL(string: "mailto:cambly.studio@gmail.com?subject=\(subj)") { NSWorkspace.shared.open(u) }
-    }
-
-    @objc private func sendFeedbackFromMenu() {
-        if let u = AppConfig.mailto(subject: "Kelvin feedback (\(appVersion))") { NSWorkspace.shared.open(u) }
-    }
-
-    @objc private func openHelpFromMenu() {                    // trykelvin.com
-        AppConfig.openWebsite()
-    }
-
-    @objc private func deactivateMacFromMenu() {               // гейт: только activated; с подтверждением
-        let a = NSAlert()
-        a.messageText = L("Деактивировать этот Mac?")
-        a.informativeText = L("Освободит место лицензии (2 Mac на лицензию) — пригодится при продаже или замене компьютера. Pro-функции на этом Mac отключатся.")
-        a.addButton(withTitle: L("Деактивировать")); a.addButton(withTitle: L("Отмена"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        Licensing.shared.deactivate()
-    }
-
-    /// Менютрекинг-трюк: пока поповер открыт над fullscreen, держим системную строку меню
-    /// «в состоянии трекинга меню», чтобы она не схлопывалась обратно и поповер не моргал.
-    /// Обещание строго ограничено: только «поповер над fullscreen не моргает» (НЕ «иконка всегда видна»).
-    private func postMenuTracking(begin: Bool) {
-        let name = begin ? "com.apple.HIToolbox.beginMenuTrackingNotification"
-                         : "com.apple.HIToolbox.endMenuTrackingNotification"
-        DistributedNotificationCenter.default().postNotificationName(
-            NSNotification.Name(name), object: nil, userInfo: nil, deliverImmediately: true)
-    }
-
-    /// Прощальный оффер при окончании пробного периода — ключевой момент воронки. Показывается один раз.
-    @objc func presentTrialEnded() {
-        Licensing.shared.markTrialEndedShown()
-        let a = NSAlert()
-        a.messageText = L("Пробный период Kelvin Pro закончился")
-        a.informativeText = String(format: L("Мониторинг остаётся бесплатным навсегда. Управление вентиляторами, лимит заряда, фаервол, переключатель языка и другие Pro-функции теперь отключены. Разблокировать — разовая покупка %@, без подписки."), AppConfig.proPriceDisplay)
-        a.addButton(withTitle: String(format: L("Купить за %@"), AppConfig.proPriceDisplay))
-        a.addButton(withTitle: L("Ввести ключ"))
-        a.addButton(withTitle: L("Продолжить бесплатно"))
-        NSApp.activate(ignoringOtherApps: true)
-        switch a.runModal() {
-        case .alertFirstButtonReturn:
-            if let url = Licensing.checkoutURL, let realURL = URL(string: url) {
-                NSWorkspace.shared.open(realURL)
-            } else {
-                // Магазин не настроен — fallback на ввод ключа
-                SettingsCoordinator.open()
-                SettingsCoordinator.open(section: "pro")
-            }
-        case .alertSecondButtonReturn: SettingsCoordinator.open(); SettingsCoordinator.open(section: "pro")
-        default: break
-        }
-    }
-
-    /// Минимальное главное меню. У LSUIElement-агента оно не видно в строке Apple, но включает
-    /// стандартные горячие клавиши: ⌘Z/⌘X/⌘C/⌘V/⌘A в полях ввода и ⌘,/⌘W/⌘M/⌘Q в окнах.
-    /// Без него нельзя даже вставить купленный лицензионный ключ с клавиатуры (⌘V не работал).
-    private func buildMainMenu() {
-        let main = NSMenu()
-
-        // — App —
-        let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: L("О программе Kelvin"), action: #selector(openAboutFromMenu), keyEquivalent: "").target = self
-        appMenu.addItem(.separator())
-        // Pro-лоск: для полноты/хоткеев в скрытом app-меню. Гейтинг статичен (меню строится один раз при старте).
-        appMenu.addItem(withTitle: L("Проверить обновления…"), action: #selector(checkUpdatesFromMenu), keyEquivalent: "").target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L("Поддержать Kelvin…"), action: #selector(donateFromMenu), keyEquivalent: "").target = self
-        appMenu.addItem(withTitle: L("Обратная связь…"), action: #selector(sendFeedbackFromMenu), keyEquivalent: "").target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L("Настройки…"), action: #selector(openSettingsFromMenu), keyEquivalent: ",").target = self
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L("Скрыть Kelvin"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: L("Выйти из Kelvin"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-        main.addItem(appItem)
-
-        // — Правка — (target = nil → маршрутизация по responder chain к активному полю ввода)
-        let editItem = NSMenuItem()
-        let editMenu = NSMenu(title: L("Правка"))
-        editMenu.addItem(withTitle: L("Отменить"), action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = editMenu.addItem(withTitle: L("Повторить"), action: Selector(("redo:")), keyEquivalent: "z")
-        redo.keyEquivalentModifierMask = [.command, .shift]
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: L("Вырезать"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: L("Копировать"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: L("Вставить"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: L("Выбрать всё"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = editMenu
-        main.addItem(editItem)
-
-        // — Окно —
-        let winItem = NSMenuItem()
-        let winMenu = NSMenu(title: L("Окно"))
-        winMenu.addItem(withTitle: L("Свернуть"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        winMenu.addItem(withTitle: L("Закрыть"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        winItem.submenu = winMenu
-        main.addItem(winItem)
-        NSApp.windowsMenu = winMenu
-
-        NSApp.mainMenu = main
-    }
-    @objc private func pasteClip(_ item: NSMenuItem) {
-        let items = ClipboardHistory.shared.items
-        if item.tag < items.count { ClipboardHistory.shared.copy(items[item.tag]) }
-    }
-
-    @objc func togglePopover() { togglePopover(fromHotkey: false) }   // совместимость со statusClick/селекторами
-
-    func togglePopover(fromHotkey: Bool) {
-        if popover.isShown {
-            if Motion.reduced { popover.performClose(nil); return }
-            controller.playCloseAnimation { [weak self] in self?.popover.performClose(nil) }
-            return
-        }
-        // Из хоткея приложение может быть неактивным/в чужом fullscreen-спейсе — поднимаем себя.
-        if fromHotkey { NSApp.activate(ignoringOtherApps: true) }
-
-        // Экранный rect, к которому привяжем неподвижное прозрачное окно-якорь.
-        // В полноэкранном режиме строка меню авто-скрывается и УТАСКИВАЕТ кнопку-якорь наверх:
-        // при вызове из хоткея со скрытой строкой якорим к ФИКС-точке у верхней кромки экрана,
-        // иначе поповер «съехал» бы частично за кромку.
-        let screenRect: NSRect
-        var overFullscreen = false                                                 // якоримся над fullscreen (строка скрыта)?
-        if fromHotkey, let btn = statusItem.button, statusBarVisible(btn), let win = btn.window {
-            screenRect = win.convertToScreen(btn.convert(btn.bounds, to: nil))   // строка видна — обычный якорь к кнопке
-        } else if fromHotkey {
-            screenRect = hotkeyAnchorRect()                                        // строка скрыта — фикс-точка у кромки
-            overFullscreen = true
-        } else if let btn = statusItem.button, let win = btn.window {
-            screenRect = win.convertToScreen(btn.convert(btn.bounds, to: nil))    // клик по иконке — прежний путь
-        } else { return }
-
-        let w = NSWindow(contentRect: screenRect, styleMask: .borderless, backing: .buffered, defer: false)
-        w.isReleasedWhenClosed = false
-        w.backgroundColor = .clear
-        w.alphaValue = 0
-        w.ignoresMouseEvents = true
-        w.level = .statusBar
-        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]  // показаться на fullscreen-спейсе
-        w.orderFront(nil)
-        popoverAnchor = w
-        // Над fullscreen: держим системную строку «в трекинге меню», чтобы она не схлопнулась и поповер не моргал.
-        if overFullscreen { postMenuTracking(begin: true); postedMenuTracking = true }
-        let anchorView: NSView = w.contentView!
-
-        popover.delegate = self
-        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minY)
-        // Собственное окно NSPopover НЕ наследует поведение окна-якоря: над fullscreen без этого оно
-        // уходит на дефолтный спейс и «не открывается». Явно разрешаем ему показаться на fullscreen-спейсе.
-        if let pwin = popover.contentViewController?.view.window {
-            pwin.collectionBehavior.insert(.canJoinAllSpaces)
-            pwin.collectionBehavior.insert(.fullScreenAuxiliary)
-            if overFullscreen { pwin.level = .statusBar }
-            // Нативная стрелка NSPopover — часть window chrome, не AuraView. Без явного
-            // цвета при прозрачном контенте AppKit оставлял её почти чёрной.
-            pwin.isOpaque = false
-            pwin.backgroundColor = controller.popoverChromeColor()
-        }
-        tick()                                        // isShown уже true → первый полный апдейт сразу
-        refreshApps()
-        controller.refreshHistoryIfVisible()          // переоткрытие на вкладке «История» → перечитать из БД (selectTab не сработает на той же вкладке)
-        popover.contentViewController?.view.window?.makeKey()
-        DispatchQueue.main.async { [weak self] in self?.controller.playOpenAnimation() }
-    }
-
-    /// Открыть поповер на вкладке «Приватность» из баннера first-conn.
-    func openRadarFromAlert() {
-        NSApp.activate(ignoringOtherApps: true)
-        if !popover.isShown { togglePopover(fromHotkey: true) }
-        controller.focusPrivacyTab()
-    }
-
-    /// Видна ли строка меню сейчас (т.е. кнопка в досягаемой позиции, не уехала за кромку).
-    private func statusBarVisible(_ btn: NSStatusBarButton) -> Bool {
-        guard let win = btn.window else { return false }
-        let screenRect = win.convertToScreen(btn.convert(btn.bounds, to: nil))
-        guard let scr = btn.window?.screen ?? NSScreen.main else { return false }
-        // в fullscreen окно статус-бара уезжает над кромкой — верх кнопки выходит за экран
-        return screenRect.maxY <= scr.frame.maxY + 1
-    }
-
-    /// Фикс-точка у верхней кромки экрана — под обычной позицией иконки (правый край).
-    private func hotkeyAnchorRect() -> NSRect {
-        // экран под курсором приоритетнее (мультимонитор): в чужом fullscreen key-окно — не наше
-        let mouse = NSEvent.mouseLocation
-        let scr = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-                  ?? NSScreen.main
-        guard let scr else { return NSRect(x: 0, y: 0, width: 32, height: 24) }  // нет экранов (clamshell/реконфиг) → честная деградация вместо трапа
-        let f = scr.frame
-        let h: CGFloat = 24, wdt: CGFloat = 32, inset: CGFloat = 8
-        let x = f.maxX - wdt - inset
-        let y = f.maxY - h               // под верхней кромкой; поповер раскроется вниз (.minY)
-        return NSRect(x: x, y: y, width: wdt, height: h)
-    }
-
-    /// Закрытие поповера (в т.ч. транзиентное по клику-вне) → убрать якорь-окно.
-    func popoverDidClose(_ notification: Notification) {
-        if postedMenuTracking { postMenuTracking(begin: false); postedMenuTracking = false }
-        popoverAnchor?.close()
-        popoverAnchor = nil
-    }
-    
-    /// Проверка наличия crash reports и показ уведомления пользователю
-    private func checkForCrashReports() {
-        let pendingReports = CrashReportStore.scan().newReports
-        guard !pendingReports.isEmpty else { return }
-        
-        // Показываем уведомление для первого найденного отчёта
-        // (остальные будут показаны после обработки первого)
-        let report = pendingReports.first!
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.showCrashNotification(for: report)
-        }
-    }
-    
-    /// Показать карточку уведомления о crash report
-    private func showCrashNotification(for report: CrashReportStore.ReportMetadata) {
-        // Проверяем, включена ли автоматическая отправка
-        let autoSend = SettingsStore.autoSendCrashReports
-        
-        if autoSend {
-            // Автоматическая отправка без показа UI
-            try? CrashReportStore.updateState(for: report.fingerprint, to: .queued)
-            CrashReportUploader.shared.enqueue(report)
-        } else {
-            // Показываем карточку с запросом согласия
-            // Для этого используем простое alert-like окно поверх status bar
-            let alert = NSAlert()
-            alert.messageText = "Kelvin неожиданно завершил работу"
-            alert.informativeText = "Мы нашли отчёт о сбое. Вы можете отправить обезличенный отчёт разработчику, чтобы помочь исправить эту ошибку."
-            alert.addButton(withTitle: "Посмотреть")
-            alert.addButton(withTitle: "Отправить")
-            alert.addButton(withTitle: "Не отправлять")
-            alert.alertStyle = .warning
-            
-            let modalResponse = alert.runModal()
-            
-            switch modalResponse {
-            case .alertFirstButtonReturn: // Посмотреть
-                // Открываем preview в отдельном окне
-                openCrashPreviewWindow(for: report)
-                
-            case .alertSecondButtonReturn: // Отправить
-                try? CrashReportStore.updateState(for: report.fingerprint, to: .consented)
-                CrashReportUploader.shared.enqueue(report)
-                
-            case .alertThirdButtonReturn: // Не отправлять
-                try? CrashReportStore.updateState(for: report.fingerprint, to: .declined)
-                
-            default:
-                break
-            }
-        }
-    }
-    
-    /// Открыть окно предпросмотра crash report
-    private func openCrashPreviewWindow(for report: CrashReportStore.ReportMetadata) {
-        // Санитизируем отчёт для показа
-        let result = CrashReportSanitizer.sanitize(
-            url: CrashReportStore.sourceURL(for: report),
-            reportID: report.reportID,
-            sourceFingerprint: report.fingerprint
-        )
-        guard case .success(let sanitized) = result, !sanitized.containsPII else { return }
-        
-        // Создаём простое текстовое окно для просмотра
-        let textView = NSTextView()
-        textView.isEditable = false
-        textView.string = sanitized.jsonPreview
-        
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.documentView = textView
-        
-        let contentSize = NSSize(width: 500, height: 400)
-        textView.frame = NSRect(origin: .zero, size: contentSize)
-        scrollView.frame = NSRect(origin: .zero, size: contentSize)
-        
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: contentSize.width + 40, height: contentSize.height + 80),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Отчёт о сбое — \(report.sourceFilename)"
-        window.contentViewController = NSViewController()
-        window.contentViewController?.view = scrollView
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        
-        // Добавляем кнопки действий
-        // (упрощённая версия — в полной реализации нужен SwiftUI preview)
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        statusAnimationTimer?.invalidate()
-        statusAnimationTimer = nil
-        usbWatch.stop()        // E1 teardown: релиз итераторов + снятие run-loop source + destroy порта
-        GlobalHotkey.shared.teardown()   // снять Carbon-хоткей + хендлер без утечки
-        
-        // Ожидание завершения активных загрузок crash reports (до 5 секунд)
-        CrashReportUploader.shared.waitForCompletion(timeout: 5.0)
-    }
-}
-
 // Отладочный дамп: проверяет, что данные реально доходят до строк (без GUI).
 if ProcessInfo.processInfo.environment["BM_DUMP"] != nil {
     if let b = BatteryReader.read() {
@@ -6665,8 +4109,41 @@ if let snapDir = ProcessInfo.processInfo.environment["BM_SNAP"] {
     exit(0)
 }
 
+// CLI-режим дерегистрации привилегированного GPU-сервиса (SMAppService.unregister()).
+// Используется скриптом очистки (clean-old-version.sh) до pkill и удаления bundle:
+// из shell доступен только launchctl bootout, а полная дерегистрация записи
+// SMAppService требует вызова из приложения. Идёт ДО single-instance guard —
+// работающая копия владельца не должна выгонять одноразовый сервисный запуск.
+//   exit 0 — unregister выполнен (или нечего было снимать);
+//   exit 3 — сервис зарегистрирован, но unregister завершился ошибкой.
+if CommandLine.arguments.contains("--unregister-privileged-service") {
+    if #available(macOS 13.0, *) {
+        let service = SMAppService.daemon(plistName: PrivilegedServiceConfig.plistName)
+        let prior = service.status
+        if prior == .notRegistered || prior == .notFound {
+            print("unregister: сервис не был зарегистрирован (status=\(prior.rawValue))")
+            exit(0)
+        }
+        do {
+            try service.unregister()
+            print("unregister: OK (был status=\(prior.rawValue), теперь status=\(service.status.rawValue))")
+            exit(0)
+        } catch {
+            let ns = error as NSError
+            // -128 = отмена авторизации пользователем — не считаем ошибкой скрипта.
+            if ns.code == -128 { print("unregister: отменено пользователем"); exit(0) }
+            print("unregister: ОШИБКА \(ns.domain)/\(ns.code) — \(ns.localizedDescription)")
+            exit(3)
+        }
+    } else {
+        // macOS 11–12: SMJobBless-сервис. Дерегистрация через launchctl выполняется скриптом.
+        print("unregister: legacy (macOS <13) — обрабатывается скриптом через launchctl")
+        exit(0)
+    }
+}
+
 // Single-instance: если копия уже запущена (автозапуск + ручной запуск) — выходим.
-let bundleID = Bundle.main.bundleIdentifier ?? "com.trykelvin.kelvin"
+let bundleID = Bundle.main.bundleIdentifier ?? AppConfig.bundleID
 let selfPID = ProcessInfo.processInfo.processIdentifier
 let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
     .filter { $0.processIdentifier != selfPID }

@@ -88,11 +88,20 @@ enum ChargeControl {
             if !requireProGate() { return false }
             SettingsStore.chargeMode = "sail"
         default: // "limit"
-            // Активный лимит (80%) — Pro-фича: гейтим ТОЛЬКО когда лимит реально становится активным
-            // (был 100). Иначе не-Pro включал бы 80% и провоцировал установку root-демона бесплатно.
-            if SettingsStore.chargeLimit == 100, !requireProGate() { return false }
+            // Активный лимит (<100%) — Pro-фича. Гейтим ЛЮБУЮ активацию limit-режима,
+            // которая приведёт к isActive (лимит <100), а не только переход 100→80.
+            // Раньше гейт срабатывал лишь при chargeLimit==100, что позволяло не-Pro
+            // пользователю с сохранённым лимитом <100 (от прошлой Pro-сессии) повторно
+            // включать лимит и получить prompt установки root-демона без лицензии.
+            if SettingsStore.chargeLimit < 100, !requireProGate() { return false }
             SettingsStore.chargeMode = "limit"
-            if SettingsStore.chargeLimit == 100 { SettingsStore.chargeLimit = 80 }
+            if SettingsStore.chargeLimit == 100 {
+                // Первый выбор limit: предлагаем 80%. Гейт requirePro выше уже пройден
+                // (chargeLimit==100 не <100, гейт не сработал), но эта ветка задаёт
+                // активный лимит → гейтим именно её.
+                if !requireProGate() { return false }
+                SettingsStore.chargeLimit = 80
+            }
         }
         writeJSON()
         if isActive { ensureHelper() }
@@ -102,20 +111,24 @@ enum ChargeControl {
     /// Парусные границы. tag-агностично: задаём верх и низ, удерживая полосу ≥5.
     /// Зеркало sailThresholdChanged (в самом хендлере Pro-гейта нет — режим уже за гейтом).
     /// Возвращает финально применённые (upper, lower) после зажима.
+    ///
+    /// Одношаговый clamp (как в демоне sanitizeCharge): сначала зажимаем границы в [50,90/100],
+    /// затем ОДИН раз обеспечиваем полосу ≥5, поднимая upper если нужно. Раньше два
+    /// последовательных if каскадировали: lower упирался в пол 50 → второй if поднимал upper
+    /// обратно, молча перезаписывая выбранное пользователем значение.
     @discardableResult
     static func setSail(upper: Int, lower: Int) -> (upper: Int, lower: Int) {
-        SettingsStore.sailUpper = upper
-        SettingsStore.sailLower = lower
-        // удерживаем полосу ≥5 (sailLower ≤ sailUpper−5), в обе стороны — как в хендлере
-        if SettingsStore.sailLower > SettingsStore.sailUpper - 5 {
-            SettingsStore.sailLower = max(50, SettingsStore.sailUpper - 5)
-        }
-        if SettingsStore.sailUpper < SettingsStore.sailLower + 5 {
-            SettingsStore.sailUpper = min(90, SettingsStore.sailLower + 5)
-        }
+        var u = min(100, max(50, upper))
+        var l = min(100, max(50, lower))
+        // Полоса ≥5: если lower > upper-5, опускаем lower (не поднимаем upper).
+        if l > u - 5 { l = max(50, u - 5) }
+        // Если после клампа lower полоса всё ещё <5 (upper близко к 50) — поднимаем upper.
+        if u < l + 5 { u = min(100, l + 5) }
+        SettingsStore.sailUpper = u
+        SettingsStore.sailLower = l
         writeJSON()
         if SettingsStore.chargeMode == "sail" { ensureHelper() }
-        return (SettingsStore.sailUpper, SettingsStore.sailLower)
+        return (u, l)
     }
 
     /// Сдвинуть один парусный порог (как одиночный слайдер). top=true → верх, иначе низ.
@@ -192,7 +205,15 @@ enum ChargeControl {
             "topUpTargetMin": SettingsStore.chargeAlarmTargetMin,
             "topUpLeadMin":   SettingsStore.chargeAlarmLeadMin,
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: obj) { try? data.write(to: URL(fileURLWithPath: path)) }
+        if let data = try? JSONSerialization.data(withJSONObject: obj) {
+            do {
+                // .atomic: root-демон fand опрашивает файл каждые ~2с. Без атомарной записи
+                // он может прочитать наполовину записанный JSON и тихо применить дефолты.
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            } catch {
+                Log.app.error("ChargeControl: не удалось записать \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     /// Сообщает UI, что конфигурация подготовлена, но системный компонент ещё не подключён.

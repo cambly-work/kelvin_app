@@ -10,9 +10,11 @@ final class CCToggle: NSView {
     var accent: NSColor
     /// Встроенные тумблеры рисуются фирменной бирюзой (тема-зависимой), кастомные — цветом пользователя.
     var isBuiltin = false { didSet { restyle() } }
+    var isMomentaryAction = false { didSet { restyle() } }
     var isOn = false { didSet { restyle() } }
     var onClick: (() -> Void)?
     var stateProvider: (() -> Bool)?      // для обновления состояния в tick()
+    private var pressed = false
 
     init(id: String, icon: String, title: String, accent: NSColor) {
         self.id = id; self.title = title; self.accent = accent
@@ -76,6 +78,10 @@ final class CCToggle: NSView {
             iconView.contentTintColor = .secondaryLabelColor
             label.textColor = .labelColor
         }
+        if window?.firstResponder === self {
+            layer.borderWidth = 2
+            layer.borderColor = NSColor.keyboardFocusIndicatorColor.cgColor
+        }
     }
     func refresh() { if let p = stateProvider { isOn = p() } }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); restyle() }
@@ -90,17 +96,44 @@ final class CCToggle: NSView {
         }
         onClick?()
     }
-    override func mouseDown(with event: NSEvent) { activate() }
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        pressed = true
+        alphaValue = 0.72
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard pressed else { return }
+        alphaValue = bounds.contains(convert(event.locationInWindow, from: nil)) ? 0.72 : 1
+    }
+    override func mouseUp(with event: NSEvent) {
+        guard pressed else { return }
+        pressed = false
+        alphaValue = 1
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { activate() }
+    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 
-    // Плитки управляются мышью/VoiceOver и не входят в Tab-цепочку: постоянная
-    // синяя рамка выглядела как выбранное состояние и прыгала между плитками.
-    override var acceptsFirstResponder: Bool { false }
-    override var canBecomeKeyView: Bool { false }
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { restyle() }
+        return accepted
+    }
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { restyle() }
+        return resigned
+    }
+    override func keyDown(with event: NSEvent) {
+        if (event.keyCode == 49 || event.keyCode == 36) && !event.isARepeat { activate() }
+        else { super.keyDown(with: event) }
+    }
 
-    // MARK: VoiceOver — checkbox с меткой и состоянием
+    // MARK: VoiceOver — переключатели и команды не выдают себя друг за друга
     override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .checkBox }
+    override func accessibilityRole() -> NSAccessibility.Role? { isMomentaryAction ? .button : .checkBox }
     override func accessibilityLabel() -> String? { title }
-    override func accessibilityValue() -> Any? { isOn ? 1 : 0 }
+    override func accessibilityValue() -> Any? { isMomentaryAction ? nil : (isOn ? 1 : 0) }
     override func accessibilityPerformPress() -> Bool { activate(); return true }
 }

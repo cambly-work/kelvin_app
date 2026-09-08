@@ -114,6 +114,18 @@ enum GPUInfo {
         return .supported
     }
 
+    /// Асинхронные варианты, выполняющие синхронный shell-вызов `pmset` на фоновой
+    /// очереди. Синхронные `supportState()`/`mode()` читают `pmset -g` (fork+exec с
+    /// watchdog 8с) — на главном потоке это фриз UI до 8с. Async-обёртки делегируют
+    /// тяжёлый вызов в `Task.detached`, оставляя main-поток свободным.
+    static func supportStateAsync() async -> GPUSupportState {
+        await Task.detached(priority: .userInitiated) { supportState() }.value
+    }
+
+    static func modeAsync() async -> GPUMode? {
+        await Task.detached(priority: .userInitiated) { mode() }.value
+    }
+
     static func currentModeRaw() -> Int? {
         let out = shell("/usr/bin/pmset", ["-g"])
         for line in out.split(separator: "\n") where line.contains("gpuswitch") {

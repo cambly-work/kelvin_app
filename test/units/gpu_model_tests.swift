@@ -200,6 +200,19 @@ func testPrivilegedServiceStateEquatable() {
     gpuAssert(PrivilegedServiceState.notInstalled != PrivilegedServiceState.healthy(info), true)
 }
 
+/// Regression: SMAppService .enabled не должен считаться healthy без XPC-handshake.
+/// .starting — отдельное состояние (зарегистрирован, но живость не подтверждена).
+/// Selector доступен (canSwitch) только при .healthy, поэтому .starting ≠ .healthy.
+func testStartingStateIsNotHealthy() {
+    gpuAssert(PrivilegedServiceState.starting, PrivilegedServiceState.starting)
+    let info = PrivilegedServiceInfo(
+        serviceVersion: "1.0", protocolVersion: 1,
+        capabilities: [.gpuSwitching], health: .healthy
+    )
+    gpuAssert(PrivilegedServiceState.starting != PrivilegedServiceState.healthy(info), true)
+    gpuAssert(PrivilegedServiceState.starting != PrivilegedServiceState.notInstalled, true)
+}
+
 // MARK: - PrivilegedServiceConfig
 
 func testServiceConfig() {
@@ -233,6 +246,7 @@ func runAllGPUTests() -> Int {
         ("testGPUModeErrorDescriptions", testGPUModeErrorDescriptions),
         ("testGPUModeErrorEquatable", testGPUModeErrorEquatable),
         ("testPrivilegedServiceStateEquatable", testPrivilegedServiceStateEquatable),
+        ("testStartingStateIsNotHealthy", testStartingStateIsNotHealthy),
         ("testServiceConfig", testServiceConfig),
     ]
 

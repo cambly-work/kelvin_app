@@ -273,7 +273,16 @@ enum FanController {
         let dir = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/Kelvin")
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let path = (dir as NSString).appendingPathComponent("fan-profile.json")
-        if let data = try? JSONEncoder().encode(q) { try? data.write(to: URL(fileURLWithPath: path)) }
+        if let data = try? JSONEncoder().encode(q) {
+            do {
+                // .atomic: root-демон fand опрашивает fan-profile.json каждые ~2с. Без атомарной
+                // записи torn read даёт повреждённый JSON → декодер тихо применяет дефолты
+                // (3000 rpm / 72°C), хотя пользователь ожидает активный профиль.
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            } catch {
+                Log.app.error("FanController: не удалось записать профиль \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     /// Headless-применение профиля по id (без NSAlert) — для автоматики по источнику питания.

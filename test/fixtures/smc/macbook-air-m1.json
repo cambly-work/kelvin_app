@@ -1,7 +1,16 @@
 {
   "model": "MacBookAir10,1",
   "architecture": "arm64",
-  "macOS": "placeholder",
+  "macOS": "fixture",
   "smcAvailable": true,
-  "keys": []
+  "keys": [
+    { "fourCC": "Tp09", "type": "flt", "size": 4, "readable": true, "value": 42.0 },
+    { "fourCC": "Tp0T", "type": "flt", "size": 4, "readable": true, "value": 43.0 },
+    { "fourCC": "Tp01", "type": "flt", "size": 4, "readable": true, "value": 47.0 },
+    { "fourCC": "Tp05", "type": "flt", "size": 4, "readable": true, "value": 48.0 },
+    { "fourCC": "Tg05", "type": "flt", "size": 4, "readable": true, "value": 44.0 },
+    { "fourCC": "Tg0D", "type": "flt", "size": 4, "readable": true, "value": 45.0 },
+    { "fourCC": "Tm02", "type": "flt", "size": 4, "readable": true, "value": 39.0 },
+    { "fourCC": "TB0T", "type": "sp78", "size": 2, "readable": true, "value": 32.0 }
+  ]
 }

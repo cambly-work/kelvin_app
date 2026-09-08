@@ -166,7 +166,8 @@ struct ChargeCfg: Codable {
 let gChargeFloor = 50          // никогда не пишем BCLM ниже (совпадает со старым клампом)
 let gHeatCap     = 50          // BCLM при перегреве батареи (захардкожено, = пол)
 let gHeatHystC   = 3           // °C мёртвая зона снятия паузы по перегреву (захардкожено)
-var gLastBCLM    = 100         // память гистерезиса для парусной полосы
+var gLastBCLM    = 100         // память гистерезиса для парусной полосы (только sail!)
+var gWasSail     = false       // был ли предыдущий тик в sail-режиме (изоляция гистерезиса)
 var gWasHot      = false       // память гистерезиса для перегрева
 
 func clampi(_ v: Int, _ lo: Int, _ hi: Int) -> Int { min(max(v, lo), hi) }
@@ -236,12 +237,21 @@ func computeBCLM(_ cfg: ChargeCfg) -> Int {
         if let ch = charge {
             if ch >= cfg.sailUpper      { target = cfg.sailLower }   // достигли верха → кап, дрейф при работе
             else if ch <= cfg.sailLower { target = cfg.sailUpper }   // низ → разрешаем дозаряд
-            else                        { target = gLastBCLM }       // внутри полосы → держим (без дребезга)
+            else {
+                // Внутри полосы → держим последнее решение. НО gLastBCLM накапливался
+                // во всех режимах (limit/top-up могли оставить 100 или 50) → первый вход
+                // в sail давал непредсказуемый target. Изолируем: если предыдущий тик был
+                // НЕ sail (или первый запуск), стартуем с безопасного sailUpper — разрешаем
+                // заряд до верха полосы, а не до чужого остатка.
+                target = gWasSail ? gLastBCLM : cfg.sailUpper
+            }
         } else {
             target = cfg.limit                                       // нет данных о заряде → простой потолок
         }
+        gWasSail = true
     default: // "limit"
         target = cfg.limit
+        gWasSail = false        // не sail → сбрасываем, чтобы при возврате в sail gLastBCLM не протекал
     }
 
     // 2) оверлей перегрева (гистерезис включения/снятия; nil-темп ⇒ FAIL SAFE = не горячо)
@@ -273,9 +283,9 @@ func computeBCLM(_ cfg: ChargeCfg) -> Int {
         if inDailyWindow(localMinuteOfDay(), start, cfg.topUpTargetMin) { target = 100 }
     }
 
-    // 4) финальный кламп + запоминание для гистерезиса
+    // 4) финальный кламп + запоминание для гистерезиса (только в sail-режиме)
     let bclm = clampi(target, gChargeFloor, 100)
-    gLastBCLM = bclm
+    if cfg.mode == "sail" { gLastBCLM = bclm }
     return bclm
 }
 

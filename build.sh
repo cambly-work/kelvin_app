@@ -1,6 +1,6 @@
 #!/bin/bash
 # Сборка Kelvin.app из исходников (нужны только Command Line Tools).
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 
 FINAL_APP="$PWD/Kelvin.app"
@@ -17,15 +17,25 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 SRCS=$(ls Sources/*.swift | grep -v '/main.swift$')
 # Universal Binary: swiftc не поддерживает несколько -arch, компилируем отдельно + lipo
 ARCHS="x86_64 arm64"
+# DEBUG-флаги: dev-сборка (./build.sh) определяет DEBUG для
+# snapshot- и диагностических хуков. release.sh собирает оптимизированную версию.
+DEBUG_FLAGS=""
+if [ "${KELVIN_RELEASE:-0}" != "1" ]; then
+    DEBUG_FLAGS="-DDEBUG -Onone"
+    echo "  (dev-сборка: DEBUG включён)"
+else
+    DEBUG_FLAGS="-O"
+    echo "  (release-сборка: DEBUG выключен)"
+fi
 TMPDIR_BUILD=$(mktemp -d)
 for arch in $ARCHS; do
-    xcrun swiftc -O -target "$arch-apple-macos11" -F "$PWD" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks $SRCS Sources/main.swift -o "$TMPDIR_BUILD/$BIN-$arch" || { echo "✗ бинарь не собрался для $arch"; rm -rf "$TMPDIR_BUILD"; exit 1; }
+    xcrun swiftc $DEBUG_FLAGS -target "$arch-apple-macos11" -F "$PWD" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks $SRCS Sources/main.swift -o "$TMPDIR_BUILD/$BIN-$arch" || { echo "✗ бинарь не собрался для $arch"; rm -rf "$TMPDIR_BUILD"; exit 1; }
 done
 lipo -create -output "$APP/Contents/MacOS/$BIN" $TMPDIR_BUILD/$BIN-x86_64 $TMPDIR_BUILD/$BIN-arm64
 rm -rf "$TMPDIR_BUILD"
 # страховка от «тихой» неудачи: swiftc, убитый по OOM (SIGKILL), может оставить пустой бандл при exit 0
 [ -x "$APP/Contents/MacOS/$BIN" ] || { echo "✗ бинарь не собрался (пустой бандл — вероятно OOM)"; exit 1; }
-strip -x "$APP/Contents/MacOS/$BIN" 2>/dev/null || true   # снять локальные символы: `nm` больше не выдаёт локатор гейта (isPro)
+strip -x "$APP/Contents/MacOS/$BIN" 2>/dev/null || true
 
 echo "→ Копирование Sparkle.framework…"
 # Копируем Sparkle.framework в бандл (Universal Binary уже внутри)
@@ -55,8 +65,21 @@ strip -x "$APP/Contents/Resources/kelvin-fand" 2>/dev/null || true
 echo "→ Privileged XPC-сервис (GPU switching)…"
 # Universal Binary для privileged helper
 TMPDIR_PRIV=$(mktemp -d)
+HELPER_INFO="$TMPDIR_PRIV/Info.plist"
+cp helper/privileged/Info.plist "$HELPER_INFO"
+if [ -n "${KELVIN_TEAM_ID:-}" ]; then
+    /usr/libexec/PlistBuddy -c \
+        "Set :SMAuthorizedClients:0 identifier \"com.trykelvin.kelvin\" and anchor apple generic and certificate leaf[subject.OU] = \"$KELVIN_TEAM_ID\"" \
+        "$HELPER_INFO"
+else
+    /usr/libexec/PlistBuddy -c \
+        'Set :SMAuthorizedClients:0 identifier "com.trykelvin.kelvin"' \
+        "$HELPER_INFO"
+fi
 for arch in $ARCHS; do
-    xcrun swiftc -O -target "$arch-apple-macos11" helper/privileged/main.swift -o "$TMPDIR_PRIV/privileged-$arch" \
+    xcrun swiftc -O -target "$arch-apple-macos11" helper/privileged/main.swift \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$HELPER_INFO" \
+        -o "$TMPDIR_PRIV/privileged-$arch" \
         && echo "  ✓ privileged ($arch)" || { echo "  ✗ privileged-сервис не собрался для $arch"; rm -rf "$TMPDIR_PRIV"; exit 1; }
 done
 lipo -create -output "$APP/Contents/Resources/kelvin-privileged" $TMPDIR_PRIV/privileged-x86_64 $TMPDIR_PRIV/privileged-arm64
@@ -66,6 +89,11 @@ strip -x "$APP/Contents/Resources/kelvin-privileged" 2>/dev/null || true
 echo "1" > "$APP/Contents/Resources/kelvin-privileged.version"
 
 cp Info.plist "$APP/Contents/Info.plist"
+if [ -n "${KELVIN_TEAM_ID:-}" ]; then
+    /usr/libexec/PlistBuddy -c \
+        "Set :SMPrivilegedExecutables:com.trykelvin.kelvin.privileged identifier \"com.trykelvin.kelvin.privileged\" and anchor apple generic and certificate leaf[subject.OU] = \"$KELVIN_TEAM_ID\"" \
+        "$APP/Contents/Info.plist"
+fi
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 # офлайн-гео (DB-IP country-lite, скомпактировано): флаг страны для подключений без сетевых запросов
 [ -f Resources/geoip4.bin ] && cp Resources/geoip4.bin "$APP/Contents/Resources/"
@@ -83,12 +111,19 @@ mkdir -p "$APP/Contents/Library/LaunchDaemons"
 cp helper/privileged/com.trykelvin.kelvin.privileged.plist "$APP/Contents/Library/LaunchDaemons/"
 # Копируем бинарь в LaunchDaemons (SMAppService запускает daemon из бандла)
 cp "$APP/Contents/Resources/kelvin-privileged" "$APP/Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged"
+# SMJobBless на macOS 11-12 ищет helper именно в Contents/Library/LaunchServices;
+# embedded __info_plist содержит SMAuthorizedClients для взаимного pairing.
+mkdir -p "$APP/Contents/Library/LaunchServices"
+cp "$APP/Contents/Resources/kelvin-privileged" "$APP/Contents/Library/LaunchServices/com.trykelvin.kelvin.privileged"
 
 # A nested helper needs its own stable signing identifier. The XPC client
 # verifies this identifier before trusting the privileged endpoint.
 codesign --force --sign - \
     --identifier "com.trykelvin.kelvin.privileged" \
     "$APP/Contents/Library/LaunchDaemons/com.trykelvin.kelvin.privileged"
+codesign --force --sign - \
+    --identifier "com.trykelvin.kelvin.privileged" \
+    "$APP/Contents/Library/LaunchServices/com.trykelvin.kelvin.privileged"
 
 echo "→ Ad-hoc подпись…"
 # A plain ad-hoc signature gets an implicit cdhash-based designated requirement.

@@ -21,12 +21,22 @@
     <string>Kelvin показывает статус Bluetooth и позволяет включать/выключать его из строки меню.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Kelvin использует системные команды для переключателей (тёмная тема, Night Shift и др.).</string>
-    
+
+    <!-- SMJobBless pairing (legacy macOS 11-12). Dev builds use the stable helper
+         identifier; release.sh/build.sh strengthen this requirement with Team ID. -->
+    <key>SMPrivilegedExecutables</key>
+    <dict>
+        <key>com.trykelvin.kelvin.privileged</key>
+        <string>identifier "com.trykelvin.kelvin.privileged"</string>
+    </dict>
+
     <!-- Sparkle updater settings -->
     <key>SUFeedURL</key>
     <string>https://trykelvin.com/appcast.xml</string>
-    <!-- Before a production release, add SUPublicEDKey generated for the release channel.
-         Keeping a placeholder inside a <string> makes this plist invalid. -->
+    <!-- SUPublicEDKey: вшивается автоматически release.sh из публичного EdDSA-ключа
+         (переменная SUPUBLIC_ED_KEY или PUBLIC_KEY в SPARKLE_ED_KEY_FILE) ПОСЛЕ сборки,
+         непосредственно в собранный бандл, с последующей переподписью. Не задавайте
+         здесь вручную — оставьте plist валидным без ключа до сборки релиза. -->
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUHasLaunchedBefore</key>

@@ -117,11 +117,17 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
     // Авто-ответ «кулеры на максимум» — сериализован НА УРОВНЕ ДВИЖКА (не per-rule): один захват профиля до
     // форса, восстановление только когда отпустило ПОСЛЕДНЕЕ форсящее правило. Иначе multi-rule/fan-auto/ручная
     // смена профиля затирали бы захват (см. ревью). `boostKinds` — типы с активным форсом.
+    //
+    // Threading: эти поля мутируются из evaluate()/cross() (вызывается из tick() на main) и из
+    // onRulesChanged() (UI-хендлеры на main). Потеря capture boostSaved оставила бы кулеры на Fnmax.
+    // Методы-мутаторы предназначены для вызова на main; lock страхует от реентрантности через
+    // notification-callback и будущих off-main вызовов.
+    private let boostLock = NSLock()
     private var boostKinds: Set<AlertKind> = []
     private var boostSaved: String? = nil
     private static let boostID = "turbo"                 // транзиент-профиль форса (демон клампит к Fnmax)
     /// Активен ли аварийный форс кулеров — чтобы авто-по-источнику его не перебивала.
-    var isBoostActive: Bool { !boostKinds.isEmpty }
+    var isBoostActive: Bool { boostLock.lock(); defer { boostLock.unlock() }; return !boostKinds.isEmpty }
 
     /// Ставится делегатом, чтобы баннеры показывались даже когда приложение «активно»
     /// (агент в строке меню фронтом почти не бывает, но подстрахуемся).
@@ -259,17 +265,28 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
         // пока breach'ит хоть одно; восстановление — когда отпустило ПОСЛЕДНЕЕ. Откат и при потере Pro
         // (revert вне isPro-гейта). Safety целиком в демоне (клампит к Fnmax, санитайз, аренда).
         if rule.action == .fansMax, FanController.daemonInstalled {
+            // Снимаем/добавляем вид под локом; I/O профиля — вне локa, чтобы не держать его через apply.
+            boostLock.lock()
             let boosting = boostKinds.contains(rule.kind)
-            if !boosting, st.streak >= minStreak, Licensing.shared.isPro {
+            let isPro = Licensing.shared.isPro
+            var actionToApply: String? = nil          // Self.boostID — начать форс
+            var shouldEndBoost = false                // восстановить профиль
+            if !boosting, st.streak >= minStreak, isPro {
                 if boostKinds.isEmpty {                                     // первый форс — захват ДО действия
                     boostSaved = SettingsStore.activeFanProfileName
-                    FanController.applyProfileHeadless(named: Self.boostID)
+                    actionToApply = Self.boostID
                 }
                 boostKinds.insert(rule.kind)
-            } else if boosting, released || !Licensing.shared.isPro {       // отпустило ИЛИ потеряли Pro
+            } else if boosting, released || !isPro {       // отпустило ИЛИ потеряли Pro
                 boostKinds.remove(rule.kind)
-                if boostKinds.isEmpty { endBoost() }                       // последний — восстановление
+                shouldEndBoost = boostKinds.isEmpty
             }
+            boostLock.unlock()
+
+            if let profile = actionToApply {
+                FanController.applyProfileHeadless(named: profile)
+            }
+            if shouldEndBoost { endBoost() }                       // последний — восстановление
         }
 
         if st.streak >= minStreak && st.armed {
@@ -292,23 +309,33 @@ final class AlertsEngine: NSObject, UNUserNotificationCenterDelegate {
     func onRulesChanged() {
         let active = Set(SettingsStore.alertRules.filter { $0.on && $0.action == .fansMax }.map { $0.kind })
         let master = SettingsStore.alertsEnabled
+        boostLock.lock()
         let drop = boostKinds.filter { !master || !active.contains($0) }
-        guard !drop.isEmpty else { return }
+        guard !drop.isEmpty else { boostLock.unlock(); return }
         boostKinds.subtract(drop)
-        if boostKinds.isEmpty { endBoost() }
+        let shouldEndBoost = boostKinds.isEmpty
+        boostLock.unlock()
+        if shouldEndBoost { endBoost() }
     }
 
     /// Снять форс: восстановить профиль. Только если он ВСЁ ЕЩЁ «наш turbo» — чужую смену (ручную/авто)
     /// во время форса НЕ затираем. При активной авто-по-источнику возвращаем профиль ТЕКУЩЕГО источника
     /// (а не устаревший захват), иначе — захваченный до форса.
+    ///
+    /// check-then-apply выполняется ПОД boostLock целиком: иначе между `guard active ==
+    /// turbo` и `applyProfileHeadless` (который пишет active) могла вписаться ручная смена
+    /// профиля, и endBoost перезаписал бы выбор пользователя.
     private func endBoost() {
-        defer { boostSaved = nil }
+        boostLock.lock()
+        defer { boostLock.unlock() }
+        let saved = boostSaved
+        boostSaved = nil
         guard SettingsStore.activeFanProfileName == Self.boostID else { return }   // кто-то сменил профиль сам
         if SettingsStore.fanAutoBySource, Licensing.shared.isPro {
             let ext = BatteryReader.read()?.external ?? true
             FanController.applyProfileHeadless(named: ext ? SettingsStore.fanProfileAC : SettingsStore.fanProfileBattery)
         } else {
-            FanController.applyProfileHeadless(named: boostSaved ?? "auto")
+            FanController.applyProfileHeadless(named: saved ?? "auto")
         }
     }
 

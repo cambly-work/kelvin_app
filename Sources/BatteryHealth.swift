@@ -20,7 +20,7 @@ enum BatteryHealth {
 
     static func analyze(battery: BatteryInfo?, healthSeries s: [(ts: Int64, v: Double)]) -> Insight {
         let present = battery?.present ?? false
-        let health: Double? = (present && (battery?.health ?? 0) > 1) ? battery?.health : nil
+        let health: Double? = (present && (battery?.health ?? 0) > 1) ? battery?.displayHealth : nil
         let cycles: Int? = present ? battery?.cycleCount : nil
         let rated = battery?.ratedCycles
 
@@ -35,7 +35,7 @@ enum BatteryHealth {
                 // линейная регрессия: x — дни от начала, y — % здоровья
                 let n = Double(s.count)
                 let xs = s.map { Double($0.ts - t0) / 86_400 }
-                let ys = s.map { $0.v }
+                let ys = s.map { max(0, min(100, $0.v)) }
                 let sx = xs.reduce(0, +), sy = ys.reduce(0, +)
                 let sxx = zip(xs, xs).reduce(0.0) { $0 + $1.0 * $1.1 }
                 let sxy = zip(xs, ys).reduce(0.0) { $0 + $1.0 * $1.1 }

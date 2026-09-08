@@ -252,11 +252,11 @@ final class CrashBreadcrumbStore {
                 entries.removeFirst(entries.count - maxEntries)
             }
         } catch {
-            print("Failed to load breadcrumbs: \(error)")
+            Log.app.error("Failed to load breadcrumbs: \(error.localizedDescription, privacy: .public)")
             entries = []
         }
     }
-    
+
     private func save() {
         do {
             let encoder = JSONEncoder()
@@ -265,7 +265,7 @@ final class CrashBreadcrumbStore {
             let data = try encoder.encode(entries)
             try data.write(to: storageURL)
         } catch {
-            print("Failed to save breadcrumbs: \(error)")
+            Log.app.error("Failed to save breadcrumbs: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

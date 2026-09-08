@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ставит root-демон powermetrics для разбивки CPU/GPU/DRAM. Запускать через sudo.
-set -e
+set -euo pipefail
 if [ "$(id -u)" != "0" ]; then
     echo "Запусти через sudo:  sudo \"$0\"" ; exit 1
 fi
@@ -18,18 +18,36 @@ rm -f "$OLD_PLIST"
 rm -rf "/Library/Application Support/BatteryMeter"
 
 echo "→ Копирую демон в $SUPPORT"
+# Защита от symlink-атаки: отказ, если SUPPORT — символическая ссылка.
+if [ -L "$SUPPORT" ]; then
+    echo "✗ $SUPPORT — символическая ссылка. Установка отменена (потенциальная атака)." >&2
+    exit 1
+fi
 mkdir -p "$SUPPORT"
-cp "$SRC/kelvin-powerd.sh" "$SUPPORT/kelvin-powerd.sh"
-chown root:wheel "$SUPPORT/kelvin-powerd.sh"
-chmod 755 "$SUPPORT/kelvin-powerd.sh"
-printf '%s\n' "1" > "$SUPPORT/kelvin-powerd.sh.version"
-chown root:wheel "$SUPPORT/kelvin-powerd.sh.version"
-chmod 644 "$SUPPORT/kelvin-powerd.sh.version"
+# mktemp -d внутри root-owned каталога: непредсказуемые временные пути.
+TMPDIR_KELVIN=$(mktemp -d "$SUPPORT/.kelvin-install.XXXXXX") || { echo "✗ mktemp не удалось" >&2; exit 1; }
+trap 'rm -rf "$TMPDIR_KELVIN"' EXIT
+
+# Атомарная установка: временный файл → права/владелец → mv.
+cp "$SRC/kelvin-powerd.sh" "$TMPDIR_KELVIN/kelvin-powerd.sh"
+chown root:wheel "$TMPDIR_KELVIN/kelvin-powerd.sh"
+chmod 755 "$TMPDIR_KELVIN/kelvin-powerd.sh"
+mv -f "$TMPDIR_KELVIN/kelvin-powerd.sh" "$SUPPORT/kelvin-powerd.sh"
+
+printf '%s\n' "1" > "$TMPDIR_KELVIN/kelvin-powerd.sh.version"
+chown root:wheel "$TMPDIR_KELVIN/kelvin-powerd.sh.version"
+chmod 644 "$TMPDIR_KELVIN/kelvin-powerd.sh.version"
+mv -f "$TMPDIR_KELVIN/kelvin-powerd.sh.version" "$SUPPORT/kelvin-powerd.sh.version"
 
 echo "→ Устанавливаю LaunchDaemon"
-cp "$SRC/com.trykelvin.kelvin.powerd.plist" "$PLIST"
-chown root:wheel "$PLIST"
-chmod 644 "$PLIST"
+cp "$SRC/com.trykelvin.kelvin.powerd.plist" "$TMPDIR_KELVIN/com.trykelvin.kelvin.powerd.plist"
+if ! plutil -lint "$TMPDIR_KELVIN/com.trykelvin.kelvin.powerd.plist" >/dev/null 2>&1; then
+    echo "✗ plist невалиден — установка отменена." >&2
+    exit 1
+fi
+chown root:wheel "$TMPDIR_KELVIN/com.trykelvin.kelvin.powerd.plist"
+chmod 644 "$TMPDIR_KELVIN/com.trykelvin.kelvin.powerd.plist"
+mv -f "$TMPDIR_KELVIN/com.trykelvin.kelvin.powerd.plist" "$PLIST"
 
 echo "→ Перезапускаю демон"
 launchctl bootout system/com.trykelvin.kelvin.powerd 2>/dev/null || true

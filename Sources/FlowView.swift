@@ -24,12 +24,11 @@ final class FlowView: NSView, NSViewToolTipOwner {
         let oldFlow = effectiveBatteryFlow
 
         self.snapshot = snapshot
+        self.components = components ?? ComponentPower()
         self.hasBattery = hasBattery
         self.batteryCharge = batteryCharge
         externalPowerOverride = externalPower
         batteryChargingOverride = batteryCharging
-        _ = components // API совместим; component power не участвует в presentation.
-
         needsLayout = true
         layoutSubtreeIfNeeded()
         refresh(animated: hasPresentedData)
@@ -73,6 +72,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
     // MARK: - State
 
     private var snapshot = EnergySnapshot()
+    private var components = ComponentPower()
     private var hasBattery = true
     private var batteryCharge: Int?
     private var externalPowerOverride: Bool?
@@ -106,6 +106,13 @@ final class FlowView: NSView, NSViewToolTipOwner {
     private let measurementSurface = CALayer()
     private let measurementTag = CATextLayer()
     private let trendTag = CATextLayer()
+
+    // Постоянный инспектор под схемой: наведение даёт быстрый разбор, клик фиксирует выбранный узел.
+    // В отличие от прежней однострочной подписи вне canvas он остаётся частью причинной картинки.
+    private let detailSurface = CALayer()
+    private let detailIcon = CALayer()
+    private let detailTitle = CATextLayer()
+    private let detailBody = CATextLayer()
 
     // MARK: - Energy scene layers
 
@@ -163,7 +170,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
         commonInit()
     }
 
-    override var intrinsicContentSize: NSSize { NSSize(width: 316, height: 188) }
+    override var intrinsicContentSize: NSSize { NSSize(width: 316, height: 244) }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { statusTitleText }
 
@@ -190,13 +197,13 @@ final class FlowView: NSView, NSViewToolTipOwner {
         sourceOrb.addSublayer(sourceIcon)
         heroSurface.addSublayer(sourceOrb)
 
-        configureText(statusTitle, size: 17, weight: .semibold, color: .labelColor)
+        configureText(statusTitle, size: 15.5, weight: .semibold, color: .labelColor)
         configureText(statusSubtitle, size: 10.5, weight: .regular, color: .secondaryLabelColor)
-        configureText(measurementTag, size: 8.5, weight: .semibold, color: .secondaryLabelColor)
+        configureText(measurementTag, size: 16, weight: .semibold, color: .labelColor, mono: true)
         measurementTag.alignmentMode = .center
-        configureText(trendTag, size: 9, weight: .medium, color: .tertiaryLabelColor)
-        trendTag.alignmentMode = .right
-        measurementSurface.cornerRadius = 8
+        configureText(trendTag, size: 7.5, weight: .semibold, color: .tertiaryLabelColor)
+        trendTag.alignmentMode = .center
+        measurementSurface.cornerRadius = 10
         measurementSurface.cornerCurve = .continuous
 
         for item in [statusTitle, statusSubtitle, measurementSurface, measurementTag, trendTag] {
@@ -250,6 +257,18 @@ final class FlowView: NSView, NSViewToolTipOwner {
             layer?.addSublayer(node.surface)
         }
 
+        detailSurface.cornerRadius = 12
+        detailSurface.cornerCurve = .continuous
+        detailSurface.masksToBounds = true
+        detailIcon.contentsGravity = .resizeAspect
+        configureText(detailTitle, size: 10.5, weight: .semibold, color: .labelColor)
+        configureText(detailBody, size: 9, weight: .regular, color: .secondaryLabelColor)
+        detailBody.truncationMode = .end
+        detailSurface.addSublayer(detailIcon)
+        detailSurface.addSublayer(detailTitle)
+        detailSurface.addSublayer(detailBody)
+        layer?.addSublayer(detailSurface)
+
         refresh(animated: false)
         updateContentsScale()
     }
@@ -280,21 +299,27 @@ final class FlowView: NSView, NSViewToolTipOwner {
 
     override func layout() {
         super.layout()
-        guard bounds.width > 240, bounds.height > 160 else { return }
+        guard bounds.width > 240, bounds.height > 220 else { return }
 
         let heroRect = rectFromTop(x: 0, top: 0, width: bounds.width, height: 70)
         let sceneRect = rectFromTop(x: 0, top: 78, width: bounds.width, height: 110)
+        let detailRect = rectFromTop(x: 0, top: 196, width: bounds.width, height: 48)
         heroSurface.frame = heroRect
         sceneSurface.frame = sceneRect
+        detailSurface.frame = detailRect
 
         sourceHalo.frame = CGRect(x: 3, y: 2, width: 66, height: 66)
         sourceOrb.frame = CGRect(x: 12, y: 13, width: 44, height: 44)
         sourceIcon.frame = CGRect(x: 11, y: 11, width: 22, height: 22)
-        statusTitle.frame = CGRect(x: 70, y: 39, width: 160, height: 23)
-        statusSubtitle.frame = CGRect(x: 70, y: 17, width: heroRect.width - 178, height: 17)
-        measurementSurface.frame = CGRect(x: heroRect.width - 74, y: 42, width: 62, height: 18)
-        measurementTag.frame = measurementSurface.frame
-        trendTag.frame = CGRect(x: heroRect.width - 104, y: 18, width: 92, height: 13)
+        statusTitle.frame = CGRect(x: 70, y: 39, width: heroRect.width - 166, height: 21)
+        statusSubtitle.frame = CGRect(x: 70, y: 17, width: heroRect.width - 166, height: 16)
+        measurementSurface.frame = CGRect(x: heroRect.width - 88, y: 13, width: 76, height: 44)
+        measurementTag.frame = CGRect(x: measurementSurface.frame.minX + 4,
+                                      y: measurementSurface.frame.minY + 18,
+                                      width: measurementSurface.frame.width - 8, height: 20)
+        trendTag.frame = CGRect(x: measurementSurface.frame.minX + 3,
+                                y: measurementSurface.frame.minY + 6,
+                                width: measurementSurface.frame.width - 6, height: 10)
 
         sceneTitle.frame = CGRect(x: 12, y: sceneRect.maxY - 22, width: 98, height: 13)
         sceneStatus.frame = CGRect(x: sceneRect.maxX - 194, y: sceneRect.maxY - 22, width: 182, height: 13)
@@ -307,6 +332,10 @@ final class FlowView: NSView, NSViewToolTipOwner {
         layoutNode(systemNode)
         layoutNode(batteryNode)
         layoutStreams()
+
+        detailIcon.frame = CGRect(x: 12, y: 14, width: 20, height: 20)
+        detailTitle.frame = CGRect(x: 42, y: 26, width: detailRect.width - 54, height: 14)
+        detailBody.frame = CGRect(x: 42, y: 8, width: detailRect.width - 54, height: 13)
 
         regions = [
             Region(key: .hero, rect: heroRect, surface: heroSurface),
@@ -418,12 +447,12 @@ final class FlowView: NSView, NSViewToolTipOwner {
         statusSubtitle.string = statusSubtitleText
         statusTitle.foregroundColor = resolved(.labelColor).cgColor
         statusSubtitle.foregroundColor = resolved(.secondaryLabelColor).cgColor
-        measurementTag.string = measurementText
+        measurementTag.string = displayedWatts.map { String(format: L("%.0f Вт"), $0) } ?? "—"
         measurementSurface.backgroundColor = measurementColor.withAlphaComponent(isDark ? 0.12 : 0.08).cgColor
         measurementSurface.borderWidth = 0.5
         measurementSurface.borderColor = measurementColor.withAlphaComponent(0.24).cgColor
-        measurementTag.foregroundColor = measurementColor.cgColor
-        trendTag.string = trendWord
+        measurementTag.foregroundColor = resolved(displayedWatts == nil ? .tertiaryLabelColor : .labelColor).cgColor
+        trendTag.string = trendWord.uppercased()
         trendTag.foregroundColor = trendColor.cgColor
 
         sceneSurface.colors = [
@@ -441,6 +470,10 @@ final class FlowView: NSView, NSViewToolTipOwner {
 
         refreshNodes()
         refreshStreams()
+        detailSurface.backgroundColor = surfaceColor(strength: 0.035).cgColor
+        detailSurface.borderWidth = 0.5
+        detailSurface.borderColor = rimColor.cgColor
+        refreshDetailPanel()
         CATransaction.commit()
 
         needsLayout = true
@@ -454,7 +487,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
             adapterNode,
             symbol: "powerplug.fill",
             caption: L("Адаптер"),
-            value: adapterValue,
+            value: adapterNodeValue,
             tint: adapterActive ? stateAccent : resolved(.tertiaryLabelColor),
             active: adapterActive
         )
@@ -463,18 +496,17 @@ final class FlowView: NSView, NSViewToolTipOwner {
         setNode(
             systemNode,
             symbol: "macbook",
-            caption: L("Система"),
+            caption: "Mac",
             value: systemValue,
             tint: stateAccent,
             active: displayedWatts != nil
         )
 
-        let batteryValue = batteryCharge.map { "\($0)%" } ?? "—"
         setNode(
             batteryNode,
             symbol: batterySymbol,
-            caption: hasBattery ? batteryShortState : L("Без батареи"),
-            value: batteryValue,
+            caption: hasBattery ? batteryNodeCaption : L("Без батареи"),
+            value: batteryTransferText,
             tint: batteryAccent,
             active: hasBattery
         )
@@ -519,6 +551,86 @@ final class FlowView: NSView, NSViewToolTipOwner {
         sourceParticle.fillColor = stateAccent.cgColor
         batteryParticle.fillColor = batteryAccent.cgColor
         layoutStreams()
+    }
+
+    /// Инспектор переводит схему из декоративной в объясняющую: пользователь видит не только
+    /// направление, но и конкретный баланс. Наведение временно показывает узел, клик фиксирует его.
+    private func refreshDetailPanel() {
+        let key = hoveredRegion ?? selectedRegion ?? .scene
+        let model = detailModel(for: key)
+        detailTitle.string = model.title
+        detailBody.string = model.body
+        detailTitle.foregroundColor = resolved(.labelColor).cgColor
+        detailBody.foregroundColor = resolved(.secondaryLabelColor).cgColor
+        detailIcon.contents = symbolImage(model.symbol, color: model.tint, pointSize: 15)
+    }
+
+    private func detailModel(for key: RegionKey) -> (title: String, body: String, symbol: String, tint: NSColor) {
+        switch key {
+        case .hero, .scene:
+            return (L("Поток сейчас"), balanceLine, "arrow.left.arrow.right", stateAccent)
+
+        case .source:
+            guard effectiveExternalPower else {
+                return (L("Адаптер не подключён"), L("Mac работает от батареи"), "powerplug.fill", resolved(.tertiaryLabelColor))
+            }
+            let live = adapterContributionWatts ?? max(0, snapshot.adapterWatts)
+            if let rated = snapshot.adapterRatedWatts, rated > 0 {
+                let reserve = max(0, Double(rated) - live)
+                return (
+                    String(format: L("Адаптер %d Вт"), rated),
+                    String(format: L("сейчас %.0f Вт · запас %.0f Вт"), live, reserve),
+                    "powerplug.fill", stateAccent
+                )
+            }
+            return (L("Адаптер подключён"), String(format: L("сейчас отдаёт %.0f Вт"), live), "powerplug.fill", stateAccent)
+
+        case .system:
+            let watts = displayedWatts.map { String(format: L("%.0f Вт"), $0) } ?? "—"
+            return (
+                String(format: L("Mac потребляет %@"), watts),
+                componentLine,
+                "macbook", stateAccent
+            )
+
+        case .battery:
+            guard hasBattery else {
+                return (L("Батарея не обнаружена"), L("Внешнее питание"), "battery.0", resolved(.tertiaryLabelColor))
+            }
+            return (batteryDetailTitle, batteryDetailBody, batterySymbol, batteryAccent)
+        }
+    }
+
+    private var componentLine: String {
+        var parts: [String] = []
+        if components.fresh {
+            if let cpu = components.cpu { parts.append(String(format: L("CPU %.1f Вт"), cpu)) }
+            if let gpu = components.gpu { parts.append(String(format: L("GPU %.1f Вт"), gpu)) }
+            if let dram = components.dram { parts.append(String(format: L("DRAM %.1f Вт"), dram)) }
+            if parts.isEmpty, let package = components.package { parts.append(String(format: L("Package %.1f Вт"), package)) }
+        }
+        if !parts.isEmpty { return parts.joined(separator: " · ") }
+        return measurementIsDirect ? L("Прямой датчик полного потребления") : L("Оценка по источникам питания")
+    }
+
+    private var batteryDetailTitle: String {
+        switch effectiveBatteryFlow {
+        case .charging: return L("Батарея заряжается")
+        case .discharging: return effectiveExternalPower ? L("Батарея помогает адаптеру") : L("Батарея питает Mac")
+        case .idle: return batteryCharge == 100 ? L("Батарея заряжена") : L("Батарея в резерве")
+        }
+    }
+
+    private var batteryDetailBody: String {
+        let percent = batteryCharge.map { "\($0)%" } ?? "—"
+        switch effectiveBatteryFlow {
+        case .charging:
+            return percent + " · " + String(format: L("в батарею %.1f Вт"), effectiveBatteryWatts)
+        case .discharging:
+            return percent + " · " + String(format: L("из батареи %.1f Вт"), effectiveBatteryWatts)
+        case .idle:
+            return percent + " · " + L("поток 0 Вт · анимация остановлена")
+        }
     }
 
     // MARK: - Flow animation
@@ -622,6 +734,10 @@ final class FlowView: NSView, NSViewToolTipOwner {
     }
 
     private func emitDetail() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        refreshDetailPanel()
+        CATransaction.commit()
         guard let key = hoveredRegion ?? selectedRegion else {
             detailSink?(nil)
             return
@@ -684,10 +800,42 @@ final class FlowView: NSView, NSViewToolTipOwner {
     private var effectiveExternalPower: Bool { externalPowerOverride ?? snapshot.plugged }
 
     private var effectiveBatteryFlow: BatteryFlow {
-        if snapshot.battFlow != .idle { return snapshot.battFlow }
+        guard hasBattery else { return .idle }
+        // SMC — авторитетный источник направления. Старый fallback по `IsCharging` превращал
+        // завершённый заряд с нулевым током в движущийся поток. Меньше 0.35 Вт считаем покоем:
+        // это ниже полезной точности и убирает дрожание/ложные частицы около нуля.
+        if snapshot.hasSMC {
+            guard snapshot.battWatts.isFinite, snapshot.battWatts >= 0.35 else { return .idle }
+            if batteryCharge == 100, snapshot.battFlow == .charging {
+                return .idle
+            }
+            return snapshot.battFlow
+        }
+        // Без SMC направление можно лишь оценить. На батарее источник однозначен; на адаптере
+        // разрешаем заряд только по системному флагу, но без числовой мощности не рисуем её как баланс.
+        if !effectiveExternalPower { return .discharging }
         if batteryChargingOverride == true { return .charging }
-        if hasBattery, !effectiveExternalPower { return .discharging }
         return .idle
+    }
+
+    private var effectiveBatteryWatts: Double {
+        guard effectiveBatteryFlow != .idle, snapshot.battWatts.isFinite else { return 0 }
+        return max(0, snapshot.battWatts)
+    }
+
+    /// Вклад адаптера в текущий поток. PDTR и PSTR — независимые SMC-датчики с разной
+    /// калибровкой и могут давать визуально невозможный «31 → 54 Вт». Для объясняющей схемы
+    /// строим согласованный баланс от главного замера Mac и прямого потока батареи.
+    private var adapterContributionWatts: Double? {
+        guard effectiveExternalPower else { return nil }
+        guard let system = displayedWatts else {
+            return snapshot.adapterWatts > 0.1 ? snapshot.adapterWatts : nil
+        }
+        switch effectiveBatteryFlow {
+        case .charging: return system + effectiveBatteryWatts
+        case .discharging: return max(0, system - effectiveBatteryWatts)
+        case .idle: return system
+        }
     }
 
     private var displayedWatts: Double? {
@@ -711,19 +859,24 @@ final class FlowView: NSView, NSViewToolTipOwner {
 
     private var statusTitleText: String {
         guard effectiveExternalPower else { return hasBattery ? L("От батареи") : L("Питание") }
-        if hasBattery, effectiveBatteryFlow == .charging { return L("Зарядка") }
-        return L("От сети")
+        guard hasBattery else { return L("От сети") }
+        switch effectiveBatteryFlow {
+        case .charging: return L("Идёт зарядка")
+        case .discharging: return L("Сеть + батарея")
+        case .idle: return L("От сети")
+        }
     }
 
     private var statusSubtitleText: String {
-        guard effectiveExternalPower else {
-            return hasBattery ? L("Mac питается от батареи") : L("Источник питания не определён")
-        }
-        guard hasBattery else { return L("Mac питается от сети") }
+        let mac = displayedWatts.map { String(format: L("Mac %.0f Вт"), $0) } ?? "Mac —"
+        guard effectiveExternalPower else { return mac + " · " + String(format: L("из АКБ %.0f Вт"), effectiveBatteryWatts) }
+        guard hasBattery else { return mac }
         switch effectiveBatteryFlow {
-        case .charging: return L("Mac питается от адаптера")
-        case .discharging: return L("Батарея дополняет адаптер")
-        case .idle: return L("Mac питается от адаптера")
+        case .charging: return mac + " · " + String(format: L("в АКБ %.0f Вт"), effectiveBatteryWatts)
+        case .discharging: return mac + " · " + String(format: L("АКБ добавляет %.0f Вт"), effectiveBatteryWatts)
+        case .idle:
+            let charge = batteryCharge.map { "\($0)%" } ?? "—"
+            return "АКБ " + charge + " · " + L("поток 0 Вт")
         }
     }
 
@@ -731,16 +884,20 @@ final class FlowView: NSView, NSViewToolTipOwner {
         effectiveExternalPower ? "powerplug.fill" : (hasBattery ? "battery.75" : "bolt.slash.fill")
     }
 
-    private var adapterValue: String {
+    private var adapterNodeValue: String {
         guard effectiveExternalPower else { return "—" }
-        return L("От сети")
+        return adapterContributionWatts.map { String(format: L("%.0f Вт"), $0) } ?? L("От сети")
     }
 
-    private var batteryShortState: String {
+    private var batteryNodeCaption: String {
+        L("АКБ") + (batteryCharge.map { " · \($0)%" } ?? "")
+    }
+
+    private var batteryTransferText: String {
         switch effectiveBatteryFlow {
-        case .charging: return L("заряд")
-        case .discharging: return L("разряд")
-        case .idle: return L("ожидание")
+        case .charging: return String(format: L("+%.1f Вт"), effectiveBatteryWatts)
+        case .discharging: return String(format: L("−%.1f Вт"), effectiveBatteryWatts)
+        case .idle: return L("0 Вт")
         }
     }
 
@@ -756,7 +913,7 @@ final class FlowView: NSView, NSViewToolTipOwner {
         switch effectiveBatteryFlow {
         case .charging: return "battery.100.bolt"
         case .discharging: return "battery.75"
-        case .idle: return "battery.100"
+        case .idle: return (batteryCharge ?? 100) >= 95 ? "battery.100" : "battery.75"
         }
     }
 
@@ -779,6 +936,19 @@ final class FlowView: NSView, NSViewToolTipOwner {
         case .discharging: return L("Адаптер + батарея → Mac")
         case .idle: return L("Адаптер → Mac")
         }
+    }
+
+    private var balanceLine: String {
+        let mac = displayedWatts.map { String(format: L("Mac %.0f Вт"), $0) } ?? "Mac —"
+        if effectiveExternalPower {
+            let input = adapterContributionWatts.map { String(format: L("вход %.0f Вт"), $0) } ?? L("вход —")
+            switch effectiveBatteryFlow {
+            case .charging: return input + " · " + mac + " · " + String(format: L("АКБ +%.1f Вт"), effectiveBatteryWatts)
+            case .discharging: return input + " · " + mac + " · " + String(format: L("АКБ −%.1f Вт"), effectiveBatteryWatts)
+            case .idle: return input + " · " + mac + " · " + L("АКБ 0 Вт")
+            }
+        }
+        return String(format: L("АКБ %.1f Вт"), effectiveBatteryWatts) + " → " + mac
     }
 
     // MARK: - Colors and symbols
@@ -852,11 +1022,13 @@ final class FlowView: NSView, NSViewToolTipOwner {
 
     private func updateContentsScale() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let textLayers = [statusTitle, statusSubtitle, measurementTag, trendTag, sceneTitle, sceneStatus]
+        let textLayers = [statusTitle, statusSubtitle, measurementTag, trendTag, sceneTitle, sceneStatus,
+                          detailTitle, detailBody]
             + nodes.flatMap { [$0.caption, $0.value] }
         textLayers.forEach { $0.contentsScale = scale }
         let allLayers: [CALayer] = [
             heroSurface, sourceHalo, sourceOrb, sourceIcon, measurementSurface, sceneSurface,
+            detailSurface, detailIcon,
             sourceStreamBase, sourceStreamActive, batteryStreamBase, batteryStreamActive,
             sourceArrow, batteryArrow, sourceParticle, batteryParticle,
         ]

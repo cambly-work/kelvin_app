@@ -33,6 +33,22 @@ enum PrivilegedServiceManager {
 
     /// Проверить состояние с учётом версии macOS.
     private static func resolveState() -> PrivilegedServiceState {
+        // Визуальный regression hook: позволяет BM_SNAP проверить именно установленный
+        // GPU-selector, не регистрируя root-сервис на машине сборки. В обычном запуске
+        // переменная BM_SNAP отсутствует, поэтому production-state не подменяется.
+        // DEBUG-only: иначе любой, кто может задать
+        // переменные окружения запуска, заставит UI показывать сервис «здоровым».
+        #if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        if environment["BM_SNAP"] != nil, environment["BM_GPU_READY"] != nil {
+            return .healthy(PrivilegedServiceInfo(
+                serviceVersion: "snapshot",
+                protocolVersion: PrivilegedProtocolVersion.current,
+                capabilities: [.gpuSwitching],
+                health: .healthy
+            ))
+        }
+        #endif
         if #available(macOS 13.0, *) {
             return smAppBasedState()
         } else {
@@ -239,12 +255,11 @@ enum PrivilegedServiceManager {
         case .enabled:
             // SMAppService keeps the executable in the signed app bundle.
             guard bundledBinaryExists() else { return .repairNeeded }
-            return .healthy(PrivilegedServiceInfo(
-                serviceVersion: readBundledVersion(),
-                protocolVersion: PrivilegedProtocolVersion.current,
-                capabilities: [.gpuSwitching],
-                health: isBundledVersionCurrent() ? .healthy : .degraded
-            ))
+            // НЕ считаем сервис здоровым только по SMAppService.status == .enabled:
+            // это подтверждает регистрацию/разрешение, но не то, что процесс стартовал
+            // и отвечает по XPC. Возвращаем .starting — GPUController подтвердит
+            // живость через bounded XPC-handshake и выставит .healthy.
+            return .starting
         case .requiresApproval:
             return .approvalRequired
         case .notFound:

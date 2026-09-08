@@ -26,6 +26,9 @@ struct BatteryInfo {
 
     var capacityWh: Double { Double(currentCapacity) * voltage / 1000.0 }
     var maxWh: Double { Double(maxCapacity) * voltage / 1000.0 }
+    /// Пользовательская шкала здоровья батареи — 0...100%. Сырой коэффициент ёмкости может быть
+    /// немного выше 100 у новой/перекалиброванной АКБ; это диагностическая деталь, не состояние UI.
+    var displayHealth: Double { max(0, min(100, health)) }
 
     /// «Нет батареи» — для десктопов: строка меню переходит в живой CPU-режим, не застывает.
     static let absent = BatteryInfo(charge: 0, voltage: 0, amperage: 0, watts: 0, charging: false,
