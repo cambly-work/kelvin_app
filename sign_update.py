@@ -5,7 +5,7 @@
     python3 sign_update.py <path-to-update-archive> <private-key-base64>
 
 Пример:
-    python3 sign_update.py Kelvin-1.0.0.zip AnrH0DpRa4DrD50GQG4dcA0a37LKeHVH7kJA6GYpsKI=
+    python3 sign_update.py Kelvin-1.0.0.zip '<private-key-base64>'
 
 Результат выводится в stdout в формате:
     sparkle:edSignature="<signature>" length="<size>"
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Использование: python3 sign_update.py <archive-path> <private-key-base64>", file=sys.stderr)
         print("\nПример:")
-        print("  python3 sign_update.py Kelvin-1.0.0.zip AnrH0DpRa4DrD50GQG4dcA0a37LKeHVH7kJA6GYpsKI=")
+        print("  python3 sign_update.py Kelvin-1.0.0.zip '<private-key-base64>'")
         sys.exit(1)
     
     archive_path = sys.argv[1]
